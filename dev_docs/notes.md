@@ -1,0 +1,7 @@
+# Notes & Lessons (agent continuous memory)
+
+- 2026-08-10: `design.md` + `plan.md` are canon, confirmed by Scott via Q&A. Hard constraints that shaped them (do not drift): **single frozen late afternoon** (no time system of any kind), interior-only (no EVA), true 0.38 g everywhere, robots are the only moving life, **vegetation sparse and Mars-feeling — Scott explicitly does not want a garden/Earth-like park**, no open water (pipes + greenhouse mist only), environmental storytelling only, ambient sound only (no music).
+- Stack precedent is **SeaPark** (`~/Documents/Projects/Node/SeaPark/`): vanilla TS + three/webgpu + TSL + rapier3d-compat, system-registry runtime, `parkPlan.ts` as single source of truth, `?view=` postcard cameras + `?pass=` isolation as the validation harness. Geometry craft precedent is **friends** (`~/Documents/Projects/Node/friends/`). Read both before building similar systems.
+- Scott's standing preference (stated for SeaPark, applies here): make bold, confident aesthetic choices rather than asking about art details; build a sophisticated full world-system, never demo-scale. Ask before installing packages or degrading to inferior fallbacks.
+- The fixed sun is the project's core rendering advantage: precompute/bake everything static (sky, IBL, shadow clipmaps) and treat the dome-lattice shadow-net as an analytic projected function, not a shadow map (plan §4/§6).
+- Starter repo still contains React (to be stripped in S0 per plan §18 approval).
