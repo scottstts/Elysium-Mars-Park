@@ -14,11 +14,19 @@ import {
 import { MeshBasicNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu'
 import type { Node } from 'three/webgpu'
 import {
+  dFdx,
+  dFdy,
+  faceDirection,
   float,
   mix,
   mx_noise_float,
+  mx_worley_noise_float,
+  normalView,
   normalWorld,
+  oneMinus,
+  positionView,
   positionWorld,
+  sin,
   smoothstep,
   uniform,
   uv,
@@ -30,20 +38,32 @@ import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import type { RenderPipelineSystem } from '../render/pipeline'
 import { applyMarsAerialPerspective } from './marsAerialPerspective'
-import { MESA_SITES, exteriorHeight } from './terrainHeight'
+import { TERRAIN_INNER_RADIUS, exteriorHeight, mountainMask } from './terrainHeight'
 
 /**
- * Everything beyond the glass (plan §5): view-only terrain rings to ~11 km,
- * hero mesa meshes west, boulder scatter, two drifting dust devils, and the
- * screen-space Mars aerial medium wired into the pipeline. No colliders —
+ * Everything beyond the glass: the valley floor and its mountain ring out to
+ * ~13.5 km, boulder fields and mountain-foot talus, drifting dust devils, and
+ * the screen-space Mars aerial medium wired into the pipeline. No colliders —
  * the dome wall is the physical boundary.
+ *
+ * The terrain is ONE radially-graded polar mesh, not a stack of concentric
+ * ring meshes. Vertex density follows a spacing schedule (9 m at the dome
+ * apron, 17 m through the mountain band, 270 m at the horizon), which is the
+ * same LOD idea without any ring-to-ring seams to crack: every row shares a
+ * radius with its neighbours by construction, the angular column count is
+ * constant, and the angular seam is closed by index wrap rather than by a
+ * duplicated column.
+ *
+ * Normals come from that same grid (one height evaluation per vertex instead
+ * of five) — the field is expensive enough that finite-differencing each
+ * vertex independently would cost seconds of boot time.
  */
 export class ExteriorSystem implements GameSystem {
   readonly id = 'exterior'
   private readonly group = new Group()
   private readonly simTime = uniform(0)
   private readonly devils: Mesh[] = []
-  private readonly devilSeeds: { baseX: number; baseZ: number; span: number; speed: number }[] = []
+  private readonly devilSeeds: DustDevilSeed[] = []
   private readonly pipeline: RenderPipelineSystem
 
   constructor(pipeline: RenderPipelineSystem) {
@@ -51,7 +71,7 @@ export class ExteriorSystem implements GameSystem {
   }
 
   init(ctx: GameContext): void {
-    const { scene, camera, quality } = ctx
+    const { scene, camera } = ctx
 
     // ---- Aerial medium: one continuous dust atmosphere, screen-space.
     const projectionInverse = uniform(camera.projectionMatrixInverse)
@@ -73,73 +93,28 @@ export class ExteriorSystem implements GameSystem {
       return vec4(color, input.a)
     }
 
-    // ---- Shared regolith material.
-    const regolith = createRegolithMaterial()
+    // ---- The valley: one graded polar mesh from the park floor edge out.
+    const terrain = new Mesh(buildValleyGeometry(), createValleyMaterial())
+    terrain.receiveShadow = false
+    terrain.castShadow = false
+    // Everything is inside the mesh's own radius, so the bounding sphere test
+    // is worthless and the sort key is meaningless — draw it first, always.
+    terrain.frustumCulled = false
+    terrain.renderOrder = -50
+    this.group.add(terrain)
 
-    // ---- Terrain rings (finer near the glass, coarser to the horizon).
-    const rings: Array<[number, number, number, number]> = [
-      [252, 1300, 256, 96],
-      [1300, 4600, 256, 72],
-      [4600, 11200, 224, 56],
-    ]
-    for (const [inner, outer, angular, radial] of rings) {
-      const mesh = new Mesh(buildRingGeometry(inner, outer, angular, radial), regolith)
-      mesh.receiveShadow = false
-      mesh.castShadow = false
-      this.group.add(mesh)
-    }
+    // ---- Boulder fields: valley floor scatter + talus at the mountain feet.
+    this.buildBoulders(ctx)
 
-    // ---- Hero mesas (silhouettes matter; ring sampling is too coarse there).
-    const mesaMaterial = createMesaMaterial()
-    for (const site of MESA_SITES) {
-      const mesa = new Mesh(buildMesaGeometry(site), mesaMaterial)
-      mesa.position.set(site.x, 0, site.z)
-      this.group.add(mesa)
-    }
-
-    // ---- Boulder scatter: three sculpted variants, instanced.
-    const rng = ctx.rng.fork('exterior/boulders')
-    const boulderCount = Math.round(2400 * quality.params.scatterDensity)
-    const variants = [0, 1, 2].map((v) => deformedRock(1 + v))
-    const rockMaterial = createRockMaterial()
-    const perVariant = Math.ceil(boulderCount / variants.length)
-    const matrix = new Matrix4()
-    const position = new Vector3()
-    const rotation = new Quaternion()
-    const scale = new Vector3()
-    const axis = new Vector3()
-    for (const variantGeometry of variants) {
-      const instanced = new InstancedMesh(variantGeometry, rockMaterial, perVariant)
-      for (let i = 0; i < perVariant; i++) {
-        // Denser near the dome, thinning outward; keep the south tram
-        // corridor clear (the connector tube runs due south, S9).
-        let x: number
-        let z: number
-        for (;;) {
-          const t = rng.float()
-          const r = 300 + 1350 * t * t
-          const angle = rng.float() * Math.PI * 2
-          x = Math.cos(angle) * r
-          z = Math.sin(angle) * r
-          if (!(Math.abs(x) < 40 && z > 240 && z < 1000)) break
-        }
-        const s = 0.38 + rng.float() * rng.float() * 2.5
-        position.set(x, exteriorHeight(x, z) - s * 0.32, z)
-        axis.set(rng.float() - 0.5, rng.float() - 0.5, rng.float() - 0.5).normalize()
-        rotation.setFromAxisAngle(axis, rng.float() * Math.PI * 2)
-        scale.set(s * (0.8 + rng.float() * 0.5), s * (0.65 + rng.float() * 0.5), s)
-        matrix.compose(position, rotation, scale)
-        instanced.setMatrixAt(i, matrix)
-      }
-      instanced.instanceMatrix.needsUpdate = true
-      this.group.add(instanced)
-    }
-
-    // ---- Dust devils: the plain's only weather, far west, drifting.
-    const devilGeometry = new CylinderGeometry(34, 11, 880, 24, 32, true)
-    const devilSites = [
-      { baseX: -5600, baseZ: -400, span: 2600, speed: 4.2 },
-      { baseX: -7200, baseZ: -2100, span: 3400, speed: 3.1 },
+    // ---- Dust devils: the valley's only weather.
+    const devilGeometry = new CylinderGeometry(30, 9, 560, 20, 26, true)
+    const devilSites: DustDevilSeed[] = [
+      // Coming up the south pass, straight down the arrival sightline.
+      { baseX: -70, baseZ: 2600, driftX: 30, driftZ: -2300, span: 210, speed: 3.4, scale: 1 },
+      // Crossing the east valley floor, read against the near foothills.
+      { baseX: 980, baseZ: -1150, driftX: -520, driftZ: 2100, span: 260, speed: 2.6, scale: 0.72 },
+      // Far NW, high on the range front where it silhouettes against sky.
+      { baseX: -2500, baseZ: -2450, driftX: 1900, driftZ: 900, span: 340, speed: 4.1, scale: 1.35 },
     ]
     for (let i = 0; i < devilSites.length; i++) {
       const material = new MeshBasicNodeMaterial()
@@ -155,12 +130,11 @@ export class ExteriorSystem implements GameSystem {
       )
       // Dense skirt, wispy crown — and contrasty noise so it reads as
       // whirling dust instead of a translucent tower.
-      const column = smoothstep(0.0, 0.09, uv().y).mul(
-        smoothstep(1.0, 0.22, uv().y).pow(1.7),
-      )
+      const column = smoothstep(0.0, 0.09, uv().y).mul(oneMinus(smoothstep(0.22, 1.0, uv().y)).pow(1.7))
       const swirl01 = swirl.mul(0.5).add(0.5)
       material.opacityNode = swirl01.pow(1.9).mul(column).mul(0.3)
       const devil = new Mesh(devilGeometry, material)
+      devil.scale.setScalar(devilSites[i].scale)
       this.devils.push(devil)
       this.devilSeeds.push(devilSites[i])
       this.group.add(devil)
@@ -169,15 +143,135 @@ export class ExteriorSystem implements GameSystem {
     scene.add(this.group)
   }
 
+  /**
+   * Boulders are placed by CAUSE, not by uniform scatter: loose fields on the
+   * valley floor (clustered, so there are bare stretches to walk toward), and
+   * talus aprons wherever the mountain envelope is at its feet. The graded
+   * spaceport corridor stays swept clear.
+   */
+  private buildBoulders(ctx: GameContext): void {
+    const rng = ctx.rng.fork('exterior/boulders')
+    const density = ctx.quality.params.scatterDensity
+    const lodRadius = ctx.quality.params.exteriorDetailRadius
+    const near: number[] = []
+    const far: number[] = []
+    const push = (x: number, z: number, size: number): void => {
+      const r = Math.hypot(x, z)
+      // The apron outside the glass was cleared: only cobbles survive close
+      // in, and the block size ceiling rises with distance. Without this the
+      // dome is ringed by 6 m boulders standing 20 m from the promenade.
+      const ceiling = 0.4 + Math.max(0, r - TERRAIN_INNER_RADIUS) * 0.022
+      const capped = Math.min(size, ceiling)
+      const target = capped > 0.9 || r < lodRadius ? near : far
+      target.push(x, z, capped, rng.float(), rng.float(), rng.float(), rng.float())
+    }
+
+    const floorCount = Math.round(2600 * density)
+    for (let i = 0; i < floorCount; i++) {
+      let x = 0
+      let z = 0
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const t = rng.float()
+        const r = TERRAIN_INNER_RADIUS + 6 + 1180 * t * t
+        const angle = rng.float() * Math.PI * 2
+        x = Math.cos(angle) * r
+        z = Math.sin(angle) * r
+        // Clustered fields: bare regolith between rubble aprons.
+        const cluster = 0.5 + 0.5 * Math.sin(x * 0.0121 + z * 0.0074) * Math.cos(z * 0.0093 - x * 0.0051)
+        if (rng.float() > 0.24 + cluster * 0.86) continue
+        if (Math.abs(x) < 58 && z > 118 && z < 760) continue
+        break
+      }
+      if (Math.abs(x) < 58 && z > 118 && z < 760) continue
+      // Mostly cobbles, a rare hero block.
+      const roll = rng.float()
+      const size = roll > 0.985 ? 3.6 + rng.float() * 4.4 : 0.32 + roll * roll * 3.1
+      push(x, z, size)
+    }
+
+    // Talus: dense rubble where the mountain envelope is just lifting off the
+    // valley floor, thinning as the slope steepens into bare rock.
+    const talusCount = Math.round(3400 * density)
+    for (let i = 0; i < talusCount; i++) {
+      let x = 0
+      let z = 0
+      let placed = false
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const r = 460 + rng.float() * 2450
+        const angle = rng.float() * Math.PI * 2
+        x = Math.cos(angle) * r
+        z = Math.sin(angle) * r
+        const mask = mountainMask(x, z)
+        // Peak probability right at the foot of the slope.
+        const weight = mask < 0.02 ? 0 : Math.max(0, 1 - Math.abs(mask - 0.22) / 0.34)
+        if (rng.float() < weight) {
+          placed = true
+          break
+        }
+      }
+      if (!placed) continue
+      if (Math.abs(x) < 70 && z > 118 && z < 900) continue
+      const roll = rng.float()
+      push(x, z, 0.5 + roll * roll * 4.2)
+    }
+
+    const rockMaterial = createRockMaterial()
+    const matrix = new Matrix4()
+    const position = new Vector3()
+    const rotation = new Quaternion()
+    const scale = new Vector3()
+    const axis = new Vector3()
+    const emit = (data: number[], detail: number, variants: number): void => {
+      const count = data.length / 7
+      if (count === 0) return
+      const perVariant = Math.ceil(count / variants)
+      const meshes: InstancedMesh[] = []
+      for (let v = 0; v < variants; v++) {
+        meshes.push(new InstancedMesh(deformedRock(v + 1, detail), rockMaterial, perVariant))
+      }
+      const written = new Array<number>(variants).fill(0)
+      for (let i = 0; i < count; i++) {
+        const x = data[i * 7]
+        const z = data[i * 7 + 1]
+        const size = data[i * 7 + 2]
+        const v = i % variants
+        axis
+          .set(data[i * 7 + 3] - 0.5, data[i * 7 + 4] - 0.5, data[i * 7 + 5] - 0.5)
+          .normalize()
+        rotation.setFromAxisAngle(axis, data[i * 7 + 6] * Math.PI * 2)
+        // Seated, not perched: sink a third of the block into the regolith.
+        position.set(x, exteriorHeight(x, z) - size * 0.3, z)
+        scale.set(
+          size * (0.82 + data[i * 7 + 3] * 0.42),
+          size * (0.62 + data[i * 7 + 4] * 0.48),
+          size * (0.86 + data[i * 7 + 5] * 0.34),
+        )
+        matrix.compose(position, rotation, scale)
+        meshes[v].setMatrixAt(written[v]++, matrix)
+      }
+      for (let v = 0; v < variants; v++) {
+        // Unused tail instances would render as a rock at the origin.
+        meshes[v].count = written[v]
+        meshes[v].instanceMatrix.needsUpdate = true
+        meshes[v].castShadow = false
+        meshes[v].receiveShadow = false
+        this.group.add(meshes[v])
+      }
+    }
+    emit(near, 2, 4)
+    emit(far, 1, 3)
+  }
+
   update(ctx: GameContext): void {
     this.simTime.value = ctx.time.sim
     for (let i = 0; i < this.devils.length; i++) {
       const devil = this.devils[i]
       const seed = this.devilSeeds[i]
-      const travel = (ctx.time.sim * seed.speed + i * 900) % seed.span
-      const x = seed.baseX + travel
-      const z = seed.baseZ + Math.sin(travel * 0.002 + i) * 260
-      devil.position.set(x, exteriorHeight(x, z) + 430, z)
+      const t = ((ctx.time.sim * seed.speed) / seed.span + i * 0.37) % 1
+      const wander = Math.sin(t * 7.4 + i * 2.1) * 90
+      const x = seed.baseX + seed.driftX * t - wander * 0.4
+      const z = seed.baseZ + seed.driftZ * t + wander
+      devil.position.set(x, exteriorHeight(x, z) + 280 * seed.scale, z)
       devil.rotation.y = ctx.time.sim * (0.5 + i * 0.2)
     }
   }
@@ -187,182 +281,329 @@ export class ExteriorSystem implements GameSystem {
   }
 }
 
-/** Polar ring grid sampled from the exterior height function. */
-function buildRingGeometry(
-  inner: number,
-  outer: number,
-  angularSegments: number,
-  radialSegments: number,
-): BufferGeometry {
-  const vertexCount = (angularSegments + 1) * (radialSegments + 1)
+interface DustDevilSeed {
+  baseX: number
+  baseZ: number
+  driftX: number
+  driftZ: number
+  /** Seconds for one full traverse. */
+  span: number
+  speed: number
+  scale: number
+}
+
+/** Angular resolution of the whole valley mesh (one count = no seams). */
+const VALLEY_COLUMNS = 896
+const VALLEY_OUTER_RADIUS = 13500
+
+/**
+ * Radial vertex spacing schedule. Fine where the player stands next to it,
+ * ~17 m through the mountain band (matching the angular spacing at 2.4 km, so
+ * ridge triangles stay near-equilateral where the silhouette is judged), then
+ * opening out fast into ground that never leaves the haze.
+ */
+function ringSpacing(r: number): number {
+  if (r < 620) return 9 + (r - TERRAIN_INNER_RADIUS) * 0.012
+  if (r < 1250) return 14.9 + (r - 620) * 0.003
+  if (r < 4500) return 16.8
+  if (r < 7500) return 16.8 + (r - 4500) * 0.014
+  return 58.8 + (r - 7500) * 0.035
+}
+
+function buildRadiusTable(): Float64Array {
+  const radii: number[] = [TERRAIN_INNER_RADIUS]
+  let r = TERRAIN_INNER_RADIUS
+  while (r < VALLEY_OUTER_RADIUS) {
+    r += ringSpacing(r)
+    radii.push(r)
+  }
+  return Float64Array.from(radii)
+}
+
+/**
+ * The valley mesh. Heights are sampled on a padded grid (one extra row inside
+ * and outside) so every emitted vertex gets a true central-difference normal
+ * from its own neighbours — exact, continuous, and one field evaluation per
+ * vertex.
+ */
+function buildValleyGeometry(): BufferGeometry {
+  const radii = buildRadiusTable()
+  const rows = radii.length
+  const columns = VALLEY_COLUMNS
+  const angleStep = (Math.PI * 2) / columns
+
+  const cosA = new Float64Array(columns)
+  const sinA = new Float64Array(columns)
+  for (let j = 0; j < columns; j++) {
+    const angle = j * angleStep
+    cosA[j] = Math.cos(angle)
+    sinA[j] = Math.sin(angle)
+  }
+
+  // Padded radius list: index 0 and rows+1 exist only to give the first and
+  // last emitted rows a neighbour to difference against.
+  const paddedRadius = (i: number): number => {
+    if (i === 0) return radii[0] - (radii[1] - radii[0])
+    if (i === rows + 1) return radii[rows - 1] + (radii[rows - 1] - radii[rows - 2])
+    return radii[i - 1]
+  }
+
+  const heights = new Float32Array((rows + 2) * columns)
+  for (let i = 0; i < rows + 2; i++) {
+    const r = paddedRadius(i)
+    const base = i * columns
+    for (let j = 0; j < columns; j++) {
+      heights[base + j] = exteriorHeight(cosA[j] * r, sinA[j] * r)
+    }
+  }
+
+  const vertexCount = rows * columns
   const positions = new Float32Array(vertexCount * 3)
   const normals = new Float32Array(vertexCount * 3)
-  const uvs = new Float32Array(vertexCount * 2)
-  let vertex = 0
-  for (let radialIndex = 0; radialIndex <= radialSegments; radialIndex++) {
-    // Slight outward bias keeps detail near the dome where scrutiny is high.
-    const t = radialIndex / radialSegments
-    const r = inner + (outer - inner) * t * t * (3 - 2 * t)
-    for (let angularIndex = 0; angularIndex <= angularSegments; angularIndex++) {
-      const angle = (angularIndex / angularSegments) * Math.PI * 2
-      const x = Math.cos(angle) * r
-      const z = Math.sin(angle) * r
-      const y = exteriorHeight(x, z)
-      positions[vertex * 3] = x
-      positions[vertex * 3 + 1] = y
-      positions[vertex * 3 + 2] = z
-      const eps = Math.max(2, r * 0.004)
-      const dx = exteriorHeight(x + eps, z) - exteriorHeight(x - eps, z)
-      const dz = exteriorHeight(x, z + eps) - exteriorHeight(x, z - eps)
-      const normal = new Vector3(-dx / (2 * eps), 1, -dz / (2 * eps)).normalize()
-      normals[vertex * 3] = normal.x
-      normals[vertex * 3 + 1] = normal.y
-      normals[vertex * 3 + 2] = normal.z
-      uvs[vertex * 2] = x
-      uvs[vertex * 2 + 1] = z
-      vertex++
+  for (let i = 0; i < rows; i++) {
+    const r = radii[i]
+    const rInner = paddedRadius(i)
+    const rOuter = paddedRadius(i + 2)
+    const radialSpan = rOuter - rInner
+    const inner = i * columns
+    const center = (i + 1) * columns
+    const outer = (i + 2) * columns
+    const tangentialSpan = 2 * r * angleStep
+    for (let j = 0; j < columns; j++) {
+      const left = j === 0 ? columns - 1 : j - 1
+      const right = j === columns - 1 ? 0 : j + 1
+      const height = heights[center + j]
+      const slopeRadial = (heights[outer + j] - heights[inner + j]) / radialSpan
+      const slopeTangential = (heights[center + right] - heights[center + left]) / tangentialSpan
+      const gradientX = slopeRadial * cosA[j] - slopeTangential * sinA[j]
+      const gradientZ = slopeRadial * sinA[j] + slopeTangential * cosA[j]
+      const inverseLength = 1 / Math.sqrt(gradientX * gradientX + 1 + gradientZ * gradientZ)
+      const v = (i * columns + j) * 3
+      positions[v] = cosA[j] * r
+      positions[v + 1] = height
+      positions[v + 2] = sinA[j] * r
+      normals[v] = -gradientX * inverseLength
+      normals[v + 1] = inverseLength
+      normals[v + 2] = -gradientZ * inverseLength
     }
   }
-  const indices: number[] = []
-  const stride = angularSegments + 1
-  for (let radialIndex = 0; radialIndex < radialSegments; radialIndex++) {
-    for (let angularIndex = 0; angularIndex < angularSegments; angularIndex++) {
-      const a = radialIndex * stride + angularIndex
-      const b = a + 1
-      const c = a + stride
-      const d = c + 1
-      indices.push(a, c, b, b, c, d)
+
+  const indices = new Uint32Array((rows - 1) * columns * 6)
+  let cursor = 0
+  for (let i = 0; i < rows - 1; i++) {
+    const thisRow = i * columns
+    const nextRow = (i + 1) * columns
+    for (let j = 0; j < columns; j++) {
+      const jn = j === columns - 1 ? 0 : j + 1
+      const a = thisRow + j
+      const b = thisRow + jn
+      const c = nextRow + j
+      const d = nextRow + jn
+      // Winding: (v1−v0)×(v2−v0) must point +Y for an upward face. With
+      // a=(row,col), b=(row,col+1) tangential and c=(row+1,col) radial, that
+      // is (a,b,c)/(b,d,c) — the (a,c,b) order used elsewhere in the project
+      // faces DOWN and gets back-face culled.
+      indices[cursor++] = a
+      indices[cursor++] = b
+      indices[cursor++] = c
+      indices[cursor++] = b
+      indices[cursor++] = d
+      indices[cursor++] = c
     }
   }
+
   const geometry = new BufferGeometry()
   geometry.setAttribute('position', new BufferAttribute(positions, 3))
   geometry.setAttribute('normal', new BufferAttribute(normals, 3))
-  geometry.setAttribute('uv', new BufferAttribute(uvs, 2))
-  geometry.setIndex(indices)
+  geometry.setIndex(new BufferAttribute(indices, 1))
   return geometry
 }
 
-/** Flat-cap mesa with an irregular plan, cliff band, and talus skirt. */
-function buildMesaGeometry(site: { footprint: number; capHeight: number; x: number; z: number }): BufferGeometry {
-  const angularSegments = 96
-  const radialSegments = 42
-  const vertexCount = (angularSegments + 1) * (radialSegments + 1)
-  const positions = new Float32Array(vertexCount * 3)
-  const uvs = new Float32Array(vertexCount * 2)
-  const centerHeight = exteriorHeight(site.x, site.z)
-  let vertex = 0
-  for (let radialIndex = 0; radialIndex <= radialSegments; radialIndex++) {
-    const t = radialIndex / radialSegments
-    for (let angularIndex = 0; angularIndex <= angularSegments; angularIndex++) {
-      const angle = (angularIndex / angularSegments) * Math.PI * 2
-      // Irregular plan silhouette per angle (stable across the two seam rows).
-      const seamSafe = angularIndex % angularSegments
-      const wobble =
-        1 +
-        0.24 * Math.sin(seamSafe * 0.41 + site.x * 0.01) +
-        0.12 * Math.sin(seamSafe * 1.13 + site.z * 0.013) +
-        0.055 * Math.sin(seamSafe * 2.71 + site.x * 0.02)
-      // Cliff-band rows get extra radial jitter: rugged rock, not pudding.
-      const cliffJitter =
-        t > 0.44 && t < 0.62 ? 0.035 * Math.sin(seamSafe * 3.7 + t * 41) : 0
-      const radius = site.footprint * 2.2 * t * (wobble + cliffJitter)
-      const x = Math.cos(angle) * radius
-      const z = Math.sin(angle) * radius
-      // Profile: plateau → hard rim lip → steep cliff → long talus.
-      let profile: number
-      if (t < 0.44) {
-        profile = 1 + 0.02 * Math.sin(seamSafe * 0.9)
-      } else if (t < 0.58) {
-        const cliffT = (t - 0.44) / 0.14
-        profile = 1 - Math.pow(cliffT, 1.35) * 0.82
-      } else {
-        const talusT = (t - 0.58) / 0.42
-        profile = 0.18 * (1 - smoothCpu(talusT))
-      }
-      const worldX = site.x + x
-      const worldZ = site.z + z
-      const edgeBlend = smoothCpu(Math.min(1, Math.max(0, (t - 0.75) / 0.25)))
-      const y =
-        (1 - edgeBlend) * (centerHeight + profile * site.capHeight) +
-        edgeBlend * exteriorHeight(worldX, worldZ)
-      positions[vertex * 3] = x
-      positions[vertex * 3 + 1] = y
-      positions[vertex * 3 + 2] = z
-      uvs[vertex * 2] = worldX
-      uvs[vertex * 2 + 1] = worldZ
-      vertex++
-    }
-  }
-  const indices: number[] = []
-  const stride = angularSegments + 1
-  for (let radialIndex = 0; radialIndex < radialSegments; radialIndex++) {
-    for (let angularIndex = 0; angularIndex < angularSegments; angularIndex++) {
-      const a = radialIndex * stride + angularIndex
-      const b = a + 1
-      const c = a + stride
-      const d = c + 1
-      indices.push(a, c, b, b, c, d)
-    }
-  }
-  const geometry = new BufferGeometry()
-  geometry.setAttribute('position', new BufferAttribute(positions, 3))
-  geometry.setAttribute('uv', new BufferAttribute(uvs, 2))
-  geometry.setIndex(indices)
-  geometry.computeVertexNormals()
-  return geometry
-}
-
-function smoothCpu(t: number): number {
-  return t * t * (3 - 2 * t)
-}
-
-/** Icosahedron pushed around by lattice hashes — reads as fractured basalt. */
-function deformedRock(seed: number): BufferGeometry {
-  const geometry = new IcosahedronGeometry(1, 2)
+/**
+ * Icosahedron pushed around by layered sine hashes — reads as fractured
+ * basalt. Two scales of deformation plus a flattened base so blocks sit
+ * rather than float.
+ */
+function deformedRock(seed: number, detail: number): BufferGeometry {
+  const geometry = new IcosahedronGeometry(1, detail)
   const positionAttribute = geometry.getAttribute('position')
   const v = new Vector3()
   for (let i = 0; i < positionAttribute.count; i++) {
     v.fromBufferAttribute(positionAttribute, i)
-    const n =
-      Math.sin(v.x * 3.1 + seed * 11.7) * 0.16 +
+    const coarse =
+      Math.sin(v.x * 3.1 + seed * 11.7) * 0.17 +
       Math.sin(v.y * 4.7 + seed * 5.3) * 0.13 +
-      Math.sin(v.z * 3.9 + seed * 7.9) * 0.14
-    v.multiplyScalar(1 + n)
+      Math.sin(v.z * 3.9 + seed * 7.9) * 0.15
+    const fine =
+      Math.sin(v.x * 11.3 - seed * 3.1) * 0.055 +
+      Math.sin(v.z * 9.7 + seed * 13.3) * 0.048
+    v.multiplyScalar(1 + coarse + fine * (detail > 1 ? 1 : 0.4))
+    // Bedded base: the underside is flattened where it beds into regolith.
+    if (v.y < -0.35) v.y = -0.35 + (v.y + 0.35) * 0.42
     positionAttribute.setXYZ(i, v.x, v.y, v.z)
   }
   geometry.computeVertexNormals()
   return geometry
 }
 
-function createRegolithMaterial(): MeshStandardNodeMaterial {
-  const material = new MeshStandardNodeMaterial()
-  const worldXZ = vec2(positionWorld.x, positionWorld.z)
-  const macro = mx_noise_float(worldXZ.mul(1 / 210)).mul(0.5).add(0.5)
-  const patches = mx_noise_float(worldXZ.mul(1 / 46).add(31.7)).mul(0.5).add(0.5)
-  const fine = mx_noise_float(worldXZ.mul(1 / 6.5).add(77.7)).mul(0.5).add(0.5)
-  const base = vec3(0.315, 0.196, 0.124)
-  const dustLight = vec3(0.45, 0.293, 0.178)
-  const basaltDark = vec3(0.165, 0.118, 0.088)
-  let color = mix(base, dustLight, macro.mul(0.55).add(patches.mul(0.25)))
-  // Slopes shed dust and expose darker rock.
-  const slope = float(1).sub(normalWorld.y.clamp(0, 1))
-  color = mix(color, basaltDark, smoothstep(0.12, 0.42, slope).mul(0.7))
-  color = mix(color, color.mul(0.88), fine.mul(0.5))
-  material.colorNode = color
-  material.roughnessNode = float(0.94).sub(fine.mul(0.06))
-  material.metalness = 0
-  return material
+/**
+ * Screen-space surface-gradient bump from an arbitrary procedural height
+ * node (Mikkelsen's method, the same math three's `bumpMap` uses).
+ *
+ * `bumpMap()` itself CANNOT be used here: it re-samples its input through a
+ * texture UV context (`textureNode.context({ getUV })`), so a procedural node
+ * with no `uvNode` returns the identical value for all three taps, the
+ * derivative comes out zero, and the node silently returns the untouched
+ * geometric normal. Every band we fed it was being discarded.
+ */
+function proceduralBump(height: Node<'float'>, scale: Node<'float'>): Node<'vec3'> {
+  const dHdx = dFdx(height).mul(scale)
+  const dHdy = dFdy(height).mul(scale)
+  const sigmaX = dFdx(positionView).normalize()
+  const sigmaY = dFdy(positionView).normalize()
+  const r1 = sigmaY.cross(normalView)
+  const r2 = normalView.cross(sigmaX)
+  const determinant = sigmaX.dot(r1).mul(faceDirection)
+  const gradient = determinant.sign().mul(dHdx.mul(r1).add(dHdy.mul(r2)))
+  return determinant.abs().mul(normalView).sub(gradient).normalize()
 }
 
-function createMesaMaterial(): MeshStandardNodeMaterial {
-  const material = createRegolithMaterial()
-  // Horizontal strata bands on steep faces only.
-  const strata = mx_noise_float(vec2(positionWorld.y.mul(1 / 7.5), positionWorld.x.mul(0.002)))
+/**
+ * The valley surface material. Everything here is caused by two fields —
+ * SLOPE (from the height field's own normals) and world position — so albedo,
+ * strata, streaks, and bump can never disagree about where rock is.
+ *
+ * Layers, flat to vertical:
+ *   dusty regolith → oxide patch streaks → scree/talus mottle → bedrock with
+ *   horizontal strata → dark slope streaks (the dust avalanches that make a
+ *   Martian escarpment unmistakable).
+ *
+ * Every high-frequency band — including the thresholded ones — is weighted by
+ * its projected pixel footprint, or it aliases into stipple and shimmer.
+ */
+function createValleyMaterial(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const worldXZ = vec2(positionWorld.x, positionWorld.z)
+
+  // Band filtering is by PIXEL FOOTPRINT, not by distance. A plain distance
+  // fade is wrong twice over: it strips detail off a 2 km ridge face that
+  // still covers hundreds of pixels (the mountains came out as smooth
+  // origami), and it keeps detail on a valley floor 200 m away that the
+  // grazing view compresses to nothing. `dFdx/dFdy(positionWorld)` gives the
+  // world size of one pixel directly, which handles distance and grazing
+  // angle in one number.
+  // Reversed-edge smoothstep is undefined in WGSL — every fade is written as
+  // oneMinus(smoothstep(near, far, x)).
+  const footprintX = dFdx(positionWorld).length()
+  const footprintY = dFdy(positionWorld).length()
+  // Geometric mean = the side of a square with the pixel's ground AREA. The
+  // sum over-filters (grazing ground went smooth), the min under-filters (the
+  // stretched axis speckles); the area is the honest middle.
+  const footprint = footprintX.mul(footprintY).sqrt()
+  // Long, gentle ramps on purpose: `positionWorld` is linear across a
+  // triangle, so its derivative is a per-TRIANGLE constant. A tight fade
+  // makes the weight jump between neighbouring triangles and the surface
+  // breaks into stippled rows. Spread over a decade and the step vanishes.
+  const bandWeight = (wavelength: number): Node<'float'> =>
+    oneMinus(smoothstep(wavelength * 0.16, wavelength * 2.4, footprint))
+  const weightMicro = bandWeight(1.55)
+  const weightGravel = bandWeight(3.1)
+  const weightFine = bandWeight(8.3)
+  const weightBlocks = bandWeight(34)
+  const weightPatch = bandWeight(41)
+
+  const macro = mx_noise_float(worldXZ.mul(1 / 760)).mul(0.5).add(0.5)
+  const meso = mx_noise_float(worldXZ.mul(1 / 173).add(31.7)).mul(0.5).add(0.5)
+  const patch = mx_noise_float(worldXZ.mul(1 / 41).add(77.3)).mul(0.5).add(0.5)
+  const fine = mx_noise_float(worldXZ.mul(1 / 8.3).add(11.9)).mul(0.5).add(0.5)
+  const micro = mx_noise_float(worldXZ.mul(1 / 1.55).add(53.1)).mul(0.5).add(0.5)
+  // Cellular bands do the work Perlin cannot: a gravel lag of loose stones
+  // over the fines, and blocky fracture on bedrock. Without them the whole
+  // valley reads as sculpted clay however many Perlin octaves are stacked.
+  const gravel = mx_worley_noise_float(worldXZ.mul(1 / 3.1), 1)
+  const blocks = mx_worley_noise_float(positionWorld.mul(1 / 23), 1)
+
+  const slope = oneMinus(normalWorld.y.clamp(0, 1))
+  const flatMask = oneMinus(smoothstep(0.06, 0.22, slope))
+  const screeMask = smoothstep(0.1, 0.3, slope).mul(oneMinus(smoothstep(0.38, 0.72, slope)))
+  const cliffMask = smoothstep(0.34, 0.66, slope)
+
+  // Horizontal strata: phase is world Y so the bands stay level across a
+  // whole massif; the phase drifts slowly with position so neighbouring
+  // fault blocks are offset instead of banding as one continuous layer cake.
+  const strataPhase = positionWorld.y
+    .mul(0.098)
+    .add(mx_noise_float(worldXZ.mul(1 / 1900)).mul(4.1))
+    .add(mx_noise_float(worldXZ.mul(1 / 430)).mul(1.35))
+  const strata = sin(strataPhase)
     .mul(0.5)
     .add(0.5)
-  const steep = smoothstep(0.55, 0.85, float(1).sub(normalWorld.y.clamp(0, 1)))
-  const bandTint = mix(vec3(1), vec3(0.82, 0.72, 0.62), strata)
-  material.colorNode = (material.colorNode as Node<'vec3'>).mul(mix(vec3(1), bandTint, steep))
+    .mul(0.62)
+    .add(
+      sin(strataPhase.mul(2.37).add(1.1)).mul(0.5).add(0.5).mul(0.38).mul(bandWeight(27)),
+    )
+
+  // Slope streaks: dust avalanche tracks, stretched along the fall line by
+  // sampling the noise with a compressed vertical axis.
+  const streak = mx_noise_float(
+    vec3(positionWorld.x.mul(0.052), positionWorld.y.mul(0.0055), positionWorld.z.mul(0.052)),
+  )
+    .mul(0.5)
+    .add(0.5)
+  // Streaks are ~19 m across; unfiltered they stippled every distant shadowed
+  // face. Any band with a hard threshold needs its footprint weight too.
+  const streakMask = smoothstep(0.52, 0.86, streak)
+    .mul(cliffMask.add(screeMask).clamp(0, 1))
+    .mul(bandWeight(19))
+
+  // Mars regolith is DARK: bond albedo ~0.15–0.25. The first pass sat near
+  // 0.45 and the mountains rendered brighter than the sky they stand against
+  // — the opposite of the reference. Reds stay well separated from green/blue
+  // so the rock reads rusty rather than beige.
+  const regolith = vec3(0.262, 0.157, 0.096)
+  const dustBright = vec3(0.375, 0.234, 0.138)
+  const oxide = vec3(0.336, 0.14, 0.072)
+  const rockPale = vec3(0.228, 0.17, 0.126)
+  const rockDark = vec3(0.096, 0.07, 0.054)
+
+  let color = mix(regolith, dustBright, macro.mul(0.6).add(meso.mul(0.3)).clamp(0, 1))
+  // Oxide staining pools on the flats and in the lee of the dunes.
+  color = mix(color, oxide, patch.pow(1.6).mul(0.42).mul(flatMask))
+  // Bedrock with strata on the steep faces.
+  color = mix(color, mix(rockDark, rockPale, strata), cliffMask.mul(0.94))
+  // Scree: broken rock and fines mixed, mottled at patch scale.
+  color = mix(color, mix(rockDark, regolith, patch.mul(0.7).add(0.15)), screeMask.mul(0.68))
+  // Dark avalanche streaks.
+  color = color.mul(mix(float(1), float(0.55), streakMask))
+  // Gravel lag on anything not vertical; blocky fracture on bedrock. The lag
+  // is PATCHY — a uniform cellular band at full contrast tiles the valley in
+  // cobblestones, which is worse than no detail at all.
+  const lagField = weightGravel.mul(oneMinus(cliffMask)).mul(smoothstep(0.3, 0.72, patch).mul(0.75).add(0.25))
+  color = color.mul(mix(float(1), gravel.pow(1.5).mul(0.34).add(0.86), lagField))
+  color = color.mul(
+    mix(float(1), blocks.mul(0.34).add(0.85), weightBlocks.mul(cliffMask.add(screeMask).clamp(0, 1))),
+  )
+  // Grain, only while its footprint is bigger than a pixel.
+  color = color.mul(
+    oneMinus(fine.mul(0.19).mul(weightFine)).sub(micro.mul(0.12).mul(weightMicro)),
+  )
+  material.colorNode = color
+
+  // Bump from the SAME bands that drive albedo, distance-weighted the same
+  // way — a normal detail that outlives its albedo would read as plastic.
+  const bumpField = meso
+    .mul(0.7)
+    .add(patch.mul(0.6).mul(weightPatch))
+    .add(blocks.mul(0.22).mul(weightBlocks))
+    .add(fine.mul(0.52).mul(weightFine))
+    .add(gravel.mul(0.18).mul(lagField))
+    .add(micro.mul(0.22).mul(weightMicro))
+  material.normalNode = proceduralBump(bumpField, float(1.5).add(cliffMask.mul(1.2)))
+
+  material.roughnessNode = mix(float(0.955), float(0.845), cliffMask)
+    .sub(fine.mul(0.05).mul(weightFine))
+    .sub(streakMask.mul(0.04))
+  material.metalness = 0
   return material
 }
 
@@ -370,11 +611,13 @@ function createRockMaterial(): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial()
   const dustTop = smoothstep(0.35, 0.85, normalWorld.y)
   const grain = mx_noise_float(positionWorld.xz.mul(0.8)).mul(0.5).add(0.5)
+  const facet = mx_noise_float(positionWorld.mul(0.28)).mul(0.5).add(0.5)
   material.colorNode = mix(
-    vec3(0.14, 0.104, 0.082),
-    vec3(0.38, 0.25, 0.157),
-    dustTop.mul(0.75).add(grain.mul(0.1)),
+    vec3(0.108, 0.079, 0.062),
+    vec3(0.3, 0.192, 0.118),
+    dustTop.mul(0.72).add(grain.mul(0.12)).add(facet.mul(0.1)),
   )
-  material.roughnessNode = float(0.92)
+  material.roughnessNode = float(0.93).sub(facet.mul(0.06))
+  material.metalness = 0
   return material
 }

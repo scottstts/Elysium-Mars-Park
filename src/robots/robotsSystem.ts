@@ -1,15 +1,7 @@
 import { AdditiveBlending, Group, Sprite, Vector3 } from 'three'
 import { SpriteNodeMaterial } from 'three/webgpu'
 import { float, mix, smoothstep, uniform, uv, vec2, vec3 } from 'three/tsl'
-import { PartWriter } from '../archkit/writer'
-import {
-  DOME_SPHERE_RADIUS,
-  DOME_CENTER_Y,
-  PANEWALKER_THETA_MAX,
-  PANEWALKER_THETA_MIN,
-  panewalkerPhi,
-} from '../dome/latticeField'
-import { kitMaterials } from '../materials/library'
+import { panewalkerPhi } from '../dome/latticeField'
 import { markDynamic } from '../render/layers'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
@@ -18,6 +10,7 @@ import { interiorHeight } from '../world/interiorHeight'
 import { GARDENS, WORKS } from '../world/parkPlan'
 import { buildGroundskeeper, buildMule, buildSweeper } from './chassis'
 import type { RobotRig } from './chassis'
+import { buildPanewalker } from './panewalker'
 
 /**
  * The only moving life (design canon): two groundskeepers, a sweeper, the
@@ -62,24 +55,24 @@ export class RobotsSystem implements GameSystem {
       return groundPoint(gardens.x + Math.cos(angle) * radius, gardens.z + Math.sin(angle) * radius)
     })
     const gk2Waypoints = [
-      groundPoint(-16, 96),
-      groundPoint(-4, 60),
-      groundPoint(4, 30),
-      groundPoint(14, 6),
-      groundPoint(2, -18),
-      groundPoint(-16, 32),
+      groundPoint(-8, 56),
+      groundPoint(-2, 38),
+      groundPoint(3, 20),
+      groundPoint(9, 4),
+      groundPoint(1, -12),
+      groundPoint(-9, 20),
     ]
     const sweeperWaypoints = Array.from({ length: 14 }, (_, i) => {
       const angle = (i / 14) * Math.PI * 2
-      return groundPoint(Math.cos(angle) * 233, Math.sin(angle) * 233)
+      return groundPoint(Math.cos(angle) * 112, Math.sin(angle) * 112)
     })
     const muleWaypoints = [
-      groundPoint(150, 8),
-      groundPoint(96, 12),
-      groundPoint(56, -40),
-      groundPoint(66, -152),
-      groundPoint(96, -120),
-      groundPoint(130, -60),
+      groundPoint(86, 6),
+      groundPoint(56, 10),
+      groundPoint(32, -22),
+      groundPoint(38, -84),
+      groundPoint(54, -62),
+      groundPoint(72, -38),
     ]
 
     const fleet: Array<[string, RobotRig, Vector3[], number, [number, number]]> = [
@@ -106,43 +99,9 @@ export class RobotsSystem implements GameSystem {
       })
     }
 
-    // ---- Panewalker: an exterior gantry truss spanning its θ band.
-    const writer = new PartWriter()
-    const spans = 12
-    for (let i = 0; i < spans; i++) {
-      const theta0 = PANEWALKER_THETA_MIN + ((PANEWALKER_THETA_MAX - PANEWALKER_THETA_MIN) * i) / spans
-      const theta1 = PANEWALKER_THETA_MIN + ((PANEWALKER_THETA_MAX - PANEWALKER_THETA_MIN) * (i + 1)) / spans
-      const p0 = shellPoint(theta0, 0.55)
-      const p1 = shellPoint(theta1, 0.55)
-      writer.tube({ path: [p0, p1], radius: 0.24, slot: 'steel', radialSegments: 10 })
-      writer.tube({
-        path: [shellPoint(theta0, 1.35), shellPoint(theta1, 1.35)],
-        radius: 0.18,
-        slot: 'steel',
-        radialSegments: 8,
-      })
-      writer.tube({ path: [shellPoint(theta0, 0.55), shellPoint(theta0, 1.35)], radius: 0.1, slot: 'orange', radialSegments: 8 })
-      // Diagonal brace.
-      writer.tube({ path: [shellPoint(theta0, 1.35), shellPoint(theta1, 0.55)], radius: 0.07, slot: 'steel', radialSegments: 6 })
-    }
-    // Brush carriages against the glass — chunky service pods so the rig
-    // reads as a silhouette from the park floor 150 m below.
-    for (const carriageTheta of [0.36, 0.46, 0.56]) {
-      writer.box({
-        center: shellPoint(carriageTheta, 0.45),
-        size: new Vector3(2.3, 0.9, 1.3),
-        slot: 'aluminum',
-        chamfer: 0.06,
-      })
-      writer.box({
-        center: shellPoint(carriageTheta, 0.14),
-        size: new Vector3(2.5, 0.24, 0.7),
-        slot: 'fabricRust',
-        chamfer: 0.05,
-      })
-    }
-    const walker = new Group()
-    walker.add(writer.build(kitMaterials(), { castShadow: false }))
+    // ---- Panewalker: the dome-riding washing gantry (robots/panewalker.ts).
+    const walker = buildPanewalker()
+    walker.rotation.y = -(panewalkerPhi.value as number)
     ctx.scene.add(walker)
     this.panewalker = walker
 
@@ -151,24 +110,27 @@ export class RobotsSystem implements GameSystem {
     const reclaimerZ = WORKS.machineHall.z + WORKS.machineHall.depth / 2 + 7
     const stackTop = interiorHeight(reclaimerX, reclaimerZ) + 7.4
     for (const s of [-1, 1]) {
-      for (let puff = 0; puff < 6; puff++) {
+      for (let puff = 0; puff < 7; puff++) {
         const material = new SpriteNodeMaterial()
         material.transparent = true
         material.depthWrite = false
         material.blending = AdditiveBlending
-        const seed = puff / 6
+        const seed = puff / 7
         const life = this.vaporLife.add(seed).fract()
-        material.colorNode = mix(vec3(0.5, 0.47, 0.44), vec3(0.2, 0.19, 0.18), life)
+        // Warm at the lip, cooling to dust as it entrains regolith fines.
+        material.colorNode = mix(vec3(0.58, 0.55, 0.51), vec3(0.21, 0.19, 0.18), life.pow(0.7))
         // Radial falloff — a bare sprite is a hard translucent square.
-        const radial = smoothstep(0.5, 0.14, uv().sub(vec2(0.5)).length())
-        material.opacityNode = float(0.22)
-          .mul(float(1).sub(life))
-          .mul(life.mul(4).min(1))
+        const radial = smoothstep(0.5, 0.1, uv().sub(vec2(0.5)).length())
+        material.opacityNode = float(0.2)
+          .mul(float(1).sub(life).pow(1.4))
+          .mul(life.mul(5).min(1))
           .mul(radial)
         const sprite = new Sprite(material)
         sprite.position.set(reclaimerX + s, stackTop, reclaimerZ)
         sprite.userData.seed = seed
         sprite.userData.baseY = stackTop
+        sprite.userData.baseX = reclaimerX + s
+        sprite.userData.drift = Math.sin(seed * 12.9 + s) * 1.15
         sprite.scale.setScalar(1.3)
         ctx.scene.add(sprite)
         this.vapor.push(sprite)
@@ -229,9 +191,12 @@ export class RobotsSystem implements GameSystem {
       position.y = interiorHeight(position.x, position.z)
       const targetYaw = Math.atan2(toTarget.x, toTarget.z)
       rig.group.rotation.y = dampAngle(rig.group.rotation.y, targetYaw, 4 * dt)
-      // Wheels roll with contact speed.
-      for (const w of rig.wheels) w.rotation.x += (robot.speed * dt) / 0.18
-      if (rig.tool && robot.id === 'SWEEP-1') rig.tool.rotation.z += dt * 9
+      // Wheels roll with contact speed, off each rig's OWN rolling radius —
+      // the fleet no longer shares one assumed 0.18 m wheel.
+      for (const w of rig.wheels) w.rotation.x += (robot.speed * dt) / rig.wheelRadius
+      // Brush discs spin about their own axes (the carriage they hang from is
+      // `tool`, which the working branch above still bobs).
+      for (const spinner of rig.spinners) spinner.rotation.z += dt * 9
     }
 
     // Panewalker: glacial traverse; the shadow + swath uniforms ride along.
@@ -242,20 +207,16 @@ export class RobotsSystem implements GameSystem {
     this.vaporLife.value = (ctx.time.sim * 0.14) % 1
     for (const sprite of this.vapor) {
       const life = ((this.vaporLife.value as number) + sprite.userData.seed) % 1
-      sprite.position.y = sprite.userData.baseY + life * 4.2
-      sprite.scale.setScalar(0.7 + life * 2.6)
+      sprite.position.y = sprite.userData.baseY + life * 4.6
+      // Plumes lean as they rise instead of stacking in a vertical column.
+      sprite.position.x = sprite.userData.baseX + sprite.userData.drift * life * life
+      sprite.scale.setScalar(0.55 + life * 3.1)
     }
   }
 }
 
 function groundPoint(x: number, z: number): Vector3 {
   return new Vector3(x, interiorHeight(x, z), z)
-}
-
-/** Point on the dome shell at longitude 0, lifted radially outward. */
-function shellPoint(theta: number, lift: number): Vector3 {
-  const r = DOME_SPHERE_RADIUS + lift
-  return new Vector3(Math.sin(theta) * r, DOME_CENTER_Y + Math.cos(theta) * r, 0)
 }
 
 function dampAngle(current: number, target: number, amount: number): number {

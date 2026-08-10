@@ -8,6 +8,7 @@ import {
   float,
   max,
   min,
+  mix,
   smoothstep,
   sqrt,
   uniform,
@@ -17,31 +18,83 @@ import type { Node } from 'three/webgpu'
 import { sunDirectionUniform } from '../sky/sun'
 
 /**
- * Dome One's lattice as MATH (plan §6): one analytic pattern function shared
- * by the glass shell (frame lines), every lit material's received shadow
- * (the ground net — no shadow map could hold 10 cm members over 500 m), and
- * the volumetric shafts. One function → the three can never disagree, and
- * the net gets physically correct penumbra growth from the 0.35° sun.
+ * Dome One's gridshell as MATH. ONE definition of the member families lives
+ * here and is consumed three ways:
+ *
+ *  1. `latticeCoverage` — the members' silhouette, used for the analytic sun
+ *     shadow net (multiplied into the sun inside CachedShadowClipmapNode) and
+ *     the interior shaft march.
+ *  2. `latticePaneSeams` — the SAME families at gasket width, drawn by the
+ *     glass shell. The members themselves are real geometry (domeGeometry),
+ *     so painting them on the glass a second time would double every line
+ *     with up to a metre of parallax; what the glass owns is the structural
+ *     silicone joint, which really does lie in the glass plane.
+ *  3. `latticeSunVisibility` — (1) projected along the sun ray for any world
+ *     point, with physically growing penumbra from the 0.35° Mars sun.
+ *
+ * Because domeGeometry builds from the same constants, the built ribs, the
+ * shadow net on the floor and the seams on the glass can never disagree.
+ *
+ * GRID (all of it derived, nothing hardcoded downstream):
+ *   48 radial ribs, foundation → oculus compression ring.
+ *   36 ring-beam parallels (4.17 m of arc apart) — ring 36 is the springing
+ *   ring at the foot, ring 2 is the oculus compression ring.
+ *   Glazing bars halve the bay twice as the dome widens: 48 lines above ring
+ *   8, 96 above ring 8, 192 above ring 16 — so every pane stays 2.1–4.3 m
+ *   wide by 4.17 m tall, and a bar always drops out AT a ring beam.
  */
 
-export const DOME_BASE_RADIUS = 250
-export const DOME_CROWN_HEIGHT = 120
+export const DOME_BASE_RADIUS = 130
+export const DOME_CROWN_HEIGHT = 64
 export const DOME_SPHERE_RADIUS =
-  (DOME_BASE_RADIUS ** 2 + DOME_CROWN_HEIGHT ** 2) / (2 * DOME_CROWN_HEIGHT) // 320.417
-export const DOME_CENTER_Y = DOME_CROWN_HEIGHT - DOME_SPHERE_RADIUS // −200.417
-export const DOME_THETA_BASE = Math.acos(-DOME_CENTER_Y / DOME_SPHERE_RADIUS) // 0.8952
+  (DOME_BASE_RADIUS ** 2 + DOME_CROWN_HEIGHT ** 2) / (2 * DOME_CROWN_HEIGHT) // 164.031
+export const DOME_CENTER_Y = DOME_CROWN_HEIGHT - DOME_SPHERE_RADIUS // −100.031
+export const DOME_THETA_BASE = Math.acos(-DOME_CENTER_Y / DOME_SPHERE_RADIUS) // 0.9147
 
-/** Structural + fine-net family counts (see domeGeometry for the built set). */
-export const PRIMARY_MERIDIANS = 24
-export const SECONDARY_MERIDIANS = 96
-export const STRUCTURAL_RINGS = 10
-const FINE_MERIDIANS = 192
-const FINE_RINGS = 56
+/** Radial ribs: continuous members from the foundation to the oculus ring. */
+export const DOME_RIBS = 48
+/** Ring-beam parallels; θ = k·DOME_RING_STEP for k = 1…DOME_RINGS. */
+export const DOME_RINGS = 36
+export const DOME_RING_STEP = DOME_THETA_BASE / DOME_RINGS // 0.02541 rad = 4.168 m
+/** The compression ring's parallel, and its radius/height in world units. */
+export const DOME_OCULUS_RING = 2
+export const DOME_OCULUS_THETA = DOME_OCULUS_RING * DOME_RING_STEP
+export const DOME_OCULUS_RADIUS = DOME_SPHERE_RADIUS * Math.sin(DOME_OCULUS_THETA) // 8.33
+export const DOME_OCULUS_Y = DOME_CENTER_Y + DOME_SPHERE_RADIUS * Math.cos(DOME_OCULUS_THETA)
+/** Radial glazing spokes inside the oculus, between hub cap and ring. */
+export const DOME_HUB_SPOKES = 12
+export const DOME_HUB_RADIUS = 1.35
 
-const PRIMARY_HALF_WIDTH = 0.17
-const SECONDARY_HALF_WIDTH = 0.08
-const RING_HALF_WIDTH = 0.09
-const FINE_HALF_WIDTH = 0.032
+/**
+ * Glazing-bar tiers: [ring index where the family starts, line count].
+ * Each count is a multiple of DOME_RIBS, so a finer family always contains
+ * the coarser one — the bars line up through every drop.
+ */
+export const DOME_BAR_TIERS: ReadonlyArray<readonly [number, number]> = [
+  [8, DOME_RIBS * 2], // 96 lines from ring 8 outward (pane 2.17 → 4.25 m)
+  [16, DOME_RIBS * 4], // 192 lines from ring 16 outward (pane 2.13 → 4.25 m)
+]
+
+/** Member sections, [crown, foot] — everything tapers with θ. */
+export const DOME_RIB_HALF_WIDTH = [0.085, 0.16] as const
+export const DOME_RIB_DEPTH = [0.34, 0.95] as const
+export const DOME_RING_HALF_WIDTH = [0.075, 0.115] as const
+export const DOME_RING_DEPTH = [0.28, 0.55] as const
+export const DOME_BAR_HALF_WIDTH = 0.055
+export const DOME_BAR_DEPTH = 0.2
+export const DOME_OCULUS_HALF_WIDTH = 0.55
+export const DOME_OCULUS_DEPTH = 1.15
+export const DOME_HUB_BAR_HALF_WIDTH = 0.07
+/** Inner face of every member, radially proud of the glass. */
+export const DOME_MEMBER_INSET = 0.06
+/** Structural-silicone joint between panes: the glass's OWN line family. */
+const SEAM_HALF_WIDTH = 0.016
+
+/** Linear taper helper shared by geometry and the analytic field. */
+export function domeTaper(range: readonly [number, number], theta: number): number {
+  const t = Math.min(1, Math.max(0, theta / DOME_THETA_BASE))
+  return range[0] + (range[1] - range[0]) * t
+}
 
 /** Sun angular radius (0.175°) as tan — penumbra grows by this per meter. */
 const PENUMBRA_PER_METER = 0.00305 * 2
@@ -51,66 +104,107 @@ export const penumbraScale = /*@__PURE__*/ uniform(1)
 
 const TWO_PI = Math.PI * 2
 
+interface FamilyWidths {
+  rib: readonly [number, number]
+  ring: readonly [number, number]
+  bar: number
+  oculus: number
+  hub: number
+}
+
+const MEMBER_WIDTHS: FamilyWidths = {
+  rib: DOME_RIB_HALF_WIDTH,
+  ring: DOME_RING_HALF_WIDTH,
+  bar: DOME_BAR_HALF_WIDTH,
+  oculus: DOME_OCULUS_HALF_WIDTH,
+  hub: DOME_HUB_BAR_HALF_WIDTH,
+}
+
+const SEAM_WIDTHS: FamilyWidths = {
+  rib: [SEAM_HALF_WIDTH, SEAM_HALF_WIDTH],
+  ring: [SEAM_HALF_WIDTH, SEAM_HALF_WIDTH],
+  bar: SEAM_HALF_WIDTH,
+  oculus: SEAM_HALF_WIDTH,
+  hub: SEAM_HALF_WIDTH,
+}
+
 /**
- * Coverage of lattice members at a point on the shell, given the unit vector
- * from the sphere center and a softening radius in meters (penumbra for
- * shadows, pixel footprint for direct view).
+ * Coverage of one line family set at a point on the shell.
+ *
+ * `softMeters` is the softening radius: the penumbra for shadows, the pixel
+ * footprint for direct view. Lines use the exact 1-D overlap integral of a
+ * member of half-width hw with a box kernel of half-width `soft` — crisp when
+ * soft ≪ hw, fading to hw/soft when the penumbra dwarfs the member, which is
+ * precisely how a 0.35° sun washes out a 110 mm glazing bar seen from 140 m
+ * below while leaving the 320 mm ribs legible.
  */
+const latticeField = (
+  local: Node<'vec3'>,
+  softMeters: Node<'float'>,
+  widths: FamilyWidths,
+): Node<'float'> => {
+  const theta = acos(clamp(local.y, -1, 1))
+  const phi = atan(local.z, local.x)
+  const metersPerPhi = float(DOME_SPHERE_RADIUS).mul(max(theta.sin(), 1e-3))
+  const soft = max(softMeters, 0.02)
+  const t = clamp(theta.div(DOME_THETA_BASE), 0, 1)
+
+  const meridianDistance = (count: number): Node<'float'> =>
+    abs(phi.mul(count / TWO_PI).fract().sub(0.5))
+      .mul(TWO_PI / count)
+      .mul(metersPerPhi)
+  const ringDistance = (count: number): Node<'float'> =>
+    abs(theta.mul(count / DOME_THETA_BASE).fract().sub(0.5))
+      .mul(DOME_THETA_BASE / count)
+      .mul(DOME_SPHERE_RADIUS)
+
+  const line = (distance: Node<'float'>, halfWidth: Node<'float'> | number): Node<'float'> => {
+    const hw = typeof halfWidth === 'number' ? float(halfWidth) : halfWidth
+    const overlap = min(distance.add(soft), hw).sub(max(distance.sub(soft), hw.negate()))
+    return clamp(overlap.div(soft.mul(2)), 0, 1)
+  }
+
+  /**
+   * 1 outboard of a ring index, 0 inboard. NEVER a reversed-edge smoothstep:
+   * WGSL leaves smoothstep(hi, lo, x) implementation-defined, so an inward
+   * mask is always written as 1 − smoothstep(lo, hi, x).
+   */
+  const outboardOf = (ringIndex: number): Node<'float'> =>
+    smoothstep(ringIndex * DOME_RING_STEP - 0.006, ringIndex * DOME_RING_STEP + 0.006, theta)
+
+  const ribs = line(meridianDistance(DOME_RIBS), mix(widths.rib[0], widths.rib[1], t))
+  const rings = line(ringDistance(DOME_RINGS), mix(widths.ring[0], widths.ring[1], t)).mul(
+    outboardOf(DOME_OCULUS_RING + 0.6),
+  )
+
+  let bars = ribs
+  for (const [startRing, count] of DOME_BAR_TIERS) {
+    bars = max(bars, line(meridianDistance(count), widths.bar).mul(outboardOf(startRing)))
+  }
+
+  // The compression ring is its own (much deeper) member, and the hub spokes
+  // live INSIDE it — masked off outboard so they never double the bars.
+  const oculusRing = line(
+    abs(theta.sub(DOME_OCULUS_THETA)).mul(DOME_SPHERE_RADIUS),
+    widths.oculus,
+  )
+  const hubSpokes = line(meridianDistance(DOME_HUB_SPOKES), widths.hub).mul(
+    float(1).sub(outboardOf(DOME_OCULUS_RING - 0.5)),
+  )
+
+  return max(max(bars, rings), max(oculusRing, hubSpokes))
+}
+
+/** Structural members' silhouette — shadow net + volumetric shafts. */
 export const latticeCoverage = /*@__PURE__*/ Fn(
-  ([local, softMeters]: [Node<'vec3'>, Node<'float'>]) => {
-    const theta = acos(clamp(local.y, -1, 1))
-    const phi = atan(local.z, local.x)
-    const metersPerPhi = float(DOME_SPHERE_RADIUS).mul(max(theta.sin(), 1e-3))
-    const metersPerTheta = float(DOME_SPHERE_RADIUS)
-    const soft = max(softMeters, 0.02)
+  ([local, softMeters]: [Node<'vec3'>, Node<'float'>]) =>
+    latticeField(local, softMeters, MEMBER_WIDTHS),
+)
 
-    // Distance (meters) to the nearest line of a repeating angular family.
-    const meridianDistance = (count: number): Node<'float'> =>
-      abs(phi.mul(count / TWO_PI).fract().sub(0.5))
-        .mul(TWO_PI / count)
-        .mul(metersPerPhi)
-    const ringDistance = (count: number): Node<'float'> =>
-      abs(theta.mul(count / DOME_THETA_BASE).fract().sub(0.5))
-        .mul(DOME_THETA_BASE / count)
-        .mul(metersPerTheta)
-
-    // Energy-conserving line coverage: the exact 1-D overlap of a member of
-    // half-width hw with a box penumbra of half-width `soft` at distance d.
-    // Crisp when soft ≪ hw (rim, glass pixels), fading to hw/soft when the
-    // penumbra dwarfs the member (fine net seen from 140 m below) — which is
-    // precisely how a 0.35° sun really washes out thin-member shadows.
-    const line = (distance: Node<'float'>, halfWidth: number): Node<'float'> => {
-      const overlap = min(distance.add(soft), float(halfWidth)).sub(
-        max(distance.sub(soft), float(-halfWidth)),
-      )
-      return clamp(overlap.div(soft.mul(2)), 0, 1)
-    }
-
-    // Secondary/fine meridians taper away near the crown where they crowd.
-    const crownFade = smoothstep(0.05, 0.17, theta)
-
-    const primary = line(meridianDistance(PRIMARY_MERIDIANS), PRIMARY_HALF_WIDTH)
-    const secondary = line(meridianDistance(SECONDARY_MERIDIANS), SECONDARY_HALF_WIDTH).mul(
-      crownFade,
-    )
-    const structuralRing = line(ringDistance(STRUCTURAL_RINGS), RING_HALF_WIDTH)
-    const fineMeridian = line(meridianDistance(FINE_MERIDIANS), FINE_HALF_WIDTH)
-      .mul(crownFade)
-      .mul(0.9)
-    const fineRing = line(ringDistance(FINE_RINGS), FINE_HALF_WIDTH).mul(0.9)
-
-    // One diagonal family triangulates the fine quads (approximate metric).
-    const u = phi.mul(FINE_MERIDIANS / TWO_PI)
-    const v = theta.mul(FINE_RINGS / DOME_THETA_BASE)
-    const cellMeters = min(metersPerPhi.mul(TWO_PI / FINE_MERIDIANS), float(4.6)).mul(0.62)
-    const diagonalDistance = abs(u.add(v).fract().sub(0.5)).mul(cellMeters)
-    const diagonal = line(diagonalDistance, FINE_HALF_WIDTH * 0.85).mul(crownFade).mul(0.82)
-
-    return max(
-      max(max(primary, secondary), max(structuralRing, fineRing)),
-      max(fineMeridian, diagonal),
-    )
-  },
+/** The same grid at silicone-joint width — the glass shell's own lines. */
+export const latticePaneSeams = /*@__PURE__*/ Fn(
+  ([local, softMeters]: [Node<'vec3'>, Node<'float'>]) =>
+    latticeField(local, softMeters, SEAM_WIDTHS),
 )
 
 /**
@@ -122,9 +216,15 @@ export const latticeCoverage = /*@__PURE__*/ Fn(
  */
 export const panewalkerPhi = /*@__PURE__*/ uniform(2.793)
 
-/** The walker's θ span on the shell (shared by geometry + shadow + swath). */
-export const PANEWALKER_THETA_MIN = 0.3
-export const PANEWALKER_THETA_MAX = 0.62
+/**
+ * The walker's θ span on the shell (shared by geometry + shadow + swath).
+ * Snapped to ring beams 12 and 24: the gantry rides crane rails laid on
+ * those two ring beams, so the machine and the structure agree by
+ * construction (domeGeometry lays the rails, robotsSystem builds the gantry).
+ */
+export const PANEWALKER_RAIL_RINGS = [12, 24] as const
+export const PANEWALKER_THETA_MIN = PANEWALKER_RAIL_RINGS[0] * DOME_RING_STEP // 0.3049
+export const PANEWALKER_THETA_MAX = PANEWALKER_RAIL_RINGS[1] * DOME_RING_STEP // 0.6098
 /** Gantry footprint in longitude at its mid-θ (≈3.6 m wide truss). */
 const PANEWALKER_HALF_WIDTH_METERS = 1.8
 /** Truss openness: how much sun its lattice of members still passes. */
@@ -150,7 +250,7 @@ const panewalkerOcclusion = (
   )
   const band = clamp(overlap.div(soft.mul(2)), 0, 1)
   const inTheta = smoothstep(PANEWALKER_THETA_MIN - 0.03, PANEWALKER_THETA_MIN + 0.03, theta).mul(
-    smoothstep(PANEWALKER_THETA_MAX + 0.03, PANEWALKER_THETA_MAX - 0.03, theta),
+    float(1).sub(smoothstep(PANEWALKER_THETA_MAX - 0.03, PANEWALKER_THETA_MAX + 0.03, theta)),
   )
   return band.mul(inTheta).mul(PANEWALKER_OPACITY)
 }

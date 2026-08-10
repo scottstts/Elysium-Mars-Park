@@ -5,6 +5,14 @@ import { Vector2 } from 'three'
  * Every system reads positions, paths, and pads from here — nothing
  * hardcodes world placement elsewhere. +X east, +Z south, meters.
  *
+ * 2026-08-10 OVERHAUL: dome shrunk 500 m → 260 m and the layout re-laid
+ * plaza-centric for reference-image density (ref_images/mars_park.png).
+ * The park is now a paved civic floor — central plaza around the First
+ * Tree, a transit boulevard carrying the street-running Loop, planter-lined
+ * spokes — with buildings fronting the paving and raw regolith kept to
+ * feature gardens and the rim band. Green lives dense in raised planters
+ * (per the reference), never as lawn.
+ *
  * Bearings recap (design.md): Portal Station S, Overlook + Amphitheater W
  * (facing the frozen WSW sun), Residential Arc NW, Farmside E, The Works NE,
  * First Tree at origin, Regolith Gardens between center and the SW rim.
@@ -37,42 +45,83 @@ export interface GardenZone {
   radius: number
 }
 
-export const FIRST_TREE = { x: 0, z: 0, plazaRadius: 17, soilRingRadius: 7.2 }
+/** Global envelope: usable floor inside the dome foot (glass lands at 130). */
+export const PARK = {
+  floorRadius: 122,
+  /** Rim promenade centerline radius (the walk along the glass). */
+  rimWalkRadius: 112,
+}
 
-/** Platform sits INSIDE the loop track (track passes its south edge z≈205). */
-export const PORTAL_STATION = { x: 0, z: 194, y: 1.35, width: 40, depth: 20 }
+export const FIRST_TREE = { x: 0, z: 0, plazaRadius: 26, soilRingRadius: 5.5 }
 
-export const OVERLOOK_LOUNGE = { x: -206, z: -14, y: 0.9, width: 26, depth: 12 }
+/**
+ * The transit boulevard: a paved ring band carrying the Loop guideway
+ * (street-running, rails inset in the paving like the reference image).
+ */
+export const BOULEVARD = { innerRadius: 91, outerRadius: 103 }
 
-export const AMPHITHEATER = { x: -86, z: 58, bowlRadius: 46, depth: 3.4 }
+/** Platform sits INSIDE the loop track (track passes its south edge z≈97). */
+export const PORTAL_STATION = { x: 0, z: 97, y: 0.9, width: 30, depth: 13 }
+
+/** Where the connector tube crosses the dome wall on the south axis. */
+export const PORTAL_WALL_Z = 128.4
+
+export const OVERLOOK_LOUNGE = { x: -114, z: -6, y: 0.8, width: 20, depth: 11 }
+
+/** Bowl outer edge (center r + bowlRadius) must stay inside BOULEVARD.innerRadius. */
+export const AMPHITHEATER = { x: -52, z: 34, bowlRadius: 24, depth: 2.6 }
+
+/**
+ * The Commons pavilion: sealed two-story glass drum anchoring the plaza's
+ * north edge (the reference image's centerpiece building). Lit interior
+ * visible through the glazing; entrances closed until the city arrives.
+ */
+export const COMMONS = { x: -2, z: -54, radius: 11, y: 0.55 }
+
+/**
+ * Hydroponics tower: sealed three-story glass cylinder of planted shelves
+ * (the reference image's "62" building), glowing green on the farm lane.
+ */
+export const HYDRO_TOWER = { x: 52, z: 18, radius: 7, floors: 3, y: 0.55 }
+
+/** White water tower over The Works — the skyline landmark. */
+export const WATER_TOWER = { x: 66, z: -34, height: 17 }
 
 export const RESIDENTIAL = {
-  arcRadius: 178,
+  arcRadius: 88,
   /** Angles (rad, from +X axis, CCW toward −Z i.e. north) for 10 habs. */
-  angles: Array.from({ length: 10 }, (_, i) => Math.PI + 0.16 + i * 0.115),
+  angles: Array.from({ length: 10 }, (_, i) => Math.PI + 0.18 + i * 0.115),
   commonHabIndex: 6,
 }
 
-export const PLAYGROUND = { x: -128, z: -98, radius: 14 }
+/** Between the Commons and the arc's south end — clear of habs 4/5 and the
+ * gardens zone (the old (−62,−54) spot sat inside two hab footprints). */
+export const PLAYGROUND = { x: -22, z: -70, radius: 9 }
 
+/** Glasshouse east ends stop at x=87 — clear of the boulevard (r≥91). */
 export const FARMSIDE = {
   glasshouses: [
-    { x: 168, z: -26, length: 58, width: 12, rotation: Math.PI / 2 },
-    { x: 168, z: 8, length: 58, width: 12, rotation: Math.PI / 2 },
-    { x: 168, z: 42, length: 58, width: 12, rotation: Math.PI / 2 },
+    { x: 70, z: -22, length: 34, width: 9, rotation: Math.PI / 2 },
+    { x: 70, z: 0, length: 34, width: 9, rotation: Math.PI / 2 },
+    { x: 70, z: 22, length: 34, width: 9, rotation: Math.PI / 2 },
   ],
 }
 
+/**
+ * Works cluster pulled INSIDE the boulevard (structure extents must clear
+ * r≈94.5, the guideway swept volume) — except the radiator field, which
+ * lives in the outer band between boulevard (103) and rim walk (112).
+ */
 export const WORKS = {
-  machineHall: { x: 96, z: -128, width: 34, depth: 20, rotation: 0.35 },
-  tankFarm: { x: 148, z: -102, radius: 22 },
-  maintenanceYard: { x: 66, z: -158, radius: 18 },
-  radiators: { x: 178, z: -66, rows: 4 },
+  machineHall: { x: 48, z: -58, width: 26, depth: 15, rotation: 0.35 },
+  tankFarm: { x: 70, z: -40, radius: 11 },
+  maintenanceYard: { x: 28, z: -70, radius: 13 },
+  radiators: { x: 104, z: -34, rows: 4 },
 }
 
-/** The Loop: closed tram circuit, three stations. */
+/** The Loop: closed street-running circuit in the boulevard, three stations. */
 export const LOOP = {
-  radius: 206,
+  radius: 97,
   stations: [
     { id: 'portal', angle: Math.PI / 2 },
     { id: 'overlook', angle: Math.PI + 0.07 },
@@ -81,8 +130,8 @@ export const LOOP = {
 }
 
 export const GARDENS: GardenZone[] = [
-  { id: 'gardens-main', x: -52, z: -64, radius: 46 },
-  { id: 'gardens-south', x: -18, z: 96, radius: 26 },
+  { id: 'gardens-main', x: -38, z: -40, radius: 28 },
+  { id: 'gardens-south', x: -12, z: 60, radius: 16 },
 ]
 
 const v = (x: number, z: number): Vector2 => new Vector2(x, z)
@@ -90,79 +139,81 @@ const v = (x: number, z: number): Vector2 => new Vector2(x, z)
 export const PATHS: PathSpec[] = [
   {
     id: 'meridian-south',
-    points: [v(0, 181), v(-2, 158), v(4, 118), v(-3, 62), v(0, 20)],
-    width: 5.2,
+    points: [v(0, 90), v(-1, 72), v(2, 50), v(0, 28)],
+    width: 6.0,
     surface: 'paver',
   },
   {
     id: 'meridian-west',
-    points: [v(-14, -6), v(-62, -14), v(-118, -16), v(-168, -14), v(-198, -13)],
-    width: 4.4,
+    points: [v(-26, -2), v(-52, -5), v(-78, -3), v(-96, -2), v(-107, -4)],
+    width: 5.0,
     surface: 'paver',
   },
   {
     id: 'rim-promenade',
     points: Array.from({ length: 25 }, (_, i) => {
       const angle = (i / 24) * Math.PI * 2
-      return v(Math.cos(angle) * 236, Math.sin(angle) * 236)
+      return v(Math.cos(angle) * PARK.rimWalkRadius, Math.sin(angle) * PARK.rimWalkRadius)
     }),
-    width: 4.0,
-    surface: 'paver',
-  },
-  {
-    id: 'residential-lane',
-    points: [v(-30, -22), v(-78, -52), v(-118, -76), v(-148, -96), v(-166, -74), v(-172, -40)],
-    width: 3.2,
-    surface: 'paver',
-  },
-  {
-    id: 'farm-lane',
-    points: [v(16, 8), v(64, 14), v(108, 10), v(138, 4)],
     width: 3.6,
     surface: 'paver',
   },
   {
+    id: 'residential-lane',
+    points: [v(-30, -14), v(-52, -30), v(-68, -44), v(-79, -56), v(-84, -44), v(-88, -30)],
+    width: 3.4,
+    surface: 'paver',
+  },
+  {
+    id: 'farm-lane',
+    points: [v(26, 6), v(40, 12), v(52, 18), v(66, 14), v(80, 8)],
+    width: 4.5,
+    surface: 'paver',
+  },
+  {
     id: 'works-lane',
-    points: [v(24, -18), v(58, -52), v(76, -92), v(88, -116)],
-    width: 3.2,
+    points: [v(18, -19), v(28, -36), v(36, -48), v(42, -54)],
+    width: 3.4,
     surface: 'track',
   },
   {
     id: 'amphitheater-spur',
-    points: [v(-36, 10), v(-58, 28), v(-74, 44)],
-    width: 3.4,
+    points: [v(-22, 12), v(-34, 22), v(-44, 28)],
+    width: 3.8,
     surface: 'paver',
   },
   {
     id: 'gardens-loop',
     points: [
-      v(-24, -34),
-      v(-48, -28),
-      v(-78, -44),
-      v(-84, -72),
-      v(-64, -94),
-      v(-36, -90),
-      v(-22, -66),
-      v(-24, -34),
+      v(-22, -26),
+      v(-38, -22),
+      v(-54, -32),
+      v(-58, -46),
+      v(-46, -58),
+      v(-30, -54),
+      v(-22, -40),
+      v(-22, -26),
     ],
-    width: 2.6,
+    width: 2.4,
     surface: 'track',
   },
 ]
 
 export const PADS: PadSpec[] = [
-  { id: 'first-tree-plaza', x: 0, z: 0, y: 0.55, radius: FIRST_TREE.plazaRadius, skirt: 9 },
-  { id: 'portal-station', x: 0, z: 194, y: 1.35, radius: 25, skirt: 12 },
+  { id: 'first-tree-plaza', x: 0, z: 0, y: 0.55, radius: FIRST_TREE.plazaRadius, skirt: 8 },
+  { id: 'portal-station', x: 0, z: 97, y: 0.9, radius: 16, skirt: 8 },
   // Poured apron where the station stairs land — a deterministic 4-step drop.
-  { id: 'station-foot', x: 0, z: 176.5, y: 0.72, radius: 7, skirt: 6 },
-  { id: 'overlook', x: -206, z: -14, y: 0.9, radius: 17, skirt: 8 },
-  // Stage/orchestra flat ONLY — the seat rows (radius 16-39) must ride the
-  // authored dish in interiorHeight, or the bowl has no rake at all.
-  { id: 'amphitheater', x: -86, z: 58, y: -2.4, radius: 12, skirt: 8 },
-  { id: 'farmside', x: 168, z: 8, y: 0.7, radius: 44, skirt: 14 },
-  { id: 'works', x: 108, z: -124, y: 0.6, radius: 46, skirt: 16 },
-  { id: 'yard', x: 66, z: -158, y: 0.5, radius: 20, skirt: 10 },
-  { id: 'playground', x: -128, z: -98, y: 0.4, radius: 15, skirt: 8 },
+  { id: 'station-foot', x: 0, z: 86, y: 0.45, radius: 6, skirt: 5 },
+  { id: 'overlook', x: -114, z: -6, y: 0.8, radius: 13, skirt: 6 },
+  // Stage/orchestra flat ONLY — the seat rows must ride the authored dish
+  // in interiorHeight, or the bowl has no rake at all.
+  { id: 'amphitheater', x: -64, z: 39, y: -1.8, radius: 8, skirt: 6 },
+  { id: 'commons', x: -2, z: -54, y: 0.55, radius: 14, skirt: 7 },
+  { id: 'hydro-tower', x: 52, z: 18, y: 0.55, radius: 10, skirt: 5 },
+  { id: 'farmside', x: 70, z: 0, y: 0.6, radius: 26, skirt: 10 },
+  { id: 'works', x: 50, z: -56, y: 0.5, radius: 34, skirt: 12 },
+  { id: 'yard', x: 28, z: -70, y: 0.4, radius: 15, skirt: 8 },
+  { id: 'playground', x: -22, z: -70, y: 0.4, radius: 10, skirt: 6 },
 ]
 
 /** Hab pad positions derived from the arc (porches face the park center). */

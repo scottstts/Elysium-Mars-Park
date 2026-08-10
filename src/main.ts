@@ -7,7 +7,8 @@ import { auditPostcardBookmarks } from './core/postcards'
 import { Rng } from './core/prng'
 import { QualityState } from './core/quality'
 import { DomeSystem } from './dome/domeSystem'
-import { shaftStrength } from './dome/interiorHaze'
+import { interiorHazeStrength, shaftStrength } from './dome/interiorHaze'
+import { gradeParams } from './render/grade'
 import { penumbraScale } from './dome/latticeField'
 import { ExteriorSystem } from './exterior/exteriorTerrain'
 import { FOG_EXTINCTION_PER_METER } from './exterior/marsAerialPerspective'
@@ -104,8 +105,10 @@ async function boot(): Promise<void> {
   const sky = registry.add(new SkySystem())
   registry.add(new ExteriorSystem(pipeline))
   registry.add(new DomeSystem(pipeline))
-  registry.add(new GroundworksSystem())
   const physics = registry.add(new PhysicsSystem())
+  // Groundworks registers AFTER physics: its planter walls are real colliders,
+  // so the rapier world has to exist when it initialises.
+  registry.add(new GroundworksSystem(physics))
   if (flags.view === 'gallery') registry.add(new TestGallerySystem())
   if (flags.view) {
     // Fixed validation cameras inspect with orbit controls, not the player.
@@ -159,7 +162,7 @@ async function boot(): Promise<void> {
     // Sneak-render wide poses behind the entry screen so every park material
     // compiles NOW — the arrival reveal must never hitch on first sight.
     entry.setProgress('prewarm', 0.96)
-    camera.position.set(190, 150, 260)
+    camera.position.set(100, 80, 135)
     camera.lookAt(0, 20, 0)
     pipeline.render()
     camera.position.set(0, 4.2, 246)
@@ -179,6 +182,8 @@ async function boot(): Promise<void> {
       loop,
       penumbraScale,
       shaftStrength,
+      interiorHazeStrength,
+      gradeParams,
       fogExtinction: FOG_EXTINCTION_PER_METER,
       step: (n = 1, dtMs = 1000 / 60): number => {
         for (let i = 0; i < n; i++) loop.manualStep(dtMs)

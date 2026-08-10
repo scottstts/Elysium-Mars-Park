@@ -4,6 +4,9 @@ export type PassName =
   | 'final'
   | 'nopost'
   | 'ao'
+  | 'aoshare'
+  | 'aoapplied'
+  | 'nograde'
   | 'shafts'
   | 'depth'
   | 'normal'
@@ -30,6 +33,9 @@ const PASS_NAMES: readonly PassName[] = [
   'final',
   'nopost',
   'ao',
+  'aoshare',
+  'aoapplied',
+  'nograde',
   'shafts',
   'depth',
   'normal',

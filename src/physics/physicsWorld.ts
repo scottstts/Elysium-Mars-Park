@@ -29,7 +29,8 @@ export class PhysicsSystem implements GameSystem {
     // x = (j/ncols − ½)·scale.x, z = (i/nrows − ½)·scale.z with index
     // j·(nrows+1)+i — verified empirically (S6: transposed fill put the
     // farm-lane height under the portal spawn).
-    const n = 160
+    // 320: collision follows the paved lift + fine relief within ~1 cm.
+    const n = 320
     const heights = new Float32Array((n + 1) * (n + 1))
     const extent = DOME_BASE_RADIUS * 2
     for (let iz = 0; iz <= n; iz++) {

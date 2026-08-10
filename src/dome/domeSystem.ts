@@ -1,20 +1,21 @@
-import { Color, CylinderGeometry, DoubleSide, Group, Mesh, MeshStandardMaterial } from 'three'
+import { Group } from 'three'
 import { uniform } from 'three/tsl'
 import type { Node } from 'three/webgpu'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import type { RenderPipelineSystem } from '../render/pipeline'
+import { buildConnectorTube } from './connectorTube'
 import { buildDomeStructure } from './domeGeometry'
+import { domeMaterials } from './domeMaterials'
 import { createGlassShell, createShellRimGlow } from './glassShell'
 import { attachInteriorShafts } from './interiorHaze'
 
 /**
- * Dome One (plan §6): structural members, ISRU glass shell with dust film +
- * portal cut, rim glow, the exterior connector-tube stub (S9 replaces with
- * the real tram tube), and the interior shaft march wired into the pipeline.
- *
- * The analytic lattice field (latticeField.ts) is the load-bearing piece —
- * materials pick up the shadow net via `applyLatticeShadow` (see S5).
+ * Dome One's entry point — assembly only. The parts live next door:
+ * latticeField (the grid as math), domeGeometry (the built gridshell),
+ * glassShell (the panes), connectorTube (portal bulkhead + arrival duct),
+ * domeMaterials (the shell's own material set), interiorHaze (the shaft
+ * march spliced into the render pipeline).
  */
 export class DomeSystem implements GameSystem {
   readonly id = 'dome'
@@ -27,38 +28,15 @@ export class DomeSystem implements GameSystem {
 
   init(ctx: GameContext): void {
     const { scene, camera, quality } = ctx
+    const materials = domeMaterials()
 
-    const steel = new MeshStandardMaterial({
-      color: new Color(0.815, 0.8, 0.77),
-      roughness: 0.42,
-      metalness: 0.12,
-    })
-    const dark = new MeshStandardMaterial({
-      color: new Color(0.2, 0.19, 0.185),
-      roughness: 0.6,
-      metalness: 0.25,
-    })
-
-    this.group.add(buildDomeStructure(steel, dark))
+    this.group.add(buildDomeStructure(materials))
+    this.group.add(buildConnectorTube(materials))
 
     const { mesh, exteriorMesh } = createGlassShell()
     this.group.add(mesh)
     this.group.add(exteriorMesh)
     this.group.add(createShellRimGlow())
-
-    // Connector tube stub heading south through the haze (arrival, S9).
-    const tube = new Mesh(
-      new CylinderGeometry(5.6, 5.6, 420, 28, 1, true),
-      new MeshStandardMaterial({
-        color: new Color(0.62, 0.6, 0.57),
-        roughness: 0.5,
-        metalness: 0.2,
-        side: DoubleSide,
-      }),
-    )
-    tube.rotation.x = Math.PI / 2
-    tube.position.set(0, 4.4, 250 + 210)
-    this.group.add(tube)
 
     scene.add(this.group)
 

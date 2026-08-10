@@ -4,7 +4,8 @@ import type { GameSystem } from '../runtime/system'
 import type { PlayerSystem } from '../player/playerSystem'
 import type { RobotsSystem } from '../robots/robotsSystem'
 import type { TramSystem } from '../tram/tramSystem'
-import { FARMSIDE, OVERLOOK_LOUNGE, PATHS, PORTAL_STATION, WORKS } from '../world/parkPlan'
+import { FARMSIDE, OVERLOOK_LOUNGE, PORTAL_STATION, WORKS } from '../world/parkPlan'
+import { pavedSignedDistance } from '../world/pavingPlan'
 
 /**
  * The park's voice (plan §13) — fully procedural WebAudio, no assets, no
@@ -289,32 +290,16 @@ export class AudioEngineSystem implements GameSystem {
     ) {
       return 'deck'
     }
-    // On a paver path?
-    for (const path of PATHS) {
-      if (path.surface !== 'paver') continue
-      for (let i = 0; i < path.points.length - 1; i++) {
-        const a = path.points[i]
-        const b = path.points[i + 1]
-        const abx = b.x - a.x
-        const aby = b.y - a.y
-        const lengthSquared = abx * abx + aby * aby
-        if (lengthSquared === 0) continue
-        const t = Math.max(
-          0,
-          Math.min(1, ((position.x - a.x) * abx + (position.z - a.y) * aby) / lengthSquared),
-        )
-        const dx = position.x - (a.x + abx * t)
-        const dz = position.z - (a.y + aby * t)
-        if (dx * dx + dz * dz < (path.width / 2) ** 2) return 'paver'
-      }
-    }
+    // On ANY paved surface? The civic floor is far wider than the PATHS
+    // ribbons now (plaza, boulevard, aprons) — the paving field is the truth.
+    if (pavedSignedDistance(position.x, position.z) <= 0) return 'paver'
     return 'regolith'
   }
 
   private classifyZone(position: Vector3): Zone {
     const tram = this.tram as unknown as { riding?: boolean } | null
     if (tram?.riding) {
-      return position.z > 250 ? 'tube' : 'tram'
+      return position.z > 120 ? 'tube' : 'tram'
     }
     const lounge = OVERLOOK_LOUNGE
     if (

@@ -11,41 +11,45 @@ export interface Bookmark {
 }
 
 /** Park floor is y=0 at dome center; +X east, +Z south (design plan §1). */
+// OVERHAUL NOTE: re-aimed for the 260 m dome + plaza-centric layout. These
+// are rough first passes — final framing happens after the rebuild waves.
 export const BOOKMARKS: Record<string, Bookmark> = {
   // 1. Portal iris opens — tram rolls into the light (from inside the cabin).
   // Slightly off the x=0 axis: dead-on, the tube's ceiling light strip and
   // the portal meridian rib stack into one huge frame-bisecting pole.
-  arrival: { position: [-2.6, 4.3, 257], look: [-1, 2.4, 170], stage: 'S9' },
+  arrival: { position: [-2.6, 4.1, 136], look: [-1, 2.2, 60], stage: 'S9' },
   // 2. The First Tree, lone green against butterscotch sky.
   // NOTE: bookmark heights are TERRAIN-AUDITED (interiorHeight + 1.7) — a
   // buried camera reads as a black void and costs hours (see notes.md).
-  firsttree: { position: [-17, 3.9, 24], look: [0, 7, 0], stage: 'S12' },
-  // 3. Rim Promenade: the plain to the horizon through glass. Clear of the
-  // Overlook Lounge footprint (z -1..-27) — the S4-era spot got built over.
-  rim: { position: [-193, 3.4, -44], look: [-315, 16, -30], stage: 'S4' },
+  firsttree: { position: [-14, 3.6, 20], look: [0, 7, 0], stage: 'S12' },
+  // 3. Rim Promenade: mountains to the horizon through glass, clear of the
+  // Overlook Lounge footprint.
+  rim: { position: [-104, 3.2, -26], look: [-220, 26, -16], stage: 'S4' },
   // 4. The Panewalker crossing the sun, shadow sweeping the gardens.
-  // The gantry BOOTS on the sun line (phi0=2.793); from the plaza's east
-  // edge it hangs dead-center in the glare for the first minutes.
-  panewalker: { position: [25, 2.9, -16], look: [-133, 86, 49], stage: 'S11' },
+  panewalker: { position: [22, 2.7, -12], look: [-70, 46, 26], stage: 'S11' },
   // 5. Greenhouse Hall interior: grow-light green against low amber sun.
   // In the walking aisle (z offset off the center tray line), not in a tray.
-  greenhouse: { position: [150, 2.4, 5.2], look: [178, 2.1, 5.2], stage: 'S10' },
+  // On the walking-aisle deck (across-offset ±1.85), not inside a rack row.
+  greenhouse: { position: [56, 2.2, 1.85], look: [84, 1.9, 1.85], stage: 'S10' },
   // 6. The Amphitheater's empty seats in raking light — from the top row,
-  // down the tiered rake to the stage, rim glass and the plain beyond.
-  amphitheater: { position: [-58, 0.4, 61], look: [-112, -1.6, 56], stage: 'S8' },
+  // down the tiered rake to the stage, rim glass and the mountains beyond.
+  amphitheater: { position: [-32, 1.8, 26], look: [-70, -1.2, 42], stage: 'S8' },
   // 7. The Works from the gallery walk, vapor curling in a sunbeam.
-  works: { position: [96, 6.8, -96], look: [128, 4, -122], stage: 'S8' },
+  works: { position: [26, 4.8, -42], look: [48, 2.4, -58], stage: 'S8' },
   // 8. A hab porch: chair, personal touch, long shadows, home. Close-in on
-  // hab 3's porch (site ~(-158,-82), porch faces the park center).
-  porch: { position: [-146, 3.5, -74], look: [-153.5, 2.2, -80.5], stage: 'S8' },
+  // hab 3's porch (arc r=88, porch faces the park center).
+  porch: { position: [-66.3, 1.8, -38.4], look: [-70.5, 1.5, -41.9], stage: 'S8' },
   // 9. Raked spirals of the Regolith Gardens under the crown — slight
   // elevation, tilted down so the concentric ridge rings actually read.
-  gardens: { position: [-28, 4.6, -42], look: [-56, -0.5, -68], stage: 'S5' },
+  gardens: { position: [-20, 3.8, -26], look: [-44, -0.3, -50], stage: 'S5' },
   // 10. Mid-jump on the Meridian Walk, park spread beneath the arc —
   // eye at the true 0.38 g apex (+1.24 m over standing height).
-  jump: { position: [-4, 4.1, 96], look: [0, 4, 0], stage: 'S6' },
+  jump: { position: [-3, 3.9, 58], look: [0, 3.8, 0], stage: 'S6' },
+  // Bonus framing: the Overlook Lounge drum from the rim walk (not one of
+  // the ten, but the drum deserves a saved camera).
+  overlook: { position: [-100, 5.0, 8.0], look: [-114, 3.4, -6], stage: 'S8' },
   // Dev-only wide establishing view (not part of the ten).
-  overview: { position: [190, 150, 260], look: [0, 20, 0], stage: 'dev' },
+  overview: { position: [100, 80, 135], look: [0, 15, 0], stage: 'dev' },
   // Dev-only pipeline calibration gallery.
   gallery: { position: [7, 4, 11], look: [0, 0.8, 0], stage: 'dev' },
 }

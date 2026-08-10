@@ -36,7 +36,7 @@ No dialogue, no audio logs, no text walls, no quests.
 
 ## The setting
 
-Elysium Planitia, ~3°N — flat volcanic plain, boulder fields, low mesas west, a shallow crater rim south, one or two dust devils drifting far off catching the light. **Dome One**: a glass spherical cap **500 m across, ~120 m at the crown**, triangulated lattice on great meridian ribs, panels of green-edged ISRU glass melted from Martian sand. Outside, dust films the lower panels except where the washer robot has passed — clean swaths of clarity in a dirty gradient. Inside: ~19 hectares of sculpted regolith landscape, sintered-brick paths, and interleaved districts — leisure heart, a residential arc, working agriculture, and the life-support machinery that keeps it all breathing, celebrated rather than hidden.
+Elysium Planitia, ~3°N — the park sits in a **flat valley ringed by rocky hills and mountains**: big red ridges fill the lower view through the glass in every direction, boulder fields on the valley floor, one or two dust devils drifting far off catching the light. **Dome One**: a glass spherical cap **260 m across, ~64 m at the crown** (revised 2026-08-10 from 500 m — the park read empty at city scale), an elegant steel gridshell of radial ribs and concentric rings landing on an oculus compression ring, over panes of ISRU glass so clear the mountains are always present. Outside, dust films the lower panels except where the washer robot has passed. Inside: ~5 hectares, **plaza-centric**: a paved civic floor — central plaza, transit boulevard carrying the street-running Loop, planter-lined spokes — with buildings fronting the paving, and sculpted regolith kept to feature gardens and the rim band. Districts interleave: leisure heart, a residential arc, working agriculture, and the life-support machinery that keeps it all breathing, celebrated rather than hidden.
 
 ## Places
 
@@ -91,7 +91,14 @@ No combat, no death, no timers, no HUD, no quests, no minimap, no saves, no econ
 
 ## Confirmed-decisions log (Scott, 2026-08-10)
 
-- Dome ~500 m diameter; NASA-punk aesthetic; interleaved mixed-use layout.
+- **Overhaul directive (later 2026-08-10):** target visual is
+  `ref_images/mars_park.png` — AAA realism. Dome resized to **260 m**
+  (authorized: "if the dome is too big, adjust its size"); layout re-laid
+  plaza-centric and dense; every object rebuilt to reference-project
+  ("friends") craft; valley-and-mountains exterior; vegetation lush **inside
+  raised planters and glass buildings** while open ground stays Martian
+  (reconciles "not a garden" with the reference image's planted planters).
+- Dome ~~500 m~~ → 260 m diameter; NASA-punk aesthetic; interleaved mixed-use layout.
 - **Single frozen time** — one afternoon, sun in the sky; explicitly no time lapse of any kind. Sun locked at late-afternoon (~27° elevation).
 - Interactivity: walk + contextual only (no physics playground, no objectives).
 - Interior only — no EVA, outside is vista.

@@ -143,7 +143,8 @@ export class OpsScreensSystem implements GameSystem {
         .add(new Vector3(0, 1.86, 0))
         .addScaledVector(along, (i - 1) * 1.3)
         .addScaledVector(across, -1.52)
-      screen.rotation.y = yaw + Math.PI
+      // Face along the spread axis, not edge-on (works rebuild, ops pulpit).
+      screen.rotation.y = yaw + Math.PI / 2
       ctx.scene.add(screen)
 
       const definition = definitions[i]

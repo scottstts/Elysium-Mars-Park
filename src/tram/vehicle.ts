@@ -1,239 +1,134 @@
-import { Group, Vector3 } from 'three'
-import { PartWriter } from '../archkit/writer'
-import { kitMaterials } from '../materials/library'
+import { Group, PointLight, Vector3 } from 'three'
+import { SlotMesh } from './tramMesh'
+import {
+  buildDoorSurround,
+  buildDoors,
+  buildEnd,
+  buildExteriorTrim,
+  buildGlazing,
+  buildHull,
+  buildLivery,
+  buildRoofPod,
+} from './tramBody'
+import { buildInterior } from './tramInterior'
+import { buildRunningGear } from './tramRunning'
+import { tramMaterials } from './tramMaterials'
+import { CAR_LENGTH, CAR_WIDTH } from './tramShape'
 
 /**
- * One tram car with REAL window apertures: the shell is panels (floor band,
- * pillars, roof band), never a solid box with glass stickers — the player
- * rides inside and the view through the glass IS the arrival. Origin at
- * floor center; +Z is travel.
+ * "THE LOOP" — Elysium Planitia Park's two-car automated people mover, and
+ * the hero object of the game: the player arrives inside it, rides it, and
+ * watches it cross the boulevard all day.
+ *
+ * Local frame: origin on the CABIN FLOOR at the car's centre, +Z forward,
+ * +X left. `tramSystem` places the group at guideway point + 0.62 m and
+ * yaws it to the tangent, so the beam top is local y = −0.62 and the guide
+ * wheels grip the beam flanks at x = ±0.675.
+ *
+ * Build order (experience-craft §5.1 — region by region, shell → trim →
+ * hardware → lamp):
+ *   1  monocoque hull: one welded grid, apertures cut by omission
+ *   2  glazing: framed panes whose border band IS the rubber seal
+ *   3  door surround: sill trim, upper track, jamb grab rails
+ *   4  nose + tail: mask edge, windshield, fascia, lamp clusters, coupler
+ *   5  livery: orange waist band, alpha-cut stencils
+ *   6  roof: HVAC fairing, grilles, antenna, beacon, lifting eyes
+ *   7  exterior trim: cant gutter, skirt rubbing strip
+ *   8  running gear: underframe, two bogies, tyres, guide wheels
+ *   9  interior: floor, trims, light coves, four benches, stanchions, console
+ *  10  doors: two sliding leaves in their own Group (the animation contract)
  */
+
 export interface TramCar {
   group: Group
+  /** Platform-side doors. EXACTLY two children; `tramSystem` drives their
+   *  local z to ±0.78. Child 0 is the leaf at negative z. */
   doorsLeft: Group
+  /** Right-side doors: this vehicle is single-sided, so the group is empty
+   *  and animating it is a no-op. Kept so existing callers still compile. */
   doorsRight: Group
-  /** Cabin seat surfaces (local space) facing `yaw` (0 = travel). */
+  /** Cabin seat surfaces in local space, facing `yaw` (0 = direction of
+   *  travel). `seats[0]` is the front-left window seat — the arrival seat. */
   seats: Array<{ position: Vector3; yaw: number }>
+  /** Triangles in this car, for the budget report. */
+  triangles: number
 }
 
-export const CAR_LENGTH = 8
-export const CAR_WIDTH = 2.5
-const SILL = 1.1 // window sill height
-const HEAD = 1.98 // window head height
-const ROOF = 2.3
+export { CAR_LENGTH, CAR_WIDTH }
 
-export function buildTramCar(): TramCar {
-  const writer = new PartWriter()
-  const materials = kitMaterials()
-  const half = CAR_LENGTH / 2
-  const side = CAR_WIDTH / 2
+/** Slots whose meshes must not be written into the sun's shadow map. */
+const NO_SHADOW_SLOTS = new Set(['glass', 'lampHead', 'lampTail', 'lampWarm', 'screen'])
 
-  // Floor + underframe + bogie skirts.
-  writer.box({
-    center: new Vector3(0, -0.14, 0),
-    size: new Vector3(CAR_WIDTH, 0.36, CAR_LENGTH),
-    slot: 'dark',
-    chamfer: 0.05,
-  })
-  writer.box({
-    center: new Vector3(0, 0.045, 0),
-    size: new Vector3(CAR_WIDTH - 0.16, 0.09, CAR_LENGTH - 0.2),
-    slot: 'deck',
-  })
-  for (const end of [-1, 1]) {
-    writer.box({
-      center: new Vector3(0, -0.44, end * 2.55),
-      size: new Vector3(CAR_WIDTH - 0.55, 0.42, 1.8),
-      slot: 'dark',
-      chamfer: 0.04,
-    })
-  }
+/**
+ * Cabin lamp intensity. `intensity / d²` at the seated head (≈0.9 m below the
+ * fixture) lands ≈ 3.7 — bright enough to model the lining and the seat backs
+ * against a dusk exterior, well under the 3.15 sun so the interior never
+ * out-reads the world through the glass.
+ */
+const CABIN_LAMP_INTENSITY = 3
 
-  // Side shells: lower band, window pillars, upper band. Door aperture at
-  // the center (−0.95..0.95), windows rear (−3.3..−1.35) and front
-  // (1.35..3.3); glass fills the apertures, inset 15 mm.
-  for (const s of [-1, 1]) {
-    const x = s * (side - 0.06)
-    writer.box({
-      center: new Vector3(x, SILL / 2, 0),
-      size: new Vector3(0.12, SILL, CAR_LENGTH),
-      slot: 'habShell',
-      chamfer: 0.03,
-      uvScale: 0.5,
-    })
-    writer.box({
-      center: new Vector3(x, (HEAD + ROOF) / 2, 0),
-      size: new Vector3(0.12, ROOF - HEAD, CAR_LENGTH),
-      slot: 'habShell',
-      chamfer: 0.03,
-    })
-    // Pillars: ends + door jambs + mid-window mullions.
-    for (const pz of [-half + 0.2, -1.15, 1.15, half - 0.2]) {
-      writer.box({
-        center: new Vector3(x, (SILL + HEAD) / 2, pz),
-        size: new Vector3(0.12, HEAD - SILL, 0.4),
-        slot: 'habShell',
-        chamfer: 0.025,
-      })
-    }
-    for (const wz of [-2.32, 2.32]) {
-      writer.box({
-        center: new Vector3(x, (SILL + HEAD) / 2, wz),
-        size: new Vector3(0.1, HEAD - SILL, 0.09),
-        slot: 'dark',
-      })
-    }
-    // Window glass (real apertures behind it).
-    for (const [z0, z1] of [
-      [-3.3, -1.35],
-      [1.35, 3.3],
-    ] as const) {
-      writer.box({
-        center: new Vector3(s * (side - 0.1), (SILL + HEAD) / 2, (z0 + z1) / 2),
-        size: new Vector3(0.025, HEAD - SILL - 0.06, z1 - z0),
-        slot: 'cabinGlass',
-      })
-    }
-    // Orange accent + polished sill cap.
-    writer.box({
-      center: new Vector3(x + s * 0.065, 0.42, 0),
-      size: new Vector3(0.015, 0.12, CAR_LENGTH - 0.6),
-      slot: 'orange',
-    })
-    writer.box({
-      center: new Vector3(x + s * 0.045, SILL + 0.015, 0),
-      size: new Vector3(0.05, 0.03, CAR_LENGTH - 0.5),
-      slot: 'steelEdge',
-      chamfer: 0.008,
-    })
-  }
+let autoIndex = 0
 
-  // Ends: band + pillars + big window + headlight bar.
-  for (const e of [-1, 1]) {
-    const z = e * (half - 0.06)
-    writer.box({
-      center: new Vector3(0, SILL / 2, z),
-      size: new Vector3(CAR_WIDTH, SILL, 0.12),
-      slot: 'habShell',
-      chamfer: 0.03,
-    })
-    writer.box({
-      center: new Vector3(0, (HEAD + ROOF) / 2, z),
-      size: new Vector3(CAR_WIDTH, ROOF - HEAD, 0.12),
-      slot: 'habShell',
-      chamfer: 0.03,
-    })
-    for (const px of [-side + 0.18, side - 0.18]) {
-      writer.box({
-        center: new Vector3(px, (SILL + HEAD) / 2, z),
-        size: new Vector3(0.36, HEAD - SILL, 0.12),
-        slot: 'habShell',
-        chamfer: 0.025,
-      })
-    }
-    writer.box({
-      center: new Vector3(0, (SILL + HEAD) / 2, e * (half - 0.1)),
-      size: new Vector3(CAR_WIDTH - 0.72, HEAD - SILL - 0.06, 0.025),
-      slot: 'cabinGlass',
-    })
-    writer.box({
-      center: new Vector3(0, 0.52, e * (half + 0.005)),
-      size: new Vector3(1.4, 0.09, 0.04),
-      slot: 'runningLight',
-    })
-  }
+export function buildTramCar(options?: { index?: number }): TramCar {
+  const index = options?.index ?? autoIndex++
+  const materials = tramMaterials(index)
+  const slots = new SlotMesh()
 
-  // Roof + equipment pod + cabin light strip.
-  writer.box({
-    center: new Vector3(0, ROOF + 0.05, 0),
-    size: new Vector3(CAR_WIDTH, 0.14, CAR_LENGTH),
-    slot: 'habShell',
-    chamfer: 0.05,
-    uvScale: 0.5,
-  })
-  writer.box({
-    center: new Vector3(0, ROOF + 0.32, 0),
-    size: new Vector3(1.6, 0.34, 5.2),
-    slot: 'aluminum',
-    chamfer: 0.05,
-  })
-  writer.box({
-    center: new Vector3(0, ROOF - 0.045, 0),
-    size: new Vector3(0.5, 0.035, CAR_LENGTH - 2),
-    slot: 'runningLight',
-  })
-
-  // Seats: front pair faces FORWARD at the front (the view seat), rear pair
-  // faces backward — nobody stares at a seat back through the money shot.
-  const seats: TramCar['seats'] = []
-  for (const [sx, sz, yaw] of [
-    [-0.72, 2.55, 0],
-    [0.72, 2.55, 0],
-    [-0.72, -2.55, Math.PI],
-    [0.72, -2.55, Math.PI],
-  ] as const) {
-    const back = yaw === 0 ? sz - 0.28 : sz + 0.28
-    writer.box({
-      center: new Vector3(sx, 0.38, sz),
-      size: new Vector3(1.0, 0.1, 0.55),
-      slot: 'fabricBlue',
-      chamfer: 0.025,
-    })
-    writer.box({
-      center: new Vector3(sx, 0.19, sz),
-      size: new Vector3(0.9, 0.3, 0.5),
-      slot: 'dark',
-      chamfer: 0.02,
-    })
-    writer.box({
-      center: new Vector3(sx, 0.8, back),
-      size: new Vector3(1.0, 0.76, 0.09),
-      slot: 'fabricBlue',
-      chamfer: 0.03,
-    })
-    seats.push({ position: new Vector3(sx, 0.43, sz), yaw })
-  }
-  for (const pz of [-1.15, 1.15]) {
-    writer.tube({
-      path: [new Vector3(0.95, 0.1, pz), new Vector3(0.95, ROOF - 0.06, pz)],
-      radius: 0.022,
-      slot: 'steelEdge',
-      radialSegments: 8,
-    })
-  }
+  buildHull(slots)
+  buildGlazing(slots)
+  buildDoorSurround(slots)
+  buildEnd(slots, 1)
+  buildEnd(slots, -1)
+  buildLivery(slots)
+  buildRoofPod(slots)
+  buildExteriorTrim(slots)
+  buildRunningGear(slots)
+  const cabinSeats = buildInterior(slots)
 
   const group = new Group()
-  const body = writer.build(materials)
-  body.traverse((o) => {
-    o.castShadow = true
-  })
+  group.name = `tram-car-${index}`
+  const body = slots.build(materials)
+  // Glazing and lenses do not cast: a transparent pane written into a shadow
+  // map darkens the cabin it is supposed to let light into.
+  for (const child of body.children) {
+    if (NO_SHADOW_SLOTS.has(child.name.replace('tram:', ''))) child.castShadow = false
+  }
   group.add(body)
 
-  // Pocket doors: two independently sliding panels per side. With +Z travel
-  // in a right-handed frame, +X local is the LEFT (platform) side.
-  const doorsLeft = new Group()
-  const doorsRight = new Group()
-  for (const [s, doors] of [
-    [1, doorsLeft],
-    [-1, doorsRight],
-  ] as const) {
-    for (const panel of [-1, 1]) {
-      const doorWriter = new PartWriter()
-      doorWriter.box({
-        center: new Vector3(s * (side - 0.09), 1.02, panel * 0.44),
-        size: new Vector3(0.05, 2.0, 0.86),
-        slot: 'habShell',
-        chamfer: 0.02,
-      })
-      doorWriter.box({
-        center: new Vector3(s * (side - 0.075), 1.5, panel * 0.44),
-        size: new Vector3(0.03, 0.62, 0.52),
-        slot: 'cabinGlass',
-      })
-      doors.add(doorWriter.build(materials))
-    }
-    group.add(doors)
+  // Cabin lamps. Emissive coves read as fixtures but light nothing, and the
+  // player rides in here for a minute at dusk. Two per car, never toggled,
+  // never shadow-casting — the two disciplines in world/lightFixtures.ts.
+  // NOTE for the lighting owner: these are OUTSIDE the LightFixtureRig
+  // budget because the rig's group is world-space and these must travel with
+  // the vehicle. See the tram doc for the requested registration.
+  for (const z of [-2.1, 2.1]) {
+    const lamp = new PointLight(0xffd9b0, CABIN_LAMP_INTENSITY, 6.5, 2)
+    lamp.position.set(0, 1.98, z)
+    lamp.castShadow = false
+    lamp.name = `tram-cabin-lamp-${index}-${z > 0 ? 'f' : 'r'}`
+    group.add(lamp)
   }
 
-  return { group, doorsLeft, doorsRight, seats }
+  const doorsLeft = buildDoors(materials, () => new SlotMesh())
+  group.add(doorsLeft)
+  const doorsRight = new Group()
+  doorsRight.name = 'tram-doors-right'
+  group.add(doorsRight)
+
+  // Contract: seats[0] is the arrival seat — front bench, LEFT window side,
+  // facing travel, with the whole windshield ahead of it.
+  const seats = orderSeats(cabinSeats)
+
+  return { group, doorsLeft, doorsRight, seats, triangles: slots.triangles }
+}
+
+/** Front-facing window seat first, then front aisle, then the rear pair. */
+function orderSeats(seats: Array<{ position: Vector3; yaw: number }>): TramCar['seats'] {
+  const score = (s: { position: Vector3; yaw: number }): number => {
+    const forward = s.yaw === 0 ? 0 : 1000
+    const outboard = -Math.abs(s.position.x) * 10
+    const leftFirst = s.position.x > 0 ? 0 : 1
+    return forward + outboard + leftFirst
+  }
+  return seats.slice().sort((a, b) => score(a) - score(b))
 }

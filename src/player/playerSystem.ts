@@ -3,6 +3,7 @@ import type RAPIER from '@dimforge/rapier3d-compat'
 import { MARS_GRAVITY, PhysicsSystem } from '../physics/physicsWorld'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
+import { interiorHeight } from '../world/interiorHeight'
 import { PORTAL_STATION } from '../world/parkPlan'
 import { PlayerInput } from './input'
 
@@ -41,10 +42,20 @@ export class PlayerSystem implements GameSystem {
   /**
    * Seated state: a pose closure (static for benches, live for the tram),
    * with authored smooth camera in/out — no cuts (design canon).
+   *
+   * The exit path keeps the pose alive in `exitPose` while the eye blends
+   * back to the standing point (SeaPark VehicleSeatRig pattern): the body is
+   * parked at the exit the moment the exit starts, so control hand-back is
+   * seamless, and the camera never cuts. Asymmetric blends: in 1.2 s, out
+   * 0.9 s, smoothstep-eased.
    */
   private seatedPose: (() => { eye: Vector3; yaw: number }) | null = null
+  private exitPose: (() => { eye: Vector3; yaw: number }) | null = null
   private seatBlend = 0
   private readonly walkEye = new Vector3()
+
+  /** Locomotion gate for camera rigs; look stays live regardless. */
+  controlEnabled = true
 
   constructor(physics: PhysicsSystem) {
     this.physics = physics
@@ -56,9 +67,11 @@ export class PlayerSystem implements GameSystem {
     const RAPIER_API = this.physics.api
     if (!RAPIER_API) throw new Error('PlayerSystem requires the rapier api')
 
+    // Station-foot apron: z=91 is inside the rebuilt platform slab.
     const spawnX = PORTAL_STATION.x
-    const spawnZ = PORTAL_STATION.z - 6
-    const spawnY = PORTAL_STATION.y + CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.25
+    const spawnZ = 87
+    const spawnY =
+      interiorHeight(spawnX, spawnZ) + CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.25
     const body = world.createRigidBody(
       RAPIER_API.RigidBodyDesc.kinematicPositionBased().setTranslation(spawnX, spawnY, spawnZ),
     )
@@ -93,19 +106,26 @@ export class PlayerSystem implements GameSystem {
   sit(seatSurface: Vector3, yaw: number): void {
     if (this.seatedPose) return
     const eye = seatSurface.clone().add(new Vector3(0, 0.74, 0))
+    // No yaw/pitch snap: the seated cone tightens with the blend instead.
+    this.exitPose = null
     this.seatedPose = () => ({ eye, yaw })
-    this.yaw = yaw
-    this.pitch = Math.min(this.pitch, 0.15)
     this.velocity.set(0, 0, 0)
   }
 
   /** Ride a moving vehicle: the pose closure is re-read every frame. */
   enterVehicle(pose: () => { eye: Vector3; yaw: number }): void {
+    this.exitPose = null
     this.seatedPose = pose
+    this.velocity.set(0, 0, 0)
+  }
+
+  /** Seat instantly (boot-time arrival: the day BEGINS in the cabin). */
+  enterVehicleImmediate(pose: () => { eye: Vector3; yaw: number }): void {
+    this.enterVehicle(pose)
     const now = pose()
     this.yaw = now.yaw
-    this.pitch = Math.min(this.pitch, 0.12)
-    this.velocity.set(0, 0, 0)
+    this.pitch = 0
+    this.seatBlend = 1
   }
 
   /** Leave any seat toward an explicit stand point (vehicle door, etc.). */
@@ -115,9 +135,12 @@ export class PlayerSystem implements GameSystem {
     const target = standPoint
       .clone()
       .setY(standPoint.y + CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.05)
+    // Park the body at the exit NOW; the eye blends after it (never a cut).
     body.setTranslation({ x: target.x, y: target.y, z: target.z }, false)
     this.previousPosition.copy(target)
     this.currentPosition.copy(target)
+    this.velocity.set(0, 0, 0)
+    this.exitPose = this.seatedPose
     this.seatedPose = null
   }
 
@@ -125,16 +148,25 @@ export class PlayerSystem implements GameSystem {
     const pose = this.seatedPose
     const body = this.body
     if (!pose || !body) return
-    // Step out in front of the seat at the body's frozen standing height,
-    // then the camera blends back from the seat pose — never a cut.
+    // Step out in front of the seat at the body's frozen standing height.
     const now = pose()
     const forward = new Vector3(Math.sin(now.yaw), 0, Math.cos(now.yaw))
     const current = body.translation()
     const standPoint = new Vector3(now.eye.x, current.y, now.eye.z).addScaledVector(forward, 0.55)
-    body.setTranslation({ x: standPoint.x, y: standPoint.y, z: standPoint.z }, false)
-    this.previousPosition.copy(standPoint)
-    this.currentPosition.copy(standPoint)
-    this.seatedPose = null
+    standPoint.y -= CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.05 // standAt re-adds
+    this.standAt(standPoint)
+  }
+
+  /** Camera-rig hand-back helpers (SeaPark player surface). */
+  setLook(yaw: number, pitch: number): void {
+    this.yaw = yaw
+    this.pitch = Math.max(-Math.PI * 0.488, Math.min(Math.PI * 0.488, pitch))
+  }
+
+  placeAt(x: number, y: number, z: number): void {
+    this.standAt(new Vector3(x, y, z))
+    this.exitPose = null
+    this.seatBlend = 0
   }
 
   fixedUpdate(ctx: GameContext, dt: number): void {
@@ -147,11 +179,14 @@ export class PlayerSystem implements GameSystem {
     if (ctx.time.paused) return
 
     // Seated: the body holds still; only the seat blend advances.
+    // Asymmetric authored blends (in 1.2 s / out 0.9 s, SeaPark rig).
     this.seatBlend = Math.max(
       0,
-      Math.min(1, this.seatBlend + (this.seatedPose ? dt : -dt) / 0.55),
+      Math.min(1, this.seatBlend + (this.seatedPose ? dt / 1.2 : -dt / 0.9)),
     )
-    if (this.seatedPose) {
+    if (this.seatBlend <= 0) this.exitPose = null
+    if (this.seatedPose || this.exitPose || !this.controlEnabled) {
+      // Locomotion frozen through the whole seat/exit blend; look stays live.
       input.jumpQueued = false
       return
     }
@@ -225,15 +260,22 @@ export class PlayerSystem implements GameSystem {
     position.z += -Math.sin(this.yaw) * lateral
 
     const eye = this.eye
-    const pose = this.seatedPose
+    // Blend against the live pose while seated, or the RETAINED pose while
+    // exiting — the branch that used to be dead (the pose was nulled and the
+    // body teleported in the same call: the documented hard-cut bug).
+    const pose = this.seatedPose ?? this.exitPose
     if (this.seatBlend > 0 && pose) {
       const now = pose()
       const blend = this.seatBlend * this.seatBlend * (3 - 2 * this.seatBlend)
       eye.lerpVectors(position, now.eye, blend)
-      // Seated look keeps a comfortable cone around the seat's facing.
+      // Seated look keeps a comfortable cone around the seat's facing; the
+      // cone TIGHTENS with the blend so entering never snaps the view.
       const delta = normalizeAngle(this.yaw - now.yaw)
-      this.yaw = now.yaw + Math.max(-1.35, Math.min(1.35, delta))
-      this.pitch = Math.max(-0.7, Math.min(0.65, this.pitch))
+      const yawLimit = Math.PI * (1 - blend) + 1.35 * blend
+      this.yaw = now.yaw + Math.max(-yawLimit, Math.min(yawLimit, delta))
+      const pitchLo = -Math.PI * 0.488 * (1 - blend) - 0.7 * blend
+      const pitchHi = Math.PI * 0.488 * (1 - blend) + 0.65 * blend
+      this.pitch = Math.max(pitchLo, Math.min(pitchHi, this.pitch))
     } else {
       eye.copy(position)
     }

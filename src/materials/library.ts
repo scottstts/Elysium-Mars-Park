@@ -155,7 +155,9 @@ export function signageMaterial(
     g.textBaseline = 'middle'
     const lineHeight = canvas.height / (lines.length + 0.6)
     lines.forEach((line, index) => {
-      const size = Math.min(lineHeight * 0.72, (canvas.width * 1.5) / Math.max(6, line.length))
+      // Width term must account for the letter spacing applied below, or any
+      // line ≥ 12 chars overflows the plate (works-district finding).
+      const size = Math.min(lineHeight * 0.72, (canvas.width * 0.78) / Math.max(4, 1.18 * line.length))
       g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
       const y = canvas.height / 2 + (index - (lines.length - 1) / 2) * lineHeight
       g.save()
@@ -304,6 +306,12 @@ export function kitMaterials(): KitMaterials {
       tubeWall: tubeWall(),
       runningLight: runningLight(),
       cabinGlass: cabinGlass(),
+      // Artificial light layer (W1-light). Slot names are a contract —
+      // see world/lightFixtures.ts EMISSIVE_SLOTS. Add, never rename.
+      signageGlow: signageGlow(),
+      floorLens: floorLens(),
+      interiorGlow: interiorGlow(),
+      utilityLight: utilityLight(),
     }
   }
   return shared
@@ -343,12 +351,83 @@ export function runningLight(): MeshStandardNodeMaterial {
   return material
 }
 
+/*
+ * ── THE ARTIFICIAL LIGHT LAYER ──────────────────────────────────────────
+ * Four emissive slots, authored as ONE calibrated HDR ladder against the
+ * bloom threshold (1.0, render/pipeline.ts). See world/lightFixtures.ts for
+ * the full ladder and the rules W2 agents build against. In short: pick the
+ * slot by ROLE, scale the emissive AREA rather than the multiplier, and give
+ * every lens a real recess and bezel — an emissive face with no depth reads
+ * as paint, not as light.
+ *
+ * None of these are flat emissive paint. Each carries a faint structure at
+ * UNCHANGED MEAN intensity (diffuser mottle, LED bar ripple, phosphor
+ * grain), so the ladder stays calibrated while the surfaces stop looking
+ * like coloured cardboard at 1 m.
+ */
+
+/** Backlit white sign face — the reference's HYDROPONICS / THE COMMONS plates. */
+export function signageGlow(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  // Edge-lit acrylic is never perfectly even: a slow diffuser gradient plus
+  // a whisper of grain. Mean stays 1.0 so the ×3.4 rung is exact.
+  const diffuser = worldNoise(0.6, 91.4).mul(0.14).add(0.93)
+  const grain = worldNoise(26, 12.7).mul(0.05).add(0.975)
+  material.colorNode = vec3(0.92, 0.9, 0.86)
+  material.emissiveNode = vec3(1.0, 0.965, 0.9).mul(diffuser).mul(grain).mul(3.4)
+  material.roughness = 0.42
+  material.metalness = 0
+  return material
+}
+
+/** Recessed floor / kerb light lens — warm, low, reflected in the paving. */
+export function floorLens(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  // Dust settles on an up-facing lens; the mottle is the reason a run of
+  // twenty lenses does not look like twenty copies of one decal.
+  const dust = worldNoise(3.1, 55.8).mul(0.18).add(0.9)
+  material.colorNode = vec3(0.86, 0.78, 0.66)
+  material.emissiveNode = vec3(1.0, 0.735, 0.44).mul(dust).mul(2.6)
+  material.roughnessNode = float(0.3).add(dust.mul(0.12))
+  material.metalness = 0
+  return material
+}
+
+/** Warm room light seen through glazing — building interiors, lit lobbies. */
+export function interiorGlow(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  // Broad, soft, and the dimmest rung: this slot is a WALL of light behind
+  // glass, so its area does the work. Pushing the multiplier instead makes
+  // whole facades bloom into featureless slabs.
+  const room = worldNoise(0.28, 7.9).mul(0.22).add(0.89)
+  material.colorNode = vec3(0.9, 0.84, 0.75)
+  material.emissiveNode = vec3(1.0, 0.8, 0.585).mul(room).mul(2.0)
+  material.roughness = 0.65
+  material.metalness = 0
+  return material
+}
+
+/** Small cool-white utility lamp — the bright points on structures at dusk. */
+export function utilityLight(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  // The brightest authored rung, on purpose, because these are TINY: a
+  // 6 cm lens needs a high multiplier to register as a point of light at
+  // 40 m. Never use this slot on a surface larger than ~0.1 m².
+  material.colorNode = vec3(0.88, 0.9, 0.92)
+  material.emissiveNode = vec3(0.855, 0.925, 1.0).mul(5.0)
+  material.roughness = 0.25
+  material.metalness = 0
+  return material
+}
+
 /** Dark cultivated soil — the only earth on Mars (tree ring, planters). */
 export function soilBed(): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial()
   const clod = worldNoise(9, 51.3)
   const moist = worldNoise(1.7, 60.1)
-  material.colorNode = mix(vec3(0.155, 0.115, 0.082), vec3(0.2, 0.15, 0.105), clod)
+  // Cultivated soil is the DARKEST ground in frame (vegetation-agent flag:
+  // it rendered lighter than the paving it sits inside).
+  material.colorNode = mix(vec3(0.072, 0.052, 0.038), vec3(0.105, 0.078, 0.055), clod)
     .mul(moist.mul(0.2).add(0.85))
   material.roughnessNode = float(0.96).sub(moist.mul(0.06))
   return material

@@ -1,20 +1,120 @@
-# Vegetation (S12)
+# Vegetation (OVERHAUL W2)
 
-- The ENTIRE green budget (canon): the First Tree + its collar, eight
-  steel-edged sedge beds, greenhouse crop trays, misting. Nothing else.
-- First Tree: swept-tube trunk/limbs/twigs (tapered, ginkgo's irregular
-  ascending tiers), ~170 canvas-painted leaf-cluster cards at real branch
-  tips, HVAC shimmer measured in millimeters. Trunk collider cylinder.
-- Foliage textures are canvas-painted (seeded LCG): ginkgo fans with the
-  center notch, sedge blade sprays, crop rosettes. No downloads.
-- Tufts: two crossed cards per tuft, instanced; sway scales with height².
-- Crops fill every tray tier of all three houses (~5k instances) — the
-  glow-through-milky-glass mass; misting sprites cycle 10 s every 90 s in
-  the enterable house.
-- Beds carry their own curb + soil boxes; bed placement clusters along the
-  Meridian and in the gardens (sparse by design — resist adding more).
-- S14 addition: the Regolith Gardens' raked furrows are REAL geometry
-  (writer tubes, slot 'soil', 1.9 m pitch, rings break around paths and
-  beds) — shader-only albedo rings do not survive grading + haze. Mist
-  sprites carry a radial opacity falloff and hang over the two side crop
-  tiers (a bare sprite is a hard translucent square).
+Rebuilt from scratch against `ref_images/mars_park.png`. Files under
+`src/vegetation/`: `firstTree` · `planting` · `gardens` · `greenhouse` ·
+`species` · `rocks` · `foliageMaterial` · `leafTextures` · `vegetationSystem`.
+
+## The reconciliation that governs everything
+
+`design.md` says vegetation is sparse and Mars-feeling; the reference image
+shows planters overflowing. Both are true at once, and the mechanism is the
+**wall**: green is lush *inside* raised planters and glass buildings, and open
+ground stays mineral. The plaza and boulevard read green because 42 walled
+beds overflow — walk ten metres off the paving and you are on raked regolith
+with rock and a rationed steel-edged bed. Densifying the gardens, or thinning
+the planters, breaks the idea rather than balancing it.
+
+## Ownership boundaries that must not drift
+
+- `world/paving.ts` owns planter walls, coping, and the soil SURFACE at
+  `slabTop + 0.38` **crowned 3 cm at mid-width**. `planting.ts` re-derives that
+  crown formula to seat plants; a plant placed on a flat 0.38 hovers 3 cm over
+  the middle of every bed. If paving changes the crown, change it here too.
+- The First Tree's **pit** (ring wall + soil disc + 24 wall colliders) is built
+  by `planting.buildTreeRing`, not by paving — the plaza is a continuous paved
+  disc and without the pit the tree grows out of a slab. It is built from
+  paving's own `PLANTER` constants and `createConcreteMaterial()` so it reads
+  as one family with the 42 arc beds. **If the ground agent ever adds a tree
+  surround, delete this instead of having two.**
+- `farmside.ts` publishes `CROP_TRAY_SURFACES` / `MIST_NOZZLES`;
+  `hydroTower.ts` publishes `HYDRO_SHELVES`. `greenhouse.ts` consumes them and
+  never re-derives rack geometry. hydroTower states it already builds baseline
+  planting, so the pass there is deliberately a light front row on alternate
+  tiers only.
+
+## The First Tree
+
+A 12.0 m ginkgo grown with the structured-ash method (skill
+`threejs-procedural-vegetation`), retuned to a ginkgo species table. What that
+method buys over hand-placed swept tubes: the **continuation model** (one
+terminal continuation per branch inheriting the parent's section/segment
+counts, plus stratified laterals) is what produces a real leader and an
+irregular crown — lateral-only generators make a candelabra.
+
+Declared divergences from the ash contract (§11 of its reference):
+
+1. Ginkgo table, metric, 12 m not 80.
+2. Longitudinal UV is **real arc length in metres** and U is metric
+   circumference, not the alternating 0/1 ring pattern — bark grain then has
+   one physical scale on the trunk and on a twig.
+3. Trunk sections eased `t^1.35`, so 8 of 16 land in the bottom 1.4 m. A root
+   flare needs resolution and a 12 m tree has no sections to spend uniformly.
+4. **Bark ridges are geometry**, not paint: each ring's radius is cut by a
+   periodic fissure field (integer θ harmonics so it closes) with an analytic
+   θ-derivative feeding the normal. `aRidge` is baked per vertex so the
+   material's colour and the geometry's form cannot disagree.
+5. Root flare and branch collars are **radius laws on the branch's own rings**
+   — flare decays with height, collars decay with run and the child is seated
+   `0.55 × parentRadius` INSIDE the parent. Nothing is assembled, so the
+   z-fight / gap / overlap defect class is designed out rather than policed.
+6. **Short shoots (spurs)** added — 700 of them, knobbly alternating ring
+   radii, three leaf sprays each. Not in the ash preset; the single most
+   ginkgo-specific feature of the tree.
+
+Measured: 139 174 tris (38 374 wood + 100 800 canopy), 8 400 leaf cards, crown
+8.4 × 7.6 m, lowest leaves at 4.0 m so the player walks under it. Zero NaN,
+zero degenerate, zero non-unit normals.
+
+## Species and instancing
+
+Seven ornamental species + three crop species, one `InstancedMesh` each.
+`species.ts` has two construction families chosen by viewing distance:
+
+- `bladeCluster()` — real tapered strips for sedge and the tree collar, with
+  the meadow-grass **hand-authored hemispherical normal `(sin, 0.34, cos)`** so
+  a tuft lights like a mound instead of like five fins.
+- `buildPlant()` / `CardSink` — cupped alpha cards carrying the ash system's
+  **rounded normal** `normalize(cardNormal + (vertex − origin))`, which fakes
+  the volume the card stands for. Flat card normals are what make a bush read
+  as a decal.
+
+Both bake `aDepth` (0 outside the plant, 1 buried in its middle). The foliage
+material uses it to darken the interior and kill the backlight there — free
+self-occlusion, and the cheapest single thing that stops a shrub reading as a
+sticker. Placement is always clustered (parents seeding 2–4 children), never a
+uniform sprinkle.
+
+## Materials
+
+`foliageMaterial.ts` owns every foliage/bark/rock material.
+
+- **Backlight** is the Frostbite translucency approximation
+  `pow(saturate(dot(−V, L)), k)` with no normal term, because a double-sided
+  card has no meaningful side. It is the park's second postcard: the low frozen
+  sun through the ginkgo canopy. Peaks stay UNDER the 1.0 bloom threshold.
+- **The blade bend is the exact inextensible circular arc**, not a sine offset:
+  `phi = clamp(strength·intensity·3, 0, 1.48)`, `a = phi·t^1.5`,
+  `r = height/phi`, `arc = r(1−cos a)`, `drop = r·sin a − y`. Blade length is
+  preserved and the tip drops as it leans.
+- Wind is rooted (`rootWeight` weighting, three detuned sines) and lives in
+  `positionNode`, which three reuses as the shadow position node — so shadows
+  sway with the leaves for free.
+
+## Colliders
+
+Tree trunk cylinder, 24 boxes around the tree-pit wall, and cylinders on hero
+boulders (> 0.55 m). Everything else is walk-through by design.
+
+## Known follow-ups
+
+- **Boulder silhouette.** The bedding and facets now read, but the `shape(v)`
+  law still produces a domed mass. Angular blocks, flatter crowns and a real
+  overhang would push these from "good rock" to "sculpture".
+- **Boulevard planters reach r = 94.9**, and the masterplan's guideway swept
+  volume starts at 94.5. Planting compensates (no outward spill, tall species
+  confined to the park side), but the WALL itself is over the line — a
+  paving/tram question, not a vegetation one.
+- The scene-wide `window.__elysium.audit()` gate has not been run against this
+  build: the app was unbootable throughout the session on other agents'
+  in-flight errors. Geometry was verified mechanically instead (headless
+  NaN/degenerate/normal-length sweep over the tree and rocks).

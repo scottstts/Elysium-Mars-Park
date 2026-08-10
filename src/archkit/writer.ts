@@ -1,5 +1,7 @@
 import { BufferAttribute, BufferGeometry, Group, Mesh, Vector2, Vector3 } from 'three'
 import type { Material } from 'three'
+import { placeYaw, revolve, roundedBoxMesh, SMOOTH, tubeAlong, writeInto } from './meshdata'
+import type { Vec2, Vec3 as MVec3 } from './meshdata'
 
 /**
  * Compact hard-surface mesh writer (craft rules from CLAUDE.md):
@@ -9,6 +11,12 @@ import type { Material } from 'three'
  *   machined hardware; chamfer faces can route to a separate slot so worn
  *   edge paint reads on real edges only;
  * - all faces are authored with explicit normals; no coplanar stacking.
+ *
+ * `PartWriter` is the SINK, not the authoring model. Anything with a
+ * silhouette belongs in `archkit/meshdata.ts` (profiles, lofts, lathes,
+ * welded apertures, true fillets, smooth-by-angle normals) and lands here via
+ * `writeInto(writer, slot, md)` — the two mix freely inside one assembly and
+ * merge into the same per-slot draw.
  */
 export class PartWriter {
   private readonly slots = new Map<
@@ -52,6 +60,27 @@ export class PartWriter {
     slot.indices.push(base, base + 1, base + 2, base, base + 2, base + 3)
   }
 
+  /**
+   * Append a pre-shaded triangle soup (positions/normals/uvs, all non-indexed
+   * and already in world Y-up). This is how `meshdata.writeInto()` delivers
+   * smooth-by-angle normals into a slot without the writer recomputing them
+   * per face — the whole point of the polygon layer.
+   */
+  raw(slotName: string, positions: ArrayLike<number>, normals: ArrayLike<number>, uvs?: ArrayLike<number>): void {
+    const count = Math.floor(positions.length / 3)
+    if (count === 0) return
+    const slot = this.slot(slotName)
+    const base = slot.positions.length / 3
+    for (let i = 0; i < count * 3; i++) {
+      slot.positions.push(positions[i])
+      slot.normals.push(normals[i])
+    }
+    for (let i = 0; i < count; i++) {
+      slot.uvs.push(uvs ? uvs[i * 2] : 0, uvs ? uvs[i * 2 + 1] : 0)
+    }
+    for (let i = 0; i < count; i++) slot.indices.push(base + i)
+  }
+
   tri(slotName: string, a: Vector3, b: Vector3, c: Vector3): void {
     const slot = this.slot(slotName)
     const normal = new Vector3().subVectors(b, a).cross(new Vector3().subVectors(c, a))
@@ -70,6 +99,13 @@ export class PartWriter {
    * Chamfered axis-aligned box (then transformed): 6 inset faces + 12 edge
    * chamfer quads + 8 corner triangles. `chamferSlot` routes the chamfer
    * band to a second material (worn edge paint).
+   *
+   * Pass `fillet` instead of `chamfer` for a **true radius**: a rounded-box
+   * grid whose knots concentrate on the arc, welded at the shared edge points
+   * and smooth-shaded at 40°. The 45° band reads as a bevel and its 8 hard
+   * corner triangles are a shading break; a fillet is what a moulded or
+   * machined part actually has. (`chamferSlot` does not apply to a fillet —
+   * there is no separate band to route.)
    */
   box(options: {
     center: Vector3
@@ -77,10 +113,26 @@ export class PartWriter {
     slot: string
     chamfer?: number
     chamferSlot?: string
+    fillet?: number
+    filletSegments?: number
     rotationY?: number
     uvScale?: number
   }): void {
     const { center, size, slot } = options
+    if (options.fillet !== undefined && options.fillet > 0) {
+      const hx = size.x / 2
+      const hy = size.y / 2
+      const hz = size.z / 2
+      const md = roundedBoxMesh(
+        [-hx, -hy, -hz, hx, hy, hz],
+        Math.min(options.fillet, Math.min(hx, hy, hz) * 0.98),
+        options.filletSegments ?? 2,
+      )
+      md.frame = 'y-up'
+      placeYaw(md, [center.x, center.y, center.z] as MVec3, options.rotationY ?? 0)
+      writeInto(this, slot, md, { uvScale: options.uvScale ?? 1 })
+      return
+    }
     const c = Math.min(
       options.chamfer ?? Math.min(0.012, Math.min(size.x, size.y, size.z) * 0.12),
       Math.min(size.x, size.y, size.z) * 0.33,
@@ -211,7 +263,16 @@ export class PartWriter {
     this.quad(slot, d2, a2, a, d, uvScale)
   }
 
-  /** Closed tube along a polyline (pipes, posts, conduits). */
+  /**
+   * Closed tube along a polyline (pipes, posts, conduits).
+   *
+   * Pass `profile` (a closed 2-D section, `(across, up)` in metres) to sweep a
+   * real section instead of a circle — handrails, extrusions, kerbs, cable
+   * trays. `miter` scales the across-axis by 1/cos at interior corners so the
+   * section keeps a constant apparent width through a bend; run the path
+   * through `meshdata.densify()` first so the mitre stays confined to the
+   * corner instead of twisting the whole run.
+   */
   tube(options: {
     path: Vector3[]
     radius: number
@@ -220,8 +281,22 @@ export class PartWriter {
     capStart?: boolean
     capEnd?: boolean
     uvScale?: number
+    profile?: Vector2[]
+    miter?: boolean
+    smoothAngle?: number
   }): void {
     const { path, radius, slot } = options
+    if (options.profile && options.profile.length >= 3) {
+      const md = tubeAlong(
+        path.map((p) => [p.x, p.y, p.z] as MVec3),
+        options.profile.map((p) => [p.x, p.y] as Vec2),
+        { up: [0, 1, 0], cap: options.capStart !== false || options.capEnd !== false, miter: options.miter },
+      )
+      md.frame = 'y-up'
+      md.shading = { mode: 'smooth', angle: options.smoothAngle ?? SMOOTH.moulded }
+      writeInto(this, slot, md, { uvScale: options.uvScale ?? 1 })
+      return
+    }
     const radialSegments = options.radialSegments ?? 10
     const slotData = this.slot(slot)
     const uvScale = options.uvScale ?? 1
@@ -307,16 +382,51 @@ export class PartWriter {
     if (options.capEnd) capRing(path.length - 1, false)
   }
 
-  /** Lathe a 2D profile (x = radius, y = height) around Y at `center`. */
+  /**
+   * Lathe a 2-D profile (x = radius, y = height) around Y at `center`.
+   *
+   * Routed through `meshdata.revolve`, so a profile point on the axis welds to
+   * ONE pole vertex instead of leaving a fan of `segments` coincident verts
+   * (those fans produce zero-area faces and NaN normals — see notes S12), and
+   * shading is smooth-by-angle so a turned shoulder creases instead of
+   * smearing. `capStart`/`capEnd` close an open profile; `arc` lathes a
+   * partial sweep. `legacyNormals` keeps the pre-port per-ring path.
+   */
   lathe(options: {
     center: Vector3
     profile: Vector2[]
     slot: string
     segments?: number
     uvScale?: number
+    capStart?: boolean
+    capEnd?: boolean
+    arc?: number
+    smoothAngle?: number
+    legacyNormals?: boolean
   }): void {
     const { center, profile, slot } = options
     const segments = options.segments ?? 32
+    if (!options.legacyNormals) {
+      const md = revolve(
+        profile.map((p) => [p.x, p.y] as Vec2),
+        segments,
+        {
+          axis: 'y',
+          arc: options.arc,
+          capStart: options.capStart ?? false,
+          capEnd: options.capEnd ?? false,
+          smooth: options.smoothAngle ?? SMOOTH.turned,
+        },
+      )
+      md.frame = 'y-up'
+      for (const v of md.verts) {
+        v[0] += center.x
+        v[1] += center.y
+        v[2] += center.z
+      }
+      writeInto(this, slot, md, { uvScale: options.uvScale ?? 1 })
+      return
+    }
     const slotData = this.slot(slot)
     // Per-ring normals from profile tangents.
     const profileNormals: Vector2[] = profile.map((_, i) => {

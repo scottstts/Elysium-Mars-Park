@@ -20,7 +20,7 @@ const TIERS: readonly QualityParams[] = [
     exteriorDetailRadius: 900,
     scatterDensity: 0.55,
     minRenderScale: 0.7,
-    shadowMapSizes: [2048, 2048, 2048],
+    shadowMapSizes: [2048, 2048, 2048, 1536],
   },
   {
     shaftSteps: 20,
@@ -28,7 +28,7 @@ const TIERS: readonly QualityParams[] = [
     exteriorDetailRadius: 1600,
     scatterDensity: 0.8,
     minRenderScale: 0.8,
-    shadowMapSizes: [3072, 3072, 2048],
+    shadowMapSizes: [3072, 3072, 2048, 2048],
   },
   {
     shaftSteps: 28,
@@ -36,7 +36,7 @@ const TIERS: readonly QualityParams[] = [
     exteriorDetailRadius: 2600,
     scatterDensity: 1,
     minRenderScale: 0.85,
-    shadowMapSizes: [4096, 4096, 3072],
+    shadowMapSizes: [4096, 4096, 3072, 2048],
   },
 ]
 

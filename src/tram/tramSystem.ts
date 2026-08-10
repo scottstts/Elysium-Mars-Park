@@ -1,7 +1,6 @@
-import { Group, Mesh, PlaneGeometry, Quaternion, Vector3 } from 'three'
-import { canopy, guardrail } from '../archkit/kit'
+import { Group, Quaternion, Vector3 } from 'three'
 import { PartWriter } from '../archkit/writer'
-import { kitMaterials, signageMaterial } from '../materials/library'
+import { kitMaterials } from '../materials/library'
 import type { PhysicsSystem } from '../physics/physicsWorld'
 import type { InteractionSystem } from '../player/interaction'
 import type { PlayerSystem } from '../player/playerSystem'
@@ -10,7 +9,7 @@ import type { GameSystem } from '../runtime/system'
 import { markDynamic } from '../render/layers'
 import { interiorHeight } from '../world/interiorHeight'
 import { LOOP } from '../world/parkPlan'
-import { beamTopY, buildGuideway, buildTrackData, buildTube } from './track'
+import { buildGuideway, buildStations, buildTrackData, buildTube, carFloorY } from './track'
 import type { TrackData } from './track'
 import { buildTramCar, CAR_LENGTH } from './vehicle'
 import type { TramCar } from './vehicle'
@@ -96,7 +95,7 @@ export class TramSystem implements GameSystem {
       })
       const petal = new Group()
       petal.add(petalWriter.build(materials))
-      petal.position.set(Math.cos(angle) * 2.1, 4.6 + Math.sin(angle) * 2.1, 250.4)
+      petal.position.set(Math.cos(angle) * 2.1, 4.6 + Math.sin(angle) * 2.1, 128.4)
       petal.rotation.z = angle + Math.PI / 2
       this.staticGroup.add(petal)
       this.irisPetals.push(petal)
@@ -116,11 +115,17 @@ export class TramSystem implements GameSystem {
     // continuous kinematic sync entirely (cars never collide with anything).
 
     if (this.player) {
-      // The player begins the day already seated in the front car (canon).
+      // The player begins the day already seated in the front car (canon):
+      // no boarding blend at boot — the day BEGINS in the seat.
       this.phase = 'arrival'
       this.arrivalS = 0
       this.speed = TUBE_SPEED
-      this.seatPlayer()
+      this.riding = true
+      // Place the cars FIRST: seatPose reads the car's world matrix, and
+      // before the first placement the car sits at the origin facing +Z —
+      // the seat yaw comes out π wrong and pins at the look-cone edge.
+      this.placeCars()
+      this.player.enterVehicleImmediate(() => this.seatPose())
     } else {
       // Validation views: the tram circulates the loop.
       this.phase = 'run'
@@ -157,7 +162,9 @@ export class TramSystem implements GameSystem {
 
   private seatPose(): { eye: Vector3; yaw: number } {
     const car = this.cars[0]
-    const seat = car.seats[0]
+    // Front-left AISLE seat when the new cabin provides it: the window
+    // seat's A-pillar bisects the dead-ahead arrival view (vehicle report).
+    const seat = car.seats[2] ?? car.seats[0]
     const world = seat.position.clone().applyMatrix4(car.group.matrixWorld)
     world.y += 0.74
     const quaternion = car.group.getWorldQuaternion(new Quaternion())
@@ -184,7 +191,10 @@ export class TramSystem implements GameSystem {
     )
     const door = car.group.position.clone().addScaledVector(left, 2.4)
     door.y = interiorHeight(door.x, door.z) + 0.02
-    if (door.distanceTo(new Vector3(0, door.y, 194)) < 30) door.y = 1.35
+    // Every platform decks at the cabin floor less the 20 mm step.
+    if (Math.abs(Math.hypot(door.x, door.z) - LOOP.radius) < 8) {
+      door.y = carFloorY(door.x, door.z) - 0.02
+    }
     player.standAt(door)
   }
 
@@ -198,7 +208,7 @@ export class TramSystem implements GameSystem {
       // station approach brake — one continuous shot, no cuts.
       const remaining = track.arrivalLength - this.arrivalS
       const target = Math.min(
-        this.arrivalS > track.arrivalLength - 260 ? CRUISE : TUBE_SPEED,
+        this.arrivalS > track.arrivalLength - 210 ? CRUISE : TUBE_SPEED,
         Math.sqrt(2 * ACCEL * Math.max(0.01, remaining)) + 0.15,
       )
       this.speed += Math.max(-ACCEL * dt * 1.6, Math.min(ACCEL * dt, target - this.speed))
@@ -259,7 +269,7 @@ export class TramSystem implements GameSystem {
         this.irisPetals[i].position.set(
           Math.cos(angle) * radial,
           4.6 + Math.sin(angle) * radial,
-          250.4,
+          128.4,
         )
       }
     }
@@ -317,102 +327,6 @@ export class TramSystem implements GameSystem {
     ctx.scene.remove(this.staticGroup)
     ctx.scene.remove(this.movingGroup)
   }
-}
-
-/** Overlook + Farmside side platforms (the Portal platform is S7's). */
-function buildStations(writer: PartWriter, group: Group, physics: PhysicsSystem): void {
-  for (const station of LOOP.stations) {
-    if (station.id === 'portal') continue
-    const point = new Vector3(
-      Math.cos(station.angle) * LOOP.radius,
-      0,
-      Math.sin(station.angle) * LOOP.radius,
-    )
-    // Platform inside the loop, left of travel; deck meets the car floor.
-    const inward = point.clone().normalize().multiplyScalar(-1)
-    const center = point.clone().addScaledVector(inward, 3.6)
-    const ground = interiorHeight(center.x, center.z)
-    const deckY = beamTopY(point.x, point.z) + 0.6
-    const yaw = Math.atan2(inward.x, inward.z)
-    center.setY(deckY - 0.3)
-    writer.box({
-      center,
-      size: new Vector3(4.6, 0.6, 16),
-      rotationY: yaw,
-      slot: 'deck',
-      chamferSlot: 'steelEdge',
-      chamfer: 0.025,
-    })
-    writer.box({
-      center: center.clone().setY(deckY - 0.72),
-      size: new Vector3(4.0, 0.5, 15.4),
-      rotationY: yaw,
-      slot: 'dark',
-    })
-    canopy(writer, center.clone().setY(deckY).addScaledVector(inward, 0.4), 8, 4.4, 3.1)
-    const railA = center
-      .clone()
-      .setY(deckY)
-      .addScaledVector(inward, 2.2)
-    guardrail(writer, [
-      railA.clone().add(new Vector3(-Math.cos(yaw) * 7.6, 0, Math.sin(yaw) * 7.6)),
-      railA.clone().add(new Vector3(Math.cos(yaw) * 7.6, 0, -Math.sin(yaw) * 7.6)),
-    ])
-    // Ramp from grade.
-    const rampFoot = center
-      .clone()
-      .setY(0)
-      .addScaledVector(inward, 4.6)
-    writer.slab(
-      [
-        rampFoot.clone().add(new Vector3(-Math.cos(yaw) * 1.4, interiorHeight(rampFoot.x, rampFoot.z) + 0.05, Math.sin(yaw) * 1.4)),
-        rampFoot.clone().add(new Vector3(Math.cos(yaw) * 1.4, interiorHeight(rampFoot.x, rampFoot.z) + 0.05, -Math.sin(yaw) * 1.4)),
-        center.clone().setY(deckY + 0.01).addScaledVector(inward, 2.25).add(new Vector3(Math.cos(yaw) * 1.4, 0, -Math.sin(yaw) * 1.4)),
-        center.clone().setY(deckY + 0.01).addScaledVector(inward, 2.25).add(new Vector3(-Math.cos(yaw) * 1.4, 0, Math.sin(yaw) * 1.4)),
-      ],
-      0.12,
-      'deck',
-    )
-    const sign = new Mesh(
-      new PlaneGeometry(2.6, 0.5),
-      signageMaterial([station.id === 'overlook' ? 'OVERLOOK WEST' : 'FARMSIDE'], {
-        background: '#25231f',
-        accent: '#c94f1d',
-        widthPx: 640,
-      }),
-    )
-    sign.position.copy(center.clone().setY(deckY + 2.7))
-    sign.rotation.y = yaw
-    group.add(sign)
-
-    const world = physics.world
-    const api = physics.api
-    if (world && api) {
-      const body = world.createRigidBody(api.RigidBodyDesc.fixed())
-      world.createCollider(
-        api.ColliderDesc.cuboid(2.3, 0.3, 8)
-          .setTranslation(center.x, deckY - 0.3, center.z)
-          .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }),
-        body,
-      )
-      // Ramp collider.
-      const rampMid = center.clone().lerp(rampFoot.clone().setY(ground), 0.55)
-      const rampLength = center.distanceTo(rampFoot)
-      const rampPitch = Math.atan2(deckY - ground, rampLength)
-      world.createCollider(
-        api.ColliderDesc.cuboid(1.4, 0.08, rampLength / 2 + 0.4)
-          .setTranslation(rampMid.x, rampMid.y + 0.02, rampMid.z)
-          .setRotation(pitchYawQuaternion(-rampPitch, yaw)),
-        body,
-      )
-    }
-  }
-}
-
-function pitchYawQuaternion(pitch: number, yaw: number): { x: number; y: number; z: number; w: number } {
-  const quaternion = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), yaw)
-  quaternion.multiply(new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), pitch))
-  return { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w }
 }
 
 function clamp(v: number, lo: number, hi: number): number {
