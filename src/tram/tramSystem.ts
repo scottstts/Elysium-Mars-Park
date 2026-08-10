@@ -1,0 +1,424 @@
+import { Group, Mesh, PlaneGeometry, Quaternion, Vector3 } from 'three'
+import { canopy, guardrail } from '../archkit/kit'
+import { PartWriter } from '../archkit/writer'
+import { kitMaterials, signageMaterial } from '../materials/library'
+import type { PhysicsSystem } from '../physics/physicsWorld'
+import type { InteractionSystem } from '../player/interaction'
+import type { PlayerSystem } from '../player/playerSystem'
+import type { GameContext } from '../runtime/context'
+import type { GameSystem } from '../runtime/system'
+import { markDynamic } from '../render/layers'
+import { interiorHeight } from '../world/interiorHeight'
+import { LOOP } from '../world/parkPlan'
+import { beamTopY, buildGuideway, buildTrackData, buildTube } from './track'
+import type { TrackData } from './track'
+import { buildTramCar, CAR_LENGTH } from './vehicle'
+import type { TramCar } from './vehicle'
+
+/**
+ * The Loop (plan §11): arrival spur through the tube, then the closed
+ * circuit forever. Kinematic arc-length motion with a comfort speed
+ * profile; the tram IS the arrival cinematic — the player begins seated
+ * inside the front car, in the dark, rolling toward the portal.
+ */
+
+const CRUISE = 8
+const TUBE_SPEED = 11.5
+const ACCEL = 1.05
+const DWELL_SECONDS = 22
+const CAR_GAP = 0.7
+
+type Phase = 'waiting' | 'arrival' | 'dwell' | 'run'
+
+export class TramSystem implements GameSystem {
+  readonly id = 'tram'
+
+  private track: TrackData | null = null
+  private readonly cars: TramCar[] = []
+  private readonly staticGroup = new Group()
+  private readonly movingGroup = new Group()
+
+  private phase: Phase = 'waiting'
+  private arrivalS = 0
+  private loopS = 0
+  private speed = 0
+  private dwellRemaining = 0
+  private nextStationIndex = 0
+  private doorOpen = 0
+  private riding = false
+  private alightQueued = false
+
+  private readonly physics: PhysicsSystem
+  private readonly player: PlayerSystem | null
+  private readonly interaction: InteractionSystem | null
+  private readonly boardPosition = new Vector3()
+  private readonly irisPetals: Group[] = []
+  private irisOpen = 0
+
+  constructor(
+    physics: PhysicsSystem,
+    player: PlayerSystem | null,
+    interaction: InteractionSystem | null,
+  ) {
+    this.physics = physics
+    this.player = player
+    this.interaction = interaction
+  }
+
+  init(ctx: GameContext): void {
+    const track = buildTrackData()
+    this.track = track
+
+    const writer = new PartWriter()
+    buildGuideway(writer, track)
+    buildTube(writer, track)
+    buildStations(writer, this.staticGroup, this.physics)
+    this.staticGroup.add(writer.build(kitMaterials()))
+    ctx.scene.add(this.staticGroup)
+
+    // Portal iris: six sliding petals in a collar at the wall crossing.
+    const materials = kitMaterials()
+    const petalCount = 6
+    for (let i = 0; i < petalCount; i++) {
+      const angle = (i / petalCount) * Math.PI * 2 + Math.PI / 6
+      const petalWriter = new PartWriter()
+      petalWriter.box({
+        center: new Vector3(0, 0, 0),
+        size: new Vector3(2.6, 4.4, 0.22),
+        slot: 'dark',
+        chamfer: 0.03,
+      })
+      petalWriter.box({
+        center: new Vector3(0, -1.6, -0.14),
+        size: new Vector3(2.2, 0.5, 0.08),
+        slot: 'orange',
+        chamfer: 0.015,
+      })
+      const petal = new Group()
+      petal.add(petalWriter.build(materials))
+      petal.position.set(Math.cos(angle) * 2.1, 4.6 + Math.sin(angle) * 2.1, 250.4)
+      petal.rotation.z = angle + Math.PI / 2
+      this.staticGroup.add(petal)
+      this.irisPetals.push(petal)
+    }
+
+    for (let i = 0; i < 2; i++) {
+      const car = buildTramCar()
+      this.movingGroup.add(car.group)
+      this.cars.push(car)
+    }
+    markDynamic(this.movingGroup)
+    ctx.scene.add(this.movingGroup)
+
+    // Tram colliders: one kinematic box per car (keeps walkers off the beam).
+    // The cars only touch the player during boarding, which the seat pose
+    // handles — so plain fixed colliders updated per dwell are enough; skip
+    // continuous kinematic sync entirely (cars never collide with anything).
+
+    if (this.player) {
+      // The player begins the day already seated in the front car (canon).
+      this.phase = 'arrival'
+      this.arrivalS = 0
+      this.speed = TUBE_SPEED
+      this.seatPlayer()
+    } else {
+      // Validation views: the tram circulates the loop.
+      this.phase = 'run'
+      this.loopS = track.stationS.get('farmside') ?? 0
+      this.speed = CRUISE
+      this.nextStationIndex = this.stationOrder().indexOf('overlook')
+    }
+
+    if (this.interaction && this.player) {
+      const player = this.player
+      this.interaction.register({
+        position: this.boardPosition,
+        label: () => (this.riding ? '' : 'Board the Loop'),
+        range: 3.2,
+        onUse: () => {
+          if (!this.riding && this.phase === 'dwell') this.board()
+          void player
+        },
+      })
+    }
+  }
+
+  private stationOrder(): string[] {
+    // Travel order with decreasing angle parametrization.
+    return ['portal', 'farmside', 'overlook']
+  }
+
+  private seatPlayer(): void {
+    const player = this.player
+    if (!player) return
+    this.riding = true
+    player.enterVehicle(() => this.seatPose())
+  }
+
+  private seatPose(): { eye: Vector3; yaw: number } {
+    const car = this.cars[0]
+    const seat = car.seats[0]
+    const world = seat.position.clone().applyMatrix4(car.group.matrixWorld)
+    world.y += 0.74
+    const quaternion = car.group.getWorldQuaternion(new Quaternion())
+    const forward = new Vector3(0, 0, 1).applyQuaternion(quaternion)
+    // Player yaw 0 looks along −Z, so looking WITH travel T needs
+    // atan2(−T.x, −T.z); seat.yaw π flips for the rear-facing pair.
+    return { eye: world, yaw: Math.atan2(-forward.x, -forward.z) + seat.yaw }
+  }
+
+  private board(): void {
+    this.seatPlayer()
+    this.alightQueued = false
+  }
+
+  private alight(): void {
+    const player = this.player
+    const track = this.track
+    if (!player || !track) return
+    this.riding = false
+    // Stand on the platform side (left of travel = +X local, right-handed).
+    const car = this.cars[0]
+    const left = new Vector3(1, 0, 0).applyQuaternion(
+      car.group.getWorldQuaternion(new Quaternion()),
+    )
+    const door = car.group.position.clone().addScaledVector(left, 2.4)
+    door.y = interiorHeight(door.x, door.z) + 0.02
+    if (door.distanceTo(new Vector3(0, door.y, 194)) < 30) door.y = 1.35
+    player.standAt(door)
+  }
+
+  fixedUpdate(ctx: GameContext, dt: number): void {
+    const track = this.track
+    if (!track) return
+    if (this.phase === 'waiting') return
+
+    if (this.phase === 'arrival') {
+      // Speed: fast in the tube, easing to cruise by the portal, then the
+      // station approach brake — one continuous shot, no cuts.
+      const remaining = track.arrivalLength - this.arrivalS
+      const target = Math.min(
+        this.arrivalS > track.arrivalLength - 260 ? CRUISE : TUBE_SPEED,
+        Math.sqrt(2 * ACCEL * Math.max(0.01, remaining)) + 0.15,
+      )
+      this.speed += Math.max(-ACCEL * dt * 1.6, Math.min(ACCEL * dt, target - this.speed))
+      this.arrivalS += this.speed * dt
+      if (this.arrivalS >= track.arrivalLength - 0.02) {
+        this.phase = 'dwell'
+        this.loopS = track.handoffS
+        this.dwellRemaining = DWELL_SECONDS + 8
+        this.speed = 0
+        this.nextStationIndex = 1 // farmside next
+        ctx.events.emit('tram/docked', { station: 'portal' })
+      }
+    } else if (this.phase === 'dwell') {
+      this.dwellRemaining -= dt
+      if (this.dwellRemaining > 1.4) {
+        this.doorOpen = Math.min(1, this.doorOpen + dt / 0.9)
+      } else {
+        this.doorOpen = Math.max(0, this.doorOpen - dt / 0.8)
+        if (this.dwellRemaining <= 0 && this.doorOpen <= 0) this.phase = 'run'
+      }
+    } else {
+      // Run: brake toward the next station stop.
+      const order = this.stationOrder()
+      const stationId = order[this.nextStationIndex % order.length]
+      const stopS = track.stationS.get(stationId) ?? 0
+      let distance = stopS - this.loopS
+      while (distance < 0) distance += track.loopLength
+      const target = Math.min(CRUISE, Math.sqrt(2 * ACCEL * Math.max(0.01, distance)) + 0.12)
+      this.speed += Math.max(-ACCEL * dt * 1.7, Math.min(ACCEL * dt, target - this.speed))
+      this.loopS = (this.loopS + this.speed * dt) % track.loopLength
+      if (distance < 0.25 && this.speed < 0.3) {
+        this.loopS = stopS
+        this.speed = 0
+        this.phase = 'dwell'
+        this.dwellRemaining = DWELL_SECONDS
+        this.nextStationIndex++
+        ctx.events.emit('tram/docked', { station: stationId })
+        if (this.riding && this.alightQueued) {
+          this.alightQueued = false
+          this.alight()
+        }
+      }
+    }
+
+    this.placeCars()
+
+    // Iris: petals slide open ahead of the approaching tram, seal after.
+    const track2 = this.track
+    if (track2) {
+      const nearPortal =
+        this.phase === 'arrival' && this.arrivalS > track2.arrivalLength - 105
+      const target = nearPortal || this.phase !== 'arrival' ? 1 : 0
+      this.irisOpen += Math.max(-dt / 2.4, Math.min(dt / 2.4, target - this.irisOpen))
+      const eased = this.irisOpen * this.irisOpen * (3 - 2 * this.irisOpen)
+      for (let i = 0; i < this.irisPetals.length; i++) {
+        const angle = (i / this.irisPetals.length) * Math.PI * 2 + Math.PI / 6
+        const radial = 2.1 + eased * 4.6
+        this.irisPetals[i].position.set(
+          Math.cos(angle) * radial,
+          4.6 + Math.sin(angle) * radial,
+          250.4,
+        )
+      }
+    }
+
+    // Riding controls: E queues alighting (consumed here, not by captions).
+    const player = this.player
+    if (this.riding && player) {
+      const input = (player as unknown as { input: { useQueued: boolean } | null }).input
+      if (input?.useQueued) {
+        input.useQueued = false
+        if (this.phase === 'dwell' && this.doorOpen > 0.5) this.alight()
+        else this.alightQueued = !this.alightQueued
+      }
+    }
+  }
+
+  private placeCars(): void {
+    const track = this.track
+    if (!track) return
+    const spacing = CAR_LENGTH + CAR_GAP
+    for (let i = 0; i < this.cars.length; i++) {
+      const offset = (i === 0 ? 0.5 : -0.5) * spacing
+      let point: Vector3
+      let ahead: Vector3
+      if (this.phase === 'arrival') {
+        const s = clamp(this.arrivalS + offset, 0, track.arrivalLength)
+        point = track.arrival.getPointAt(s / track.arrivalLength)
+        ahead = track.arrival.getPointAt(clamp(s + 1.5, 0, track.arrivalLength) / track.arrivalLength)
+      } else {
+        const s = mod(this.loopS + offset, track.loopLength)
+        point = track.loop.getPointAt(s / track.loopLength)
+        ahead = track.loop.getPointAt(mod(s + 1.5, track.loopLength) / track.loopLength)
+      }
+      const car = this.cars[i].group
+      car.position.copy(point).add(new Vector3(0, 0.62, 0))
+      car.rotation.set(0, Math.atan2(ahead.x - point.x, ahead.z - point.z), 0)
+      const pitch = Math.atan2(ahead.y - point.y, Math.hypot(ahead.x - point.x, ahead.z - point.z))
+      car.rotateX(-pitch)
+      car.updateMatrixWorld()
+
+      // Doors: platform side is the left; animate the slide.
+      const open = this.doorOpen * 0.78
+      this.cars[i].doorsLeft.children.forEach((panelMesh, index) => {
+        panelMesh.position.z = (index === 0 ? -1 : 1) * open
+      })
+    }
+
+    // Keep the boarding caption anchored at the front car's left door.
+    const car = this.cars[0]
+    const left = new Vector3(1.6, 1.2, 0).applyMatrix4(car.group.matrixWorld)
+    this.boardPosition.copy(left)
+  }
+
+  dispose(ctx: GameContext): void {
+    ctx.scene.remove(this.staticGroup)
+    ctx.scene.remove(this.movingGroup)
+  }
+}
+
+/** Overlook + Farmside side platforms (the Portal platform is S7's). */
+function buildStations(writer: PartWriter, group: Group, physics: PhysicsSystem): void {
+  for (const station of LOOP.stations) {
+    if (station.id === 'portal') continue
+    const point = new Vector3(
+      Math.cos(station.angle) * LOOP.radius,
+      0,
+      Math.sin(station.angle) * LOOP.radius,
+    )
+    // Platform inside the loop, left of travel; deck meets the car floor.
+    const inward = point.clone().normalize().multiplyScalar(-1)
+    const center = point.clone().addScaledVector(inward, 3.6)
+    const ground = interiorHeight(center.x, center.z)
+    const deckY = beamTopY(point.x, point.z) + 0.6
+    const yaw = Math.atan2(inward.x, inward.z)
+    center.setY(deckY - 0.3)
+    writer.box({
+      center,
+      size: new Vector3(4.6, 0.6, 16),
+      rotationY: yaw,
+      slot: 'deck',
+      chamferSlot: 'steelEdge',
+      chamfer: 0.025,
+    })
+    writer.box({
+      center: center.clone().setY(deckY - 0.72),
+      size: new Vector3(4.0, 0.5, 15.4),
+      rotationY: yaw,
+      slot: 'dark',
+    })
+    canopy(writer, center.clone().setY(deckY).addScaledVector(inward, 0.4), 8, 4.4, 3.1)
+    const railA = center
+      .clone()
+      .setY(deckY)
+      .addScaledVector(inward, 2.2)
+    guardrail(writer, [
+      railA.clone().add(new Vector3(-Math.cos(yaw) * 7.6, 0, Math.sin(yaw) * 7.6)),
+      railA.clone().add(new Vector3(Math.cos(yaw) * 7.6, 0, -Math.sin(yaw) * 7.6)),
+    ])
+    // Ramp from grade.
+    const rampFoot = center
+      .clone()
+      .setY(0)
+      .addScaledVector(inward, 4.6)
+    writer.slab(
+      [
+        rampFoot.clone().add(new Vector3(-Math.cos(yaw) * 1.4, interiorHeight(rampFoot.x, rampFoot.z) + 0.05, Math.sin(yaw) * 1.4)),
+        rampFoot.clone().add(new Vector3(Math.cos(yaw) * 1.4, interiorHeight(rampFoot.x, rampFoot.z) + 0.05, -Math.sin(yaw) * 1.4)),
+        center.clone().setY(deckY + 0.01).addScaledVector(inward, 2.25).add(new Vector3(Math.cos(yaw) * 1.4, 0, -Math.sin(yaw) * 1.4)),
+        center.clone().setY(deckY + 0.01).addScaledVector(inward, 2.25).add(new Vector3(-Math.cos(yaw) * 1.4, 0, Math.sin(yaw) * 1.4)),
+      ],
+      0.12,
+      'deck',
+    )
+    const sign = new Mesh(
+      new PlaneGeometry(2.6, 0.5),
+      signageMaterial([station.id === 'overlook' ? 'OVERLOOK WEST' : 'FARMSIDE'], {
+        background: '#25231f',
+        accent: '#c94f1d',
+        widthPx: 640,
+      }),
+    )
+    sign.position.copy(center.clone().setY(deckY + 2.7))
+    sign.rotation.y = yaw
+    group.add(sign)
+
+    const world = physics.world
+    const api = physics.api
+    if (world && api) {
+      const body = world.createRigidBody(api.RigidBodyDesc.fixed())
+      world.createCollider(
+        api.ColliderDesc.cuboid(2.3, 0.3, 8)
+          .setTranslation(center.x, deckY - 0.3, center.z)
+          .setRotation({ x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) }),
+        body,
+      )
+      // Ramp collider.
+      const rampMid = center.clone().lerp(rampFoot.clone().setY(ground), 0.55)
+      const rampLength = center.distanceTo(rampFoot)
+      const rampPitch = Math.atan2(deckY - ground, rampLength)
+      world.createCollider(
+        api.ColliderDesc.cuboid(1.4, 0.08, rampLength / 2 + 0.4)
+          .setTranslation(rampMid.x, rampMid.y + 0.02, rampMid.z)
+          .setRotation(pitchYawQuaternion(-rampPitch, yaw)),
+        body,
+      )
+    }
+  }
+}
+
+function pitchYawQuaternion(pitch: number, yaw: number): { x: number; y: number; z: number; w: number } {
+  const quaternion = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), yaw)
+  quaternion.multiply(new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), pitch))
+  return { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w }
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v))
+}
+
+function mod(v: number, m: number): number {
+  return ((v % m) + m) % m
+}
