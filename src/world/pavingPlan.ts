@@ -4,6 +4,7 @@ import {
   BOULEVARD,
   COMMONS,
   FIRST_TREE,
+  FREEDOM_TOWER,
   HYDRO_TOWER,
   LOOP,
   OVERLOOK_LOUNGE,
@@ -380,6 +381,21 @@ function buildRegions(): Region[] {
     curb: true,
   })
 
+  // Freedom Tower terrace: the paved disc the tower's stylobate stands on
+  // (the 'station-terrace' pattern — paving owns the ground plane, the
+  // district builds its castings ON it with line-contact skirts). The
+  // 'tower-walk' ribbon ends inside this disc, so the clip machinery gives
+  // the doorstep junction one watertight shared seam.
+  list.push({
+    kind: 'disc',
+    id: 'freedom-terrace',
+    priority: 70,
+    cx: FREEDOM_TOWER.x,
+    cz: FREEDOM_TOWER.z,
+    radius: FREEDOM_TOWER.terraceRadius,
+    curb: true,
+  })
+
   // The transit boulevard: the widest paved band in the park.
   list.push({
     kind: 'annulus',
@@ -414,10 +430,17 @@ function buildRegions(): Region[] {
   for (const path of PATHS) {
     if (path.surface !== 'paver' || path.id === 'rim-promenade') continue
     const [extendStart, extendEnd] = RIBBON_RUNOUT[path.id] ?? [0, 0]
+    // Two ribbons at ONE priority never trim each other — the clip only cuts
+    // lower against higher — so a spoke-to-spoke junction is a coplanar
+    // overlap (owner report: flicker where the tower walk meets the
+    // Meridian). Every other spoke junction lands on a higher-priority disc,
+    // which is why this never surfaced before. Any spoke that BRANCHES OFF
+    // another spoke must sit one rung lower so the trunk trims it.
+    const branch = path.id === 'tower-walk'
     list.push({
       kind: 'ribbon',
       id: path.id,
-      priority: 40,
+      priority: branch ? 39 : 40,
       line: ribbonLine(path.points, extendStart, extendEnd),
       halfWidth: path.width / 2,
       curb: true,

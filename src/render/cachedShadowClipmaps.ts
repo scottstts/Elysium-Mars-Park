@@ -44,8 +44,18 @@ const DIRTY_DIRECTION = 1 << 5
 /** How far ahead (in seconds of travel) recentering leads a moving camera. */
 const LEAD_SECONDS = 1
 
-/** Extra down-sun slab depth so ground far below a high camera stays inside. */
-const DEPTH_REACH = 70
+/**
+ * Extra down-sun slab depth so ground far below a high camera stays inside.
+ * The level centre tracks the CAMERA in light space, so the ground below a
+ * camera at height h sits h / sin(sun elevation) down-sun of it — at this
+ * park's 27° sun that is 2.2 × h. A receiver past a level's far plane
+ * returns fully lit while the level still claims the pixel (XY-only level
+ * weighting), which reads as the shadow ENDING on a hard line perpendicular
+ * to the sun (owner report: the Freedom Tower's shadow cut off from aerial
+ * views — the gallery deck at 40 m made high cameras a public vantage).
+ * 200 covers ~90 m of camera height with the finest level's own width on top.
+ */
+const DEPTH_REACH = 200
 
 interface ClipmapLight extends Object3D {
   target: Object3D

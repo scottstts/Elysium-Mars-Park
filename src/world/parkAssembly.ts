@@ -8,6 +8,7 @@ import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import { buildCommons } from './districts/commons'
 import { buildFarmside } from './districts/farmside'
+import { buildFreedomTower } from './districts/freedomTower'
 import { buildHydroTower } from './districts/hydroTower'
 import { buildInteriors } from './districts/interiors'
 import { buildLeisure } from './districts/leisure'
@@ -61,6 +62,7 @@ export class ParkAssemblySystem implements GameSystem {
     buildLeisure(services)
     buildCommons(services)
     buildHydroTower(services)
+    buildFreedomTower(services)
     buildAmenities(services)
     buildInteriors(services)
     this.opsAnchor = services.opsAnchor

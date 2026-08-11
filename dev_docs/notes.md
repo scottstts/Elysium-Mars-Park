@@ -2637,3 +2637,55 @@ plate; do not regress to a hero + button.
   `chromium` can only be true when uaData exists, where the old path still
   rules — the fallback only keeps the diagnosis honest. Probe matrix now
   asserts the desktop FLAG per browser, not just eligibility (14 UA cases).
+
+## Freedom Tower build (2026-08-11) — the landmark + gallery lift
+
+- Full write-up: `dev_docs/systems/freedom-tower.md`. Headlines for future
+  agents, beyond what that doc and the code say:
+- **Derive landmark heights from the dome, never author them.** The spire
+  tip is `√(R² − r_site²) + centerY − clearance`; the audit asserts every
+  vertex ≥ 0.55 m inside the shell. Any tall build near the glass owes the
+  same derivation + assert.
+- **A tall public vantage is a NEW TEST CATEGORY.** Three latent park-wide
+  defects were invisible until a 40 m gallery existed: (1) shadow-clipmap
+  casters clip at `lightMargin < h/sinθ` (→150) and receivers clip at
+  `DEPTH_REACH < h·2.2` below a high camera (→200) — a shadow that "ends on
+  a hard line ⊥ sun" is ALWAYS this slab, one end or the other; (2) GTAO
+  emits full-width iso-depth "barcode" rows wherever its world radius spans
+  < ~8 gather texels — the fix that holds is a COMPETENCE fade (footprint
+  between radius/8 and radius/3.3), not distance windows (whack-a-mole);
+  (3) r185 PassNode depth defaults to 24-bit (`FloatType` commented out in
+  three's source) — set it explicitly on any pass whose depth is
+  reconstructed from.
+- **Two paving ribbons at ONE priority never trim each other** — the clip
+  cuts lower against higher only. Every earlier spoke junction landed on a
+  higher-priority disc, so the first spoke-to-spoke branch (tower-walk off
+  the Meridian) shipped a coplanar overlap. Rule: a branch spoke sits one
+  rung (39) below its trunk (40).
+- **`stadiumRadius`-style star-shaped fields** are the drum-collider lesson
+  generalized: pit, curbs, screens, aperture, colliders all from one signed
+  field about the cab/core spine — nothing can disagree. Worth copying for
+  any future shaft/void.
+- **Elevator state machines need an explicit `departing` flag**: an arrived
+  cab is also riding+parked, and the doors-shut→depart rule re-fires
+  instantly without it (the first live ride bounced off the top). Found by
+  RIDING it headlessly (keyboard events + step batches), not by the audit.
+- **The interaction caption override is last-writer-wins**: the tram writes
+  unconditionally every frame; any later system may only write while it
+  owns the ride + one null on release. Register ride systems AFTER the tram.
+- kit.bench on a raised deck works fine (seats registered on the gallery,
+  sight-line raycast passes) — but bench colliders are the CALLER's job.
+- Probing traps re-confirmed: `placeAt` puts the body EXACTLY where told —
+  0.7 m past the deck edge is a 38 m fall (compute r before teleporting);
+  and a probe that presses E during the door-closing window CANCELS the
+  ride (by design) — wait for `departing` to clear before judging a stall.
+- **A bare `MeshData.from` quad has NO uvs, and `toTriangles` falls back to
+  planar WORLD-coordinate uvs** — on a clamped CanvasTexture that renders as
+  one edge-pixel smear (the tower's name blade shipped as a blank dark
+  plate). Any hand-built printed face needs explicit 0..1 uvs
+  (`printedQuad` in freedomTower.ts), and the read direction is fixed by
+  the VERTEX-TO-UV pairing alone — reversing the winding with matching uv
+  reversal changes NOTHING visible. Derive mirrorU per face from the
+  reader's screen-right = forward × up vs the authored +x image (the tower
+  blade + deck lintel + lectern plaque mirror; the gallery orientation
+  desks do not).

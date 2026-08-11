@@ -48,6 +48,12 @@ export const BOOKMARKS: Record<string, Bookmark> = {
   // Bonus framing: the Overlook Lounge drum from the rim walk (not one of
   // the ten, but the drum deserves a saved camera).
   overlook: { position: [-100, 5.0, 8.0], look: [-114, 3.4, -6], stage: 'S8' },
+  // Bonus: Freedom Tower from the approach walk — full height against the
+  // dome, the lattice waist and the gallery lantern in one look.
+  freedom: { position: [1.5, 2.9, 41.5], look: [33, 30, 57], stage: 'landmark' },
+  // Bonus: under the tower looking straight up through the hyperboloid at
+  // the cab, deck soffit and spire (the hero low-angle).
+  freedomup: { position: [27.2, 1.7, 52.6], look: [32.2, 46, 56.4], stage: 'landmark' },
   // Dev-only wide establishing view (not part of the ten).
   overview: { position: [100, 80, 135], look: [0, 15, 0], stage: 'dev' },
   // Dev-only pipeline calibration gallery.

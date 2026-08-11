@@ -30,6 +30,7 @@ import { createEntryScreen } from './ui/entryScreen'
 import { PauseSystem } from './ui/pauseMenu'
 import { DevOrbitSystem } from './world/devOrbit'
 import { DoorsSystem } from './world/doors'
+import { FreedomElevatorSystem } from './world/freedomElevator'
 import { GroundworksSystem } from './world/groundworks'
 import { OpsScreensSystem } from './world/opsScreens'
 import { ParkAssemblySystem } from './world/parkAssembly'
@@ -118,6 +119,7 @@ async function boot(): Promise<void> {
     const doors = registry.add(new DoorsSystem(physics, null))
     const assembly = registry.add(new ParkAssemblySystem(physics, null, null, doors))
     const tram = registry.add(new TramSystem(physics, null, null))
+    registry.add(new FreedomElevatorSystem(physics, null, null))
     const robots = registry.add(new RobotsSystem(null))
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
@@ -128,6 +130,9 @@ async function boot(): Promise<void> {
     const doors = registry.add(new DoorsSystem(physics, interaction))
     const assembly = registry.add(new ParkAssemblySystem(physics, player, interaction, doors))
     const tram = registry.add(new TramSystem(physics, player, interaction))
+    // After the tram: both share the caption override, and the later system
+    // must be the elevator so its seated hint wins while a guest rides it.
+    registry.add(new FreedomElevatorSystem(physics, player, interaction))
     const robots = registry.add(new RobotsSystem(player))
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))

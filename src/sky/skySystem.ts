@@ -96,6 +96,14 @@ export class SkySystem implements GameSystem {
       firstRadius: CLIPMAP_FIRST_RADIUS,
       scaleFactor: CLIPMAP_SCALE_FACTOR,
       maxDistance: CLIPMAP_MAX_DISTANCE,
+      // Up-sun caster reach. A caster h metres above the level centre sits
+      // h / sin(27°) up-sun of it, and the centre tracks the CAMERA — so with
+      // the default 120 m margin the Freedom Tower's crown (≈ 50 m, tallest
+      // thing under the shell) clipped through the shadow camera's near
+      // plane whenever the camera stood low, and the tower's shadow ended in
+      // a hard mid-lattice line (owner report). 50 / sin 27° ≈ 110 m, plus
+      // the z-recentre quantum and headroom: 150.
+      lightMargin: 150,
       // The frozen world never expires; robots/tram render into their own
       // small continuously-refreshed maps on the dynamic caster layer.
       dynamicLevels: 0,

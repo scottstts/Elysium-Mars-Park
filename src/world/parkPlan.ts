@@ -87,6 +87,18 @@ export const HYDRO_TOWER = { x: 52, z: 18, radius: 7, floors: 3, y: 0.55 }
 /** White water tower over The Works — the skyline landmark. */
 export const WATER_TOWER = { x: 66, z: -34, height: 17 }
 
+/**
+ * FREEDOM TOWER — the park's landmark: a hyperboloid steel lattice spire on
+ * the open ground between the plaza and the south-east boulevard, carrying a
+ * glass gallery deck just beneath the dome shell. `doorAngle` is the plan
+ * bearing of the elevator door axis (points from the tower axis toward the
+ * approach walk — the boarding lobby, the gallery lobby and the glass cab
+ * all sit on this line). Everything else about the tower — deck height, spire
+ * tip, cab travel — is DERIVED in `districts/freedomTower.ts` from this
+ * anchor plus the dome-shell constants, so the tower always fits the glass.
+ */
+export const FREEDOM_TOWER = { x: 33, z: 57, terraceRadius: 12.76, doorAngle: Math.PI + 0.21 }
+
 export const RESIDENTIAL = {
   arcRadius: 88,
   /** Angles (rad, from +X axis, CCW toward −Z i.e. north) for 10 habs. */
@@ -216,6 +228,16 @@ export const PATHS: PathSpec[] = [
     surface: 'paver',
   },
   {
+    id: 'tower-walk',
+    // Meridian Walk → Freedom Tower. The last point sits INSIDE the tower's
+    // 'freedom-terrace' paving region so the two pours share one watertight
+    // clipped seam (the ribbon is trimmed against the higher-priority disc —
+    // ending short would leave a crescent of bare regolith at the doorstep).
+    points: [v(2, 50), v(12, 52), v(22.6, 54.8)],
+    width: 3.6,
+    surface: 'paver',
+  },
+  {
     id: 'gardens-loop',
     points: [
       v(-22, -26),
@@ -244,6 +266,8 @@ export const PADS: PadSpec[] = [
   { id: 'commons', x: -2, z: -54, y: 0.55, radius: 14, skirt: 7 },
   { id: 'hydro-tower', x: 52, z: 18, y: 0.55, radius: 10, skirt: 5 },
   { id: 'farmside', x: 70, z: 0, y: 0.6, radius: 26, skirt: 10 },
+  // Freedom Tower site: flat ground under the terrace + lattice footing.
+  { id: 'freedom-tower', x: FREEDOM_TOWER.x, z: FREEDOM_TOWER.z, y: 0.55, radius: 13, skirt: 7 },
   { id: 'works', x: 50, z: -56, y: 0.5, radius: 34, skirt: 12 },
   { id: 'yard', x: 28, z: -70, y: 0.4, radius: 15, skirt: 8 },
   { id: 'playground', x: -22, z: -70, y: 0.4, radius: 10, skirt: 6 },

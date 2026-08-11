@@ -52,6 +52,7 @@ import {
   BOULEVARD,
   COMMONS,
   FIRST_TREE,
+  FREEDOM_TOWER,
   GARDENS,
   HYDRO_TOWER,
   LOOP,
@@ -185,6 +186,9 @@ function blockers(): Blocker[] {
     { x: COMMONS.x, z: COMMONS.z, r: COMMONS.radius + 3.2 },
     { x: HYDRO_TOWER.x, z: HYDRO_TOWER.z, r: HYDRO_TOWER.radius + 3.2 },
     { x: WATER_TOWER.x, z: WATER_TOWER.z, r: 7 },
+    // Freedom Tower: the stylobate + its paved surround (steps start at
+    // r 11.7; the disc runs to 12.76 — furniture belongs outside both).
+    { x: FREEDOM_TOWER.x, z: FREEDOM_TOWER.z, r: FREEDOM_TOWER.terraceRadius + 1.4 },
     { x: AMPHITHEATER.x, z: AMPHITHEATER.z, r: AMPHITHEATER.bowlRadius + 1.5 },
     { x: PLAYGROUND.x, z: PLAYGROUND.z, r: PLAYGROUND.radius + 2 },
     { x: OVERLOOK_LOUNGE.x, z: OVERLOOK_LOUNGE.z, r: 14 },
@@ -1699,6 +1703,29 @@ function parkModelParts(): PartSoup[] {
     translate(pod, [hab.x * SCALE, hab.z * SCALE, TOP + 0.003])
     alloy.push(pod)
   }
+  // Freedom Tower at 1:210 — the tallest thing on the table, a waisted
+  // spire whose profile echoes the hyperboloid + gallery + needle.
+  {
+    const th = 49.2 * SCALE // ≈ 234 mm
+    const spire = revolve(
+      [
+        [0, 0],
+        [7.8 * SCALE, 0],
+        [3.6 * SCALE, th * 0.55],
+        [4.4 * SCALE, th * 0.74],
+        [5.4 * SCALE, th * 0.78],
+        [5.4 * SCALE, th * 0.84],
+        [0.8 * SCALE, th * 0.92],
+        [0.35 * SCALE, th * 0.94],
+        [0, th],
+      ],
+      14,
+      { smooth: SMOOTH.turned },
+    )
+    translate(spire, [FREEDOM_TOWER.x * SCALE, FREEDOM_TOWER.z * SCALE, TOP + 0.003])
+    alloy.push(spire)
+  }
+
   // The First Tree, 12 m tall at 1:210 — 57 mm of ginkgo.
   const tree = revolve(
     [
@@ -2377,6 +2404,20 @@ const GATES: GateSpec[] = [
     ],
   },
   {
+    id: 'freedom',
+    title: 'FREEDOM TOWER',
+    subtitle: 'GALLERY LIFT · DECK 38.7 M',
+    x: 8.6,
+    z: 47.2,
+    approachX: 0,
+    approachZ: 28,
+    fingers: [
+      { label: 'THE GALLERY', targetX: FREEDOM_TOWER.x, targetZ: FREEDOM_TOWER.z },
+      { label: 'FIRST TREE', targetX: 0, targetZ: 0 },
+      { label: 'PORTAL STN', targetX: PORTAL_STATION.x, targetZ: PORTAL_STATION.z },
+    ],
+  },
+  {
     id: 'works',
     title: 'THE WORKS',
     subtitle: 'CREW ONLY · PPE BEYOND THIS POINT',
@@ -2612,6 +2653,7 @@ const DESTINATIONS: Array<{ label: string; x: number; z: number }> = [
   { label: 'FIRST TREE', x: 0, z: 0 },
   { label: 'PORTAL STN', x: PORTAL_STATION.x, z: PORTAL_STATION.z },
   { label: 'THE COMMONS', x: COMMONS.x, z: COMMONS.z },
+  { label: 'FREEDOM TOWER', x: FREEDOM_TOWER.x, z: FREEDOM_TOWER.z },
   { label: 'HYDROPONICS', x: HYDRO_TOWER.x, z: HYDRO_TOWER.z },
   { label: 'FARMSIDE', x: 70, z: 0 },
   { label: 'THE WORKS', x: WORKS.machineHall.x, z: WORKS.machineHall.z },

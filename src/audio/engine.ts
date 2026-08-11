@@ -4,7 +4,15 @@ import type { GameSystem } from '../runtime/system'
 import type { PlayerSystem } from '../player/playerSystem'
 import type { RobotsSystem } from '../robots/robotsSystem'
 import type { TramSystem } from '../tram/tramSystem'
-import { COMMONS, FARMSIDE, OVERLOOK_LOUNGE, PORTAL_STATION, RESIDENTIAL, WORKS } from '../world/parkPlan'
+import {
+  COMMONS,
+  FARMSIDE,
+  FREEDOM_TOWER,
+  OVERLOOK_LOUNGE,
+  PORTAL_STATION,
+  RESIDENTIAL,
+  WORKS,
+} from '../world/parkPlan'
 import { pavedSignedDistance } from '../world/pavingPlan'
 
 /**
@@ -336,6 +344,14 @@ export class AudioEngineSystem implements GameSystem {
     if (
       Math.abs(position.x - lounge.x) < lounge.depth / 2 + 0.3 &&
       Math.abs(position.z - lounge.z) < lounge.width / 2 + 0.3
+    ) {
+      return 'interior'
+    }
+    // Freedom Tower: the glass cab in flight and the gallery pavilion are
+    // both enclosed rooms; the open terrace below is park.
+    if (
+      position.y > 4.5 &&
+      Math.hypot(position.x - FREEDOM_TOWER.x, position.z - FREEDOM_TOWER.z) < 6
     ) {
       return 'interior'
     }

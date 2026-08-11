@@ -1,4 +1,11 @@
-import { ColorManagement, NeutralToneMapping, NormalBlending, NoToneMapping, SRGBColorSpace } from 'three'
+import {
+  ColorManagement,
+  FloatType,
+  NeutralToneMapping,
+  NormalBlending,
+  NoToneMapping,
+  SRGBColorSpace,
+} from 'three'
 import type { Camera, Mesh } from 'three'
 import { BlendMode, RenderPipeline } from 'three/webgpu'
 import type { Node, PassNode } from 'three/webgpu'
@@ -127,6 +134,17 @@ export class RenderPipelineSystem implements GameSystem {
     renderer.toneMapping = NoToneMapping
 
     const scenePass = pass(scene, camera, { samples: 4 })
+    // depth32float, not the 24-bit default (r185 PassNode ships FloatType
+    // commented out). Under reversed-z, 24-bit fixed depth quantizes the
+    // mid-field ground into iso-depth plateaus, and every consumer that
+    // RECONSTRUCTS positions from depth (the GTAO horizon march above all)
+    // reads the plateau steps as geometry — full-width horizontal
+    // "barcode" bands on open regolith (owner report, provable in
+    // ?pass=ao). Float depth is what the pipeline's reversed-z guards
+    // assume everywhere else.
+    if (scenePass.renderTarget.depthTexture) {
+      scenePass.renderTarget.depthTexture.type = FloatType
+    }
     // The normal target's spare alpha is the AO-receiver mask: lit opaque
     // materials inherit 1; sky/glass override to 0 where AO must not apply.
     // `albedo` is what lets AO stay off direct light (see the composite
@@ -189,7 +207,22 @@ export class RenderPipelineSystem implements GameSystem {
         const centerView = getViewPosition(centerUv, centerDepth, projectionInverse)
         const centerRaw = sceneNormal.sample(centerUv).rgb
         const centerNormal = centerRaw.mul(inverseSqrt(max(dot(centerRaw, centerRaw), 1e-8)))
-        const centerVisibility = aoTexture.sample(centerUv).r
+        // EVERY read of the half-res AO buffer snaps to that buffer's own
+        // texel centres. The AO target is renderer-size × ½ with its own
+        // rounding, so full-res UVs drift a fractional texel against it and
+        // the 2:1 resample BEATS — coherent full-width horizontal stripes
+        // ("barcode" bands, owner report from the Freedom Tower's aerial
+        // vantages; provable in ?pass=ao). Texel-centred reads make the row
+        // beat impossible by construction at any viewport size, which is
+        // the permanent fix — the fades below are only the retirement of a
+        // sub-pixel contact effect, not the defence.
+        const aoTexelUv = (sourceUv: Node<'vec2'>) =>
+          (sourceUv as unknown as ReturnType<typeof vec2>)
+            .mul(aoResolution)
+            .floor()
+            .add(0.5)
+            .div(aoResolution)
+        const centerVisibility = aoTexture.sample(aoTexelUv(centerUv)).r
         const texel = vec2(1).div(aoResolution)
         const depthSigma = max(float(0.08), centerView.z.abs().mul(0.04))
         const weightedSum = centerVisibility.toVar()
@@ -202,12 +235,12 @@ export class RenderPipelineSystem implements GameSystem {
         ] as const
 
         for (const [x, y] of offsets) {
-          const sampleUv = centerUv.add(texel.mul(vec2(x, y)))
+          const sampleUv = aoTexelUv(centerUv).add(texel.mul(vec2(x, y)))
           const sampleDepth = sceneDepth.sample(sampleUv).r
           const sampleView = getViewPosition(sampleUv, sampleDepth, projectionInverse)
           const sampleRaw = sceneNormal.sample(sampleUv).rgb
           const sampleNormal = sampleRaw.mul(inverseSqrt(max(dot(sampleRaw, sampleRaw), 1e-8)))
-          const visibility = aoTexture.sample(sampleUv).r
+          const visibility = aoTexture.sample(aoTexelUv(sampleUv)).r
           const depthWeight = exp(sampleView.z.sub(centerView.z).abs().div(depthSigma).negate())
           const normalWeight = pow(max(dot(centerNormal, sampleNormal), 0), 12)
           const spatialWeight = x !== 0 && y !== 0 ? 0.70710678 : 1
@@ -234,8 +267,26 @@ export class RenderPipelineSystem implements GameSystem {
     const viewZNode = footprintView.z
     const aoDistance = (viewZNode as unknown as ReturnType<typeof float>).negate()
     const aoGatherFootprint = max(dFdx(footprintView).length(), dFdy(footprintView).length()).mul(2.0)
-    const aoFootprintFade = smoothstep(AO_WORLD_RADIUS * 0.25, AO_WORLD_RADIUS, aoGatherFootprint)
-    const aoDistanceFade = smoothstep(60.0, 160.0, aoDistance)
+    // Competence fade (the GTAO skill's failure condition: "AO remains
+    // strong at distances where its world radius is subpixel"). The horizon
+    // march needs the world radius to span ~8 gather texels to integrate
+    // anything; below that it emits sampling garbage that the bilateral
+    // organizes into full-width iso-depth ROWS (the "barcode" bands, owner
+    // report). Fade out between radius/8 and radius/3.3 of footprint — a
+    // ratio, so it self-adapts to any resolution, FOV, zoom or divisor
+    // instead of pinning the artifact to one window. The old end point at
+    // 1.0 × radius completed EIGHT TIMES past the competence limit.
+    const aoFootprintFade = smoothstep(AO_WORLD_RADIUS * 0.125, AO_WORLD_RADIUS * 0.3, aoGatherFootprint)
+    // 28→70, not the old 60→160: the half-res gather quantizes into
+    // full-width FALSE-OCCLUSION ROWS ("barcode" streaks, owner report from
+    // the Freedom Tower gallery) on open regolith seen FACE-ON from height —
+    // a regime the footprint fade cannot catch, because looking down keeps
+    // the pixel footprint small at ranges where the grazing ground-level
+    // view has long since faded. At 0.9 m radius the AO is a sub-pixel
+    // contact effect past ~50 m from ANY angle, so retiring it by 70 m
+    // costs nothing the eye can resolve and removes the whole banding
+    // window for aerial views.
+    const aoDistanceFade = smoothstep(28.0, 70.0, aoDistance)
     const aoReliabilityFade = max(aoDistanceFade, aoFootprintFade)
     const distanceFilteredAo = mix(filteredAo, float(1), aoReliabilityFade)
     const aoReceiver = sceneNormal.a.clamp(0, 1)
