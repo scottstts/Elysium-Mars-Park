@@ -716,7 +716,14 @@ export function buildTreeRing(
       kind: 'box',
       center: new Vector3(x, slabTop(x, z) + rim / 2, z),
       size: new Vector3(PLANTER.wall + over * 2, rim, (a1 - a0) * radius + 0.08),
-      yaw: Math.atan2(Math.cos(midAngle), -Math.sin(midAngle)),
+      // size.x is the RADIAL wall thickness, so local +X must be the radial.
+      // The collider convention maps local +X to (cos yaw, −sin yaw), which is
+      // the radial (cos m, sin m) only at yaw = −m. The old
+      // `atan2(cos m, −sin m)` is m + π/2 — neither radial nor tangential, so
+      // the box swung between the two around the ring: thin tangentially near
+      // m = 0, ±π/2, ±π (1.2 m gaps a capsule walks straight through) and
+      // 1.5 m proud of the kerb into the plaza at the diagonals.
+      yaw: -midAngle,
     })
   }
 

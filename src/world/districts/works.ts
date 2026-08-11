@@ -126,9 +126,27 @@ const SEAM_H = 0.055
 const CLEAR_SILL = 6.0
 const CLEAR_HEAD = 7.3
 const WALL_TOP = 8.0
+
+/**
+ * Sheeting rib phase. The first crest of a run sits `CREST_T` along it and
+ * they repeat every `CREST_PITCH`; anything bolted THROUGH the sheet has to
+ * land on one, so the fastener rows and the sign subframe's fixing rails both
+ * read their positions from here rather than each guessing.
+ */
+const CREST_T = 0.34 * 0.55 + 0.34 * 0.11 + (0.34 * 0.23) / 2
+const CREST_PITCH = 0.68
+/** Lays a lathed part (screw domes) flat against the park-facing wall. */
+const WALL_YAW = Math.atan2(-ACROSS[1], -ACROSS[0])
 /** Openings on the park-facing (ACROSS-minus) wall. */
 const ROLL_DOOR = { a0: 0.34, a1: 3.94, head: 4.72 }
 const PERSON_DOOR = { a0: -2.69, a1: -1.59, head: 2.33 }
+/**
+ * Girt heights on the ACROSS walls. Shared, because a wall flashing has to be
+ * fixed to a girt: the plaza elevation's string course lands on `GIRT_H[2]`.
+ */
+const GIRT_H = [1.5, 3.2, 4.9, 7.75]
+/** Wall-mounted HVAC sets on the park-facing wall (see buildHallServices). */
+const HVAC_A = [-9.6, 5.2]
 /** The gallery pierces the ALONG-minus gable here. */
 const GALLERY_GAP = { c0: -1.35, c1: 1.35, sill: 4.02, head: 6.55 }
 /** Gallery deck top, above FLOOR. Skids below clear it by design. */
@@ -577,7 +595,22 @@ function signHeight(width: number): number {
   return width * 0.28
 }
 
-/** Stencil plate helper. */
+/**
+ * Stencil plate helper.
+ *
+ * The assembly's geometry along the facing axis `f`, measured from `at`:
+ * corner bosses span −0.035 … +0.035, the backing plate +0.010 … +0.060, and
+ * the printed face sits at +0.063. So the REARMOST part of a sign is its
+ * bosses at `at − 0.035·f` — that is the surface which has to meet its host.
+ *
+ * `legsToY`: plant two posts down to that world Y — REQUIRED for any plate
+ * that isn't carried by a wall or a bracket (a floating sign was an
+ * owner-reported defect at the maintenance yard).
+ * `standoff`: distance from `at` BACK to the host face. Emits four studs
+ * bridging the bosses to the host, so a plate held off profiled sheeting or
+ * off a tank reads as fixed rather than hovering. Below 45 mm the bosses
+ * already reach and no stud is drawn.
+ */
 function stencilSign(
   services: DistrictServices,
   opts: {
@@ -588,12 +621,64 @@ function stencilSign(
     lines: string[]
     accent?: string
     background?: string
+    ink?: string
     widthPx?: number
+    legsToY?: number
+    legSpread?: number
+    standoff?: number
   },
 ): void {
   const f = opts.facing.clone().setY(0).normalize()
   const yaw = Math.atan2(f.x, f.z)
   const side = new Vector3(f.z, 0, -f.x)
+  if (opts.standoff !== undefined && opts.standoff > 0.045) {
+    // Stud from just inside the boss to 10 mm INTO the host: a butt on the
+    // host plane would be a coplanar pair, and stopping short is the gap.
+    const length = opts.standoff - 0.02
+    for (const s of [-1, 1]) {
+      for (const v of [-1, 1]) {
+        services.writer.box({
+          center: opts.at
+            .clone()
+            .addScaledVector(side, s * (opts.width * 0.5 - 0.12))
+            .add(new Vector3(0, v * (opts.height * 0.5 - 0.1), 0))
+            .addScaledVector(f, -(opts.standoff + 0.04) / 2),
+          size: new Vector3(0.05, 0.05, length),
+          rotationY: yaw,
+          slot: 'steel',
+          chamfer: 0.008,
+        })
+      }
+    }
+  }
+  if (opts.legsToY !== undefined) {
+    for (const s of [-1, 1]) {
+      const postX = s * (opts.legSpread ?? opts.width / 2 - 0.17)
+      const top = opts.at.y + opts.height / 2 - 0.08
+      const bottom = opts.legsToY - 0.004
+      const center = opts.at
+        .clone()
+        .addScaledVector(side, postX)
+        .addScaledVector(f, -0.021)
+      center.y = (top + bottom) / 2
+      services.writer.box({
+        center,
+        size: new Vector3(0.075, top - bottom, 0.07),
+        rotationY: yaw,
+        slot: 'steel',
+        chamfer: 0.008,
+      })
+      const foot = opts.at.clone().addScaledVector(side, postX).addScaledVector(f, -0.021)
+      foot.y = opts.legsToY + 0.007
+      services.writer.box({
+        center: foot,
+        size: new Vector3(0.17, 0.014, 0.16),
+        rotationY: yaw,
+        slot: 'steelEdge',
+        chamfer: 0.004,
+      })
+    }
+  }
   services.writer.box({
     center: opts.at.clone().addScaledVector(f, 0.035),
     size: new Vector3(opts.width + 0.08, opts.height + 0.08, 0.05),
@@ -620,6 +705,7 @@ function stencilSign(
     signageMaterial(opts.lines, {
       background: opts.background ?? '#231f1c',
       accent: opts.accent ?? '#c94f1d',
+      ink: opts.ink,
       widthPx: opts.widthPx,
     }),
   )
@@ -694,7 +780,7 @@ export function buildMachineHall(services: DistrictServices): void {
     // Girts sit in the 144 mm reveal between the column flange and the sheet,
     // and they STOP at every opening — a rail running across an open doorway
     // is the giveaway that a shed was drawn rather than framed.
-    for (const h of [1.5, 3.2, 4.9, 7.75]) {
+    for (const h of GIRT_H) {
       const gaps: Array<[number, number]> = []
       if (s < 0) {
         if (h < ROLL_DOOR.head) gaps.push([ROLL_DOOR.a0 - 0.11, ROLL_DOOR.a1 + 0.11])
@@ -774,16 +860,14 @@ export function buildMachineHall(services: DistrictServices): void {
   // Fastener rows, driven off each RUN's own rib phase so every head lands on
   // a crest. The dome is lathed about +X and rolled into the wall plane, so
   // its axis is the sheeting normal — a screw head, not a bump on a surface.
-  const CREST_T = 0.34 * 0.55 + 0.34 * 0.11 + (0.34 * 0.23) / 2
-  const wallYaw = Math.atan2(-ACROSS[1], -ACROSS[0])
   for (const [a0, a1, h0, h1] of parkRuns) {
     const length = a1 - a0
     for (const h of [h0 + 0.5, (h0 + h1) / 2, h1 - 0.45]) {
       if (h - h0 < 0.3 || h1 - h < 0.3) continue
-      for (let k = 0; CREST_T + k * 0.68 < length - 0.5; k++) {
-        const [x, z] = hallPlan(a0 + CREST_T + k * 0.68, -(HALF_C + 0.0435))
+      for (let k = 0; CREST_T + k * CREST_PITCH < length - 0.5; k++) {
+        const [x, z] = hallPlan(a0 + CREST_T + k * CREST_PITCH, -(HALF_C + 0.0435))
         const laid = fastener()
-        rotateZ(laid, wallYaw)
+        rotateZ(laid, WALL_YAW)
         translate(laid, [x, z, FLOOR + h])
         writeInto(writer, 'steelEdge', cleanMesh(laid))
       }
@@ -987,6 +1071,7 @@ export function buildMachineHall(services: DistrictServices): void {
     }
   }
 
+  buildPlazaElevation(services)
   buildHallOpenings(services)
   buildHallServices(services)
   buildHallInterior(services)
@@ -1234,7 +1319,7 @@ export function buildHallServices(services: DistrictServices): void {
   }
 
   // ---- Wall-mounted HVAC sets: casing, louvre bank, fan cowl, drain.
-  for (const a of [-9.6, 5.2]) {
+  for (const a of HVAC_A) {
     const base = hv(a, -(HALF_C + 0.53), 2.5)
     writer.box({
       center: base,
@@ -1314,6 +1399,74 @@ export function buildHallServices(services: DistrictServices): void {
   }
 
   // ---- The stencil that names the plant, on the money facade.
+  //
+  // This plate spans the clerestory, so there is no ONE wall behind it: the
+  // section runs glass 7.420-7.450, mullion 7.385-7.475, sheeting crest
+  // 7.484-7.542. Its four corners sit over three different hosts (measured:
+  // 89 mm, 131 mm and 181 mm back from `at`), which is why no single standoff
+  // stud fits and why it hung on nothing for so long.
+  //
+  // It is carried instead by two vertical outriggers ON THE MULLION LINES —
+  // -8.4 and -4.2 are the only mullions inside the plate's -9.0..-3.8 span,
+  // which is also why the frame is not symmetric about the sign's own centre.
+  // Each one lands on the sheeting band below the sill AND above the head,
+  // ties back to the mullion between them, and crosses the glazed band only
+  // where a mullion already blocks the view. Panes are 120 mm narrower than
+  // their bay, so a 100 mm outrigger on the mullion clears both neighbouring
+  // clear fields by 10 mm and nothing else enters one.
+  //
+  // Depths: frame back 7.535 laps 7 mm into the crest (never a coplanar butt)
+  // and clears the glass by 85 mm and the mullion face by 60 mm; frame front
+  // 7.652 laps 12 mm into the sign's own backing plate (7.640-7.690) and
+  // stops 41 mm short of the printed face, so no member crosses the type.
+  // Mullion face to printed face is 218 mm of standoff.
+  const SUB_BACK = 7.535
+  const SUB_FRONT = 7.652
+  for (const ma of [-8.4, -4.2]) {
+    writer.box({
+      center: hv(ma, -(SUB_BACK + SUB_FRONT) / 2, (5.42 + 7.56) / 2),
+      size: new Vector3(SUB_FRONT - SUB_BACK, 7.56 - 5.42, 0.1),
+      rotationY: PSI,
+      slot: 'steel',
+      chamfer: 0.012,
+    })
+    // Tie-backs to the mullion, clear of both transoms (5.945 and 7.355).
+    // NO plane in this frame is shared with another part: the tie-back runs
+    // 7.470 (5 mm into the mullion) to 7.555 (20 mm into the outrigger), and
+    // the rail below runs 7.528 to 7.606. Butting the tie-back on the
+    // outrigger's own 7.535 back plane cost 219 cm2 of z-fight.
+    for (const h of [6.3, 7.0]) {
+      writer.box({
+        center: hv(ma, -(7.47 + 7.555) / 2, h),
+        size: new Vector3(7.555 - 7.47, 0.09, 0.07),
+        rotationY: PSI,
+        slot: 'steelEdge',
+        chamfer: 0.008,
+      })
+    }
+    // Fixing rails on the solid sheeting above and below the band, with real
+    // screw heads on the run's OWN crests. Both bands are runs that start at
+    // -HALF_A, so they share one phase; each rail catches exactly two crests.
+    for (const h of [5.7, 7.44]) {
+      writer.box({
+        center: hv(ma, -(7.528 + 7.606) / 2, h),
+        size: new Vector3(7.606 - 7.528, 0.09, 0.92),
+        rotationY: PSI,
+        slot: 'steelEdge',
+        chamfer: 0.008,
+      })
+      for (let k = 0; ; k++) {
+        const ca = -HALF_A + CREST_T + k * CREST_PITCH
+        if (ca > ma + 0.46) break
+        if (ca < ma - 0.46) continue
+        const [fx, fz] = hallPlan(ca, -(HALF_C + 0.0435))
+        const laid = fastener()
+        rotateZ(laid, WALL_YAW)
+        translate(laid, [fx, fz, FLOOR + h])
+        writeInto(writer, 'steelEdge', cleanMesh(laid))
+      }
+    }
+  }
   stencilSign(services, {
     at: hv(-6.4, -(HALF_C + 0.13), 6.6),
     facing: new Vector3(-ACROSS[0], 0, -ACROSS[1]),
@@ -1328,6 +1481,9 @@ export function buildHallServices(services: DistrictServices): void {
     height: signHeight(1.5),
     lines: ['PERSONNEL', 'ENTRY'],
     widthPx: 512,
+    // Sheeting valley is 131 mm back from `at` (crest 87 mm): the bosses
+    // reach 35 mm, so without studs the plate hovered 96 mm off the wall.
+    standoff: 0.131,
   })
   // Backlit hall number where the works lane arrives.
   writer.box({
@@ -2640,7 +2796,9 @@ export function buildReclaimer(services: DistrictServices): void {
     size: new Vector3(4.8, 3.1, 3.4),
   })
   stencilSign(services, {
-    at: new Vector3(skidX, padTop + 2.5, skidZ - 1.72),
+    // 1.694, not 1.72: the skid's flank is 61 mm behind `at` at 1.72, so the
+    // bosses (35 mm reach) hung 26 mm clear of the machine they name.
+    at: new Vector3(skidX, padTop + 2.5, skidZ - 1.694),
     facing: new Vector3(0, 0, -1),
     width: 2.2,
     height: signHeight(2.2),
@@ -2906,7 +3064,9 @@ export function buildTankFarm(services: DistrictServices): void {
     // Identity plate on the cradle — NASA-punk honesty, read from the walk.
     const face = new Vector3(-U[0], 0, -U[1])
     stencilSign(services, {
-      at: new Vector3(x + face.x * (RING_R + 0.34), ringY + 0.62, z + face.z * (RING_R + 0.34)),
+      // +0.30, not +0.34: the cradle ring's nearest face is 75 mm behind `at`
+      // at 0.34, so the plate's bosses stood 40 mm off the steel.
+      at: new Vector3(x + face.x * (RING_R + 0.3), ringY + 0.62, z + face.z * (RING_R + 0.3)),
       facing: face,
       width: 1.25,
       height: signHeight(1.25),
@@ -3030,6 +3190,9 @@ export function buildTankFarm(services: DistrictServices): void {
       height: signHeight(1.15),
       lines: ['N2', i === 0 ? 'V-31' : 'V-32'],
       widthPx: 512,
+      // The vessel's dished end is 0.49-0.64 m behind this plate (it is a
+      // curve, so no single standoff fits): stand it on the pad instead.
+      legsToY: padTop,
     })
   }
 
@@ -3231,7 +3394,10 @@ export function buildWaterTower(services: DistrictServices): void {
       .addScaledVector(side, s * 1.32)
       .addScaledVector(faceDir, shellR + 0.04)
     writer.tube({
-      path: [anchor, plateAt.clone().addScaledVector(side, s * 1.32)],
+      // Lap the bracket 50 mm INTO the backing plate (which spans +0.010 to
+      // +0.060 on faceDir); ending exactly at `plateAt` left a 10 mm gap
+      // between the bracket tip and the thing it is supposed to carry.
+      path: [anchor, plateAt.clone().addScaledVector(side, s * 1.32).addScaledVector(faceDir, 0.05)],
       radius: 0.035,
       slot: 'steel',
       radialSegments: 8,
@@ -3246,6 +3412,9 @@ export function buildWaterTower(services: DistrictServices): void {
     height: signHeight(3.4),
     lines: ['ELYSIUM', 'WATER'],
     background: '#e6e0d4',
+    // The ONLY light plate in the park. Default ink is #efe9dc, which on this
+    // ground is 1.08:1 contrast — the name was invisible from the ground.
+    ink: '#2a2521',
     accent: '#c94f1d',
   })
 
@@ -3488,6 +3657,9 @@ export function buildMaintenanceYard(services: DistrictServices): void {
       height: signHeight(0.9),
       lines: [`BAY ${bay + 1}`],
       widthPx: 384,
+      // Nothing behind and nothing below: this plate hung in mid-air 0.37 m
+      // over the pad until it got posts.
+      legsToY: padTop,
     })
     services.colliders.push({
       kind: 'box',
@@ -3619,7 +3791,11 @@ export function buildMaintenanceYard(services: DistrictServices): void {
       })
     }
     stencilSign(services, {
-      at: yv(u - 0.06, v, 1.5),
+      // The board sits IN FRONT of its posts. At u - 0.06 the plate plane cut
+      // straight through both 0.05 m posts and they stood 47 mm proud of the
+      // printed face, through the text. u + 0.08 puts the bosses 5 mm into
+      // the posts instead.
+      at: yv(u + 0.08, v, 1.5),
       facing: new Vector3(0, 0, 1),
       width: 1.85,
       height: signHeight(1.85),
@@ -3629,7 +3805,12 @@ export function buildMaintenanceYard(services: DistrictServices): void {
     services.colliders.push({
       kind: 'box',
       center: yv(u, v, 1.1),
-      size: new Vector3(0.3, 2.2, 1.9),
+      // `yv` sends u to world Z and v to world X, so the board — which spans
+      // ±0.8 in v between its posts and is thin in u — is 1.9 m wide on X and
+      // 0.3 m thick on Z. The size was authored in (u, v) order: it stood a
+      // 1.9 m phantom wall across the yard on Z and left the real board
+      // walk-through.
+      size: new Vector3(1.9, 2.2, 0.3),
       yaw: 0,
     })
   }
@@ -3652,6 +3833,7 @@ export function buildMaintenanceYard(services: DistrictServices): void {
     width: 2.4,
     height: signHeight(2.4),
     lines: ['THE WORKS', 'MAINTENANCE', 'YARD'],
+    legsToY: padTop,
   })
   lightFixtures().registerGlowPool({
     id: 'works-yard',
@@ -3880,6 +4062,11 @@ export function buildRadiatorField(services: DistrictServices): void {
       height: signHeight(2.2),
       lines: ['HEAT', 'REJECTION', 'FIELD B'],
       widthPx: 512,
+      // Floated 0.4 m above the pump skid with nothing behind it. Legs land
+      // on the skid's top face; the 0.45 spread keeps both feet inside that
+      // face whatever the skid's yaw resolves to.
+      legsToY: ground + 1.5,
+      legSpread: 0.45,
     })
   }
 }
@@ -3924,3 +4111,285 @@ export const OPS_ROOM = {
   /** the door bay in the window wall, in ACROSS coordinates */
   doorBay: [-1.42, -0.47] as [number, number],
 } as const
+
+// ================================================= PLAZA ELEVATION (trim)
+
+/**
+ * THE PLAZA ELEVATION — the missing middle scale on the two faces the park
+ * actually sees.
+ *
+ * From the First Tree plaza the hall presents its ACROSS-minus long wall (its
+ * outward normal is 30 degrees off the sightline) and its ALONG-plus gable
+ * (60 degrees). Both were profiled sheeting and nothing else: the long wall
+ * ran ONE unbroken band from the slab to the clerestory sill, broken only by
+ * the two doors, and the gable ran a SINGLE sheet from 0.02 up to the rake —
+ * 130 m2 with no opening, no fastener row and no horizontal datum anywhere on
+ * it. The ribs are real geometry, but their 340 mm pitch is sub-pixel at 75 m,
+ * so the elevation had detail at 0.34 m and at 26 m and nothing in between.
+ * That gap is what reads as a flat white shed; the sheeting was never the
+ * problem and its albedo is not off the ladder (painted steel 0.79-0.81 sits
+ * with habShell 0.73-0.79, which is where white painted cladding belongs).
+ *
+ * The fix is one CAST-ISRU trim system — plinth with a projecting coping,
+ * string course, pilasters, panel ribs — every part in the `cast` slot:
+ *
+ *  - ONE slot lets the family weld into itself for free (the audit's clash
+ *    pass compares merged per-slot meshes), so a pilaster runs THROUGH the
+ *    plinth instead of being chopped at it, and a gable post runs through the
+ *    string course.
+ *  - Cast mineral is albedo 0.44-0.50 against the sheeting's 0.79-0.81, so
+ *    the base is a real tonal step and not a 13 % modulation that the tone
+ *    map eats (notes S14: "ground art needs GEOMETRY" — so does wall art, and
+ *    this is both).
+ *  - Everything is APPLIED over the sheeting, bearing on its crests. No
+ *    existing run is re-cut, so no opening can be left unclad, and every part
+ *    stands at least 6 mm clear of the crest face (|c| 7.542 / a 13.042) —
+ *    a cross-slot pair here is never coplanar and never interpenetrates.
+ *  - Every run stops at every opening and every wall-mounted fixture it would
+ *    otherwise cross, from a gap list built off those parts' own constants.
+ *
+ * Trim planes, measured OUTWARD from the cladding line (|c| = HALF_C on the
+ * long wall, a = HALF_A on the gable, where the sheeting occupies -0.016 ..
+ * +0.042). Each family gets its OWN back and front plane, 4 mm apart, so the
+ * same-slot family cannot produce a coplanar same-facing pair either.
+ */
+const TRIM_REVEAL = 0.006
+/** The corner angles' inboard faces — the trim dies into them (see the corner
+ *  flashing outline in `buildMachineHall`: a 12.8 / |c| 7.3). */
+const CORNER_STOP_A = 12.8
+const CORNER_STOP_C = 7.3
+const PLINTH_BACK = 0.048
+const PLINTH_FACE = 0.066
+const PLINTH_TOE = 0.082
+const COPE_OUT = 0.098
+/** Coping soffit / top. The soffit clears the PERSONNEL plate (top 2.26). */
+const PLINTH_SOFFIT = 2.28
+const PLINTH_TOP = 2.42
+const RIB_BACK = 0.062
+const RIB_FACE = 0.078
+const PIL_BACK = 0.052
+const PIL_FACE = 0.074
+const BAND_BACK = 0.056
+const BAND_FACE = 0.086
+const BAND_NOSE = 0.096
+/** The string course lands on the third girt: a flashing needs steel behind. */
+const BAND_H = GIRT_H[2]
+/** Structural bay pitch — the ONLY rhythm on this building. */
+const BAY_PITCH = (FRAME_A[FRAME_A.length - 1] - FRAME_A[0]) / (FRAME_A.length - 1)
+/**
+ * The gable is a wind-post wall: the same bay, re-divided across the 15 m
+ * span so the posts land on whole divisions instead of a carried-over pitch.
+ */
+const GABLE_BAYS = Math.max(2, Math.round((2 * HALF_C) / BAY_PITCH))
+const GABLE_STATIONS = Array.from(
+  { length: GABLE_BAYS + 1 },
+  (_, i) => -HALF_C + (i * 2 * HALF_C) / GABLE_BAYS,
+)
+
+/** A run of trim in an elevation's own run coordinate. */
+type TrimSpan = [number, number]
+
+/**
+ * One elevation, expressed in a single run coordinate `u` (a along the long
+ * wall, c across the gable) plus an outward offset `o` from the cladding line.
+ */
+interface TrimFace {
+  /** plan point at (run coordinate, outward offset) */
+  plan: (u: number, o: number) => Vec2
+  /** the sweep path's world point at (run coordinate, height above FLOOR) */
+  at: (u: number, h: number) => Vector3
+  u0: number
+  u1: number
+  /** bay stations INCLUDING the two end frames; posts and ribs derive from it */
+  stations: number[]
+  plinthGaps: TrimSpan[]
+  bandGaps: TrimSpan[]
+  /** pilaster head, above FLOOR */
+  postTop: number
+}
+
+/**
+ * `[u0, u1]` minus the gaps, dropping anything shorter than `min`: two gaps
+ * that nearly touch (the roll-up door and the HVAC set beside it) would
+ * otherwise leave a 130 mm stub of coping, which is a defect, not a panel.
+ */
+function trimSpans(u0: number, u1: number, gaps: TrimSpan[], min = 0.45): TrimSpan[] {
+  const out: TrimSpan[] = []
+  let cursor = u0
+  for (const [g0, g1] of [...gaps].sort((p, q) => p[0] - q[0])) {
+    if (g0 - cursor >= min) out.push([cursor, g0])
+    cursor = Math.max(cursor, g1)
+  }
+  if (u1 - cursor >= min) out.push([cursor, u1])
+  return out
+}
+
+/**
+ * Precast plinth, drawn as ONE section: a projecting toe at the pour, a plumb
+ * panel face, and a coping whose soffit carries a real 12 mm throat so the
+ * drip is geometry and not a painted line. Two horizontal shadow lines out of
+ * one sweep — the toe head at 78 mm and the coping soffit at 2.28 — which is
+ * the whole point of the exercise. Nothing here is an albedo band: the tone
+ * map eats those (notes S14).
+ */
+function plinthProfile(): Vector2[] {
+  return [
+    new Vector2(PLINTH_BACK, 0.02),
+    new Vector2(PLINTH_TOE - 0.006, 0.02),
+    new Vector2(PLINTH_TOE, 0.03),
+    new Vector2(PLINTH_TOE, 0.078),
+    new Vector2(PLINTH_FACE, 0.098),
+    new Vector2(PLINTH_FACE, PLINTH_SOFFIT),
+    new Vector2(PLINTH_FACE + 0.01, PLINTH_SOFFIT),
+    new Vector2(PLINTH_FACE + 0.01, PLINTH_SOFFIT + 0.012),
+    new Vector2(PLINTH_FACE + 0.022, PLINTH_SOFFIT + 0.012),
+    new Vector2(PLINTH_FACE + 0.022, PLINTH_SOFFIT),
+    new Vector2(COPE_OUT, PLINTH_SOFFIT),
+    new Vector2(COPE_OUT, PLINTH_TOP - 0.048),
+    new Vector2(COPE_OUT - 0.012, PLINTH_TOP - 0.036),
+    new Vector2(PLINTH_BACK, PLINTH_TOP),
+  ]
+}
+
+/** Cast string course over the sheeting joint: drip nose low, weathered top. */
+function bandProfile(): Vector2[] {
+  return [
+    new Vector2(BAND_BACK, BAND_H - 0.07),
+    new Vector2(BAND_NOSE, BAND_H - 0.07),
+    new Vector2(BAND_NOSE, BAND_H - 0.044),
+    new Vector2(BAND_FACE, BAND_H - 0.032),
+    new Vector2(BAND_FACE, BAND_H + 0.044),
+    new Vector2(BAND_BACK, BAND_H + 0.076),
+  ]
+}
+
+/**
+ * Pilaster / wind post: a three-ring loft whose top ring is inset on all
+ * three exposed sides, so the head weathers back into the wall instead of
+ * ending in a raw slab face (the inset-end-station idiom, geometry-craft
+ * §4.2's scroll arms). Width covers `portalFrame`'s 190 mm column flange with
+ * a 65 mm cover return each side.
+ */
+function castPost(
+  writer: PartWriter,
+  face: TrimFace,
+  u: number,
+  halfWidth: number,
+  h0: number,
+  h1: number,
+): void {
+  const splay = 0.09
+  const ring = (w: number, front: number, h: number): Vec3[] =>
+    [
+      face.plan(u - w, front),
+      face.plan(u + w, front),
+      face.plan(u + w, PIL_BACK),
+      face.plan(u - w, PIL_BACK),
+    ].map(([x, z]) => [x, z, FLOOR + h] as Vec3)
+  const md = loft(
+    [
+      ring(halfWidth, PIL_FACE, h0),
+      ring(halfWidth, PIL_FACE, h1 - splay),
+      ring(halfWidth - 0.045, PIL_BACK + 0.006, h1),
+    ],
+    { closeV: true, capStart: true, capEnd: true },
+  )
+  writeInto(writer, 'cast', cleanMesh(smoothShade(md, SMOOTH.cast)))
+}
+
+/**
+ * The plinth's panel rib: what makes a 26 m band read as cast PANELS rather
+ * than one extrusion. Its back sits 4 mm inside the plinth face and its head
+ * runs 20 mm up into the coping — both same-slot burials, which is exactly
+ * the license one material slot buys.
+ */
+function castRib(writer: PartWriter, face: TrimFace, u: number): void {
+  const w = 0.03
+  const outline: Vec2[] = [
+    face.plan(u - w, RIB_BACK),
+    face.plan(u + w, RIB_BACK),
+    face.plan(u + w, RIB_FACE - 0.006),
+    face.plan(u + w - 0.006, RIB_FACE),
+    face.plan(u - w + 0.006, RIB_FACE),
+    face.plan(u - w, RIB_FACE - 0.006),
+  ]
+  const md = prism(outline, FLOOR + 0.098, FLOOR + PLINTH_SOFFIT + 0.02)
+  writeInto(writer, 'cast', cleanMesh(smoothShade(md, SMOOTH.cast)))
+}
+
+/** Midpoint of every consecutive station pair — the half-bay panel module. */
+function midStations(stations: number[]): number[] {
+  return stations.slice(1).map((v, i) => (v + stations[i]) / 2)
+}
+
+export function buildPlazaElevation(services: DistrictServices): void {
+  const { writer } = services
+
+  const wall: TrimFace = {
+    plan: (u, o) => hallPlan(u, -(HALF_C + o)),
+    at: (u, h) => hv(u, -HALF_C, h),
+    u0: -(CORNER_STOP_A - TRIM_REVEAL),
+    u1: CORNER_STOP_A - TRIM_REVEAL,
+    stations: FRAME_A,
+    plinthGaps: [
+      // Both leaves plus their thresholds, which run wider than the jambs.
+      [PERSON_DOOR.a0 - 0.21, PERSON_DOOR.a1 + 0.21],
+      [ROLL_DOOR.a0 - 0.17, ROLL_DOOR.a1 + 0.17],
+      // The HVAC sets: casing 1.9 m long, brackets and cowl inside that.
+      ...HVAC_A.map((a) => [a - 1.02, a + 1.02] as TrimSpan),
+    ],
+    // At 4.9 m the band clears the HVAC (top 3.25) and the hall number (3.78),
+    // so it splits ONLY where the roll-up door's head beam crosses it.
+    bandGaps: [[ROLL_DOOR.a0 - 0.24, ROLL_DOOR.a1 + 0.24]],
+    // The cable tray at 5.55 owns this wall above the string course, so the
+    // covers die 12 mm under it rather than being chopped around the tray.
+    postTop: BAND_H - 0.082,
+  }
+
+  const gable: TrimFace = {
+    plan: (u, o) => hallPlan(HALF_A + o, u),
+    at: (u, h) => hv(HALF_A, u, h),
+    u0: -(CORNER_STOP_C - TRIM_REVEAL),
+    u1: CORNER_STOP_C - TRIM_REVEAL,
+    stations: GABLE_STATIONS,
+    plinthGaps: [],
+    // The reclaimer's pipe escutcheon (buildReclaimer) lands on this gable at
+    // c 2.4, 620 mm wide, top 4.9 — the string course stops either side of it.
+    bandGaps: [[2.4 - 0.34, 2.4 + 0.34]],
+    // No tray on the gable: the posts run up to the eaves datum instead, so
+    // the head line carries round the corner from the long wall's fascia.
+    postTop: WALL_TOP - 0.07,
+  }
+
+  // Both sweeps take `section`'s default 34-degree crease: every turn in these
+  // two profiles is 45 degrees or sharper except the coping's two-facet
+  // weathering, which is meant to read as one continuous slope.
+  for (const face of [wall, gable]) {
+    const plinths = trimSpans(face.u0, face.u1, face.plinthGaps)
+    for (const [s0, s1] of plinths) {
+      section(writer, 'cast', [face.at(s0, 0), face.at(s1, 0)], plinthProfile())
+    }
+    for (const [s0, s1] of trimSpans(face.u0, face.u1, face.bandGaps)) {
+      section(writer, 'cast', [face.at(s0, 0), face.at(s1, 0)], bandProfile())
+    }
+    // Column covers on every INTERIOR bay station: the two end frames are
+    // already expressed by the corner angles, and a cover there would run
+    // into them (the no-double-emitted-pilaster rule, geometry-craft §4.1).
+    for (const u of face.stations.slice(1, -1)) {
+      // h0 = 0.014, NOT the plinth's own 0.02: the cover laps the plinth by
+      // ~22 mm of depth, so starting both at one height put their two
+      // DOWNWARD faces in one plane — 7 same-facing pairs, 458 cm². The post
+      // now bears 6 mm lower than the plinth panel (the stack rule: no two
+      // members of a stack may end at the same height), which also reads
+      // correctly, a column cover carrying down past the precast. Both are
+      // 'cast', so the 6 mm bite welds instead of clashing; and 14 mm still
+      // leaves a real shadow reveal at the pour, so nothing lands on the
+      // apron's plane either.
+      castPost(writer, face, u, 0.16, 0.014, face.postTop)
+    }
+    // A rib only where the plinth it belongs to actually exists.
+    for (const u of midStations(face.stations)) {
+      if (plinths.some(([s0, s1]) => u - 0.05 > s0 && u + 0.05 < s1)) castRib(writer, face, u)
+    }
+  }
+}

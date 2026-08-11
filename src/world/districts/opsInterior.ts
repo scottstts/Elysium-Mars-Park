@@ -43,7 +43,9 @@ import { OPS_ROOM } from './works'
  *   along  +2.68   equipment rack
  */
 
-const CONSOLE_HALF = 2.2
+// 2.0 (was 2.2): the 4.4 m desk's end sat 0.41 m from the door path and
+// bricked head-on entry (experience-audit) — 4.0 m clears both ends.
+const CONSOLE_HALF = 2.0
 const CONSOLE_BACK = -OPS_ROOM.halfAcross
 const CONSOLE_DEPTH = 0.8
 const CONSOLE_FRONT = CONSOLE_BACK + CONSOLE_DEPTH

@@ -52,6 +52,8 @@ export class PlayerSystem implements GameSystem {
   private seatedPose: (() => { eye: Vector3; yaw: number }) | null = null
   private exitPose: (() => { eye: Vector3; yaw: number }) | null = null
   private seatBlend = 0
+  /** Last frame's pose yaw, for carrying the head with a turning vehicle. */
+  private seatYawCarry: number | null = null
   private readonly walkEye = new Vector3()
 
   /** Locomotion gate for camera rigs; look stays live regardless. */
@@ -80,7 +82,10 @@ export class PlayerSystem implements GameSystem {
       body,
     )
     const controller = world.createCharacterController(0.06)
-    controller.enableAutostep(0.42, 0.28, true)
+    // Autostep min-width 0.05: stair-nosing lips and floor-light bezels are
+    // narrower than the old 0.28 m landing requirement, so they read as walls
+    // and forced a jump. Height stays 0.42 — real platforms still need one.
+    controller.enableAutostep(0.42, 0.05, true)
     controller.enableSnapToGround(0.35)
     controller.setMaxSlopeClimbAngle((52 * Math.PI) / 180)
     controller.setMinSlopeSlideAngle((58 * Math.PI) / 180)
@@ -148,13 +153,98 @@ export class PlayerSystem implements GameSystem {
     const pose = this.seatedPose
     const body = this.body
     if (!pose || !body) return
-    // Step out in front of the seat at the body's frozen standing height.
     const now = pose()
-    const forward = new Vector3(Math.sin(now.yaw), 0, Math.cos(now.yaw))
     const current = body.translation()
-    const standPoint = new Vector3(now.eye.x, current.y, now.eye.z).addScaledVector(forward, 0.55)
+    // TRUE look-forward is (−sin, −cos); the old (+sin, +cos) stepped
+    // BACKWARD through the seat back — 56 of 114 seats exited inside a
+    // collider (experience audit). And plain forward is no safer everywhere
+    // (bench fronts, amphitheater drops), so probe forward → behind → sides
+    // at two reaches and take the first spot with capsule clearance AND
+    // footing within a step of the seated height.
+    const sin = Math.sin(now.yaw)
+    const cos = Math.cos(now.yaw)
+    const directions: Array<[number, number]> = [
+      [-sin, -cos],
+      [sin, cos],
+      [-cos, sin],
+      [cos, -sin],
+    ]
+    const world = this.physics.world
+    const api = this.physics.api
+    let chosen: Vector3 | null = null
+    if (world && api) {
+      const capsule = new api.Capsule(CAPSULE_HALF_HEIGHT, CAPSULE_RADIUS)
+      const feetY = current.y - CAPSULE_HALF_HEIGHT - CAPSULE_RADIUS
+      outer: for (const reach of [0.55, 0.85]) {
+        for (const [dx, dz] of directions) {
+          const x = now.eye.x + dx * reach
+          const z = now.eye.z + dz * reach
+          let blocked = false
+          world.intersectionsWithShape(
+            { x, y: current.y, z },
+            { x: 0, y: 0, z: 0, w: 1 },
+            capsule,
+            (collider) => {
+              if (collider === this.collider) return true
+              blocked = true
+              return false
+            },
+          )
+          if (blocked) continue
+          const ray = new api.Ray({ x, y: current.y + 0.4, z }, { x: 0, y: -1, z: 0 })
+          const hit = world.castRay(ray, 3, true, undefined, undefined, this.collider ?? undefined)
+          if (!hit) continue
+          const groundY = current.y + 0.4 - hit.timeOfImpact
+          if (Math.abs(groundY - feetY) > 0.45) continue
+          chosen = new Vector3(x, groundY, z)
+          break outer
+        }
+      }
+    }
+    if (chosen) {
+      this.standAt(chosen)
+      return
+    }
+    // Fallback: seat-forward at the frozen standing height.
+    const standPoint = new Vector3(now.eye.x - sin * 0.55, current.y, now.eye.z - cos * 0.55)
     standPoint.y -= CAPSULE_HALF_HEIGHT + CAPSULE_RADIUS + 0.05 // standAt re-adds
     this.standAt(standPoint)
+  }
+
+  /** Re-request pointer lock (pause-menu resume path). */
+  requestPointerLock(): void {
+    this.input?.requestLock()
+  }
+
+  get pointerLocked(): boolean {
+    return this.input?.pointerLocked ?? false
+  }
+
+  /**
+   * Shove the standing player out of a moving vehicle's footprint (yaw-only
+   * OBB). The kinematic controller only resolves collisions when the PLAYER
+   * moves, so a tram sweeping through a bystander must push them itself.
+   */
+  nudgeOutOfBox(center: Vector3, yaw: number, halfX: number, halfY: number, halfZ: number): void {
+    const body = this.body
+    if (!body || this.seatedPose || this.exitPose) return
+    const t = body.translation()
+    const dx = t.x - center.x
+    const dz = t.z - center.z
+    const cos = Math.cos(yaw)
+    const sin = Math.sin(yaw)
+    // World → box-local (inverse yaw): local +Z is the vehicle's forward.
+    const lx = dx * cos - dz * sin
+    const lz = dx * sin + dz * cos
+    const margin = CAPSULE_RADIUS + 0.06
+    if (Math.abs(lx) >= halfX + margin || Math.abs(lz) >= halfZ + margin) return
+    if (t.y < center.y - halfY || t.y > center.y + halfY + 1.2) return
+    const targetLx = (lx >= 0 ? 1 : -1) * (halfX + margin)
+    const nx = center.x + targetLx * cos + lz * sin
+    const nz = center.z - targetLx * sin + lz * cos
+    body.setTranslation({ x: nx, y: t.y, z: nz }, false)
+    this.previousPosition.set(nx, t.y, nz)
+    this.currentPosition.set(nx, t.y, nz)
   }
 
   /** Camera-rig hand-back helpers (SeaPark player surface). */
@@ -237,7 +327,7 @@ export class PlayerSystem implements GameSystem {
     this.bobPhase += dt * (0.9 + planarSpeed * 0.42) * Math.PI
   }
 
-  update(ctx: GameContext, _dt: number, alpha: number): void {
+  update(ctx: GameContext, dt: number, alpha: number): void {
     const input = this.input
     if (!input) return
 
@@ -266,11 +356,27 @@ export class PlayerSystem implements GameSystem {
     const pose = this.seatedPose ?? this.exitPose
     if (this.seatBlend > 0 && pose) {
       const now = pose()
+      // Carry the head WITH a turning vehicle: add the pose yaw's
+      // frame-to-frame delta before any clamping, or the view stays
+      // world-locked while the cabin rotates underneath until the cone edge
+      // drags it — the rider ended the arrival staring 77° off the
+      // direction of travel (experience-audit finding).
+      if (this.seatYawCarry !== null) {
+        this.yaw += normalizeAngle(now.yaw - this.seatYawCarry)
+      }
+      this.seatYawCarry = now.yaw
       const blend = this.seatBlend * this.seatBlend * (3 - 2 * this.seatBlend)
       eye.lerpVectors(position, now.eye, blend)
       // Seated look keeps a comfortable cone around the seat's facing; the
       // cone TIGHTENS with the blend so entering never snaps the view.
-      const delta = normalizeAngle(this.yaw - now.yaw)
+      let delta = normalizeAngle(this.yaw - now.yaw)
+      if (this.seatedPose && this.seatBlend < 1) {
+        // Boarding recentre: ease toward the seat facing and level the
+        // pitch while the entry blend runs — a rider who boarded looking
+        // backward settles in, instead of arriving pinned at the cone edge.
+        delta *= Math.max(0, 1 - 2.2 * dt)
+        this.pitch *= Math.max(0, 1 - 1.6 * dt)
+      }
       const yawLimit = Math.PI * (1 - blend) + 1.35 * blend
       this.yaw = now.yaw + Math.max(-yawLimit, Math.min(yawLimit, delta))
       const pitchLo = -Math.PI * 0.488 * (1 - blend) - 0.7 * blend
@@ -278,6 +384,7 @@ export class PlayerSystem implements GameSystem {
       this.pitch = Math.max(pitchLo, Math.min(pitchHi, this.pitch))
     } else {
       eye.copy(position)
+      this.seatYawCarry = null
     }
 
     ctx.camera.position.copy(eye)

@@ -59,19 +59,35 @@ export interface RobotRig {
  * real stand-off plate, never straight onto a curved flank: the plate gives the
  * decal a flat host and a 1.5 mm proud offset gives it a z-fight-free seat.
  */
-function decalTexture(draw: (g: CanvasRenderingContext2D) => void, width = 256, height = 128): CanvasTexture {
+/** A decal's draw callback works in CANVAS PIXELS, sized from the plate. */
+type DecalDraw = (g: CanvasRenderingContext2D, w: number, h: number) => void
+
+/**
+ * Rasterise a decal for a `plateW x plateH` metre plate. The canvas aspect is
+ * DERIVED from the plate, never assumed: the old fixed 256 x 128 canvas was
+ * mapped onto plates of aspect 2.64 - 3.06, which stretched every glyph on
+ * every machine in the park by 32 - 53 %. Because the two aspects now agree, a
+ * circle drawn on the canvas is a circle on the plate, so the painted eyes
+ * keep the proportions they were authored with.
+ */
+function decalTexture(draw: DecalDraw, plateW: number, plateH: number, width = 256): CanvasTexture {
   const canvas = document.createElement('canvas')
   canvas.width = width
-  canvas.height = height
+  canvas.height = Math.max(48, Math.round((width * plateH) / plateW))
   const g = canvas.getContext('2d')
   if (g) {
-    g.clearRect(0, 0, width, height)
-    draw(g)
+    g.clearRect(0, 0, canvas.width, canvas.height)
+    draw(g, canvas.width, canvas.height)
   }
   const texture = new CanvasTexture(canvas)
   texture.colorSpace = SRGBColorSpace
   texture.anisotropy = 8
   return texture
+}
+
+/** Build the texture AND its plate together, so the two aspects cannot drift. */
+function decalPlate(draw: DecalDraw, width: number, height: number): Mesh {
+  return decalMesh(decalTexture(draw, width, height), width, height)
 }
 
 function decalMesh(texture: CanvasTexture, width: number, height: number): Mesh {
@@ -86,62 +102,67 @@ function decalMesh(texture: CanvasTexture, width: number, height: number): Mesh 
   return mesh
 }
 
-function fleetPlate(name: string): CanvasTexture {
-  return decalTexture((g) => {
+// Every layout below is expressed as a FRACTION of the canvas, which is the
+// same fraction of the plate whatever aspect the plate turns out to be. The
+// numbers are the ones originally authored against a 256 x 128 canvas.
+function fleetPlate(name: string): DecalDraw {
+  return (g, w, h) => {
     g.fillStyle = '#e9e3d6'
-    g.font = '700 52px "Helvetica Neue", Helvetica, Arial, sans-serif'
+    g.font = `700 ${0.406 * h}px "Helvetica Neue", Helvetica, Arial, sans-serif`
     g.textAlign = 'left'
     g.textBaseline = 'middle'
-    g.fillText(name.split('').join(' '), 16, 46)
+    g.fillText(name.split('').join(' '), 0.0625 * w, 0.359 * h)
     g.fillStyle = 'rgba(233,227,214,0.55)'
-    g.font = '600 20px "Helvetica Neue", Helvetica, Arial, sans-serif'
-    g.fillText('G R O U N D S   U N I T', 18, 84)
+    g.font = `600 ${0.156 * h}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+    g.fillText('G R O U N D S   U N I T', 0.0703 * w, 0.656 * h)
     // Duty bars: the little printed rank stripes every fleet vehicle carries.
     g.fillStyle = '#c0631a'
-    for (let i = 0; i < 3; i++) g.fillRect(18 + i * 26, 104, 18, 7)
-  })
+    for (let i = 0; i < 3; i++) {
+      g.fillRect(0.0703 * w + i * 0.1016 * w, 0.8125 * h, 0.0703 * w, 0.0547 * h)
+    }
+  }
 }
 
 /** Someone painted eyes on GK-02. Nobody has confessed. */
-function eyesPlate(): CanvasTexture {
-  return decalTexture((g) => {
+function eyesPlate(): DecalDraw {
+  return (g, w, h) => {
     g.fillStyle = '#fbf7ea'
     g.beginPath()
-    g.ellipse(86, 60, 30, 36, 0, 0, Math.PI * 2)
-    g.ellipse(170, 60, 30, 36, 0, 0, Math.PI * 2)
+    g.ellipse(0.336 * w, 0.469 * h, 0.1172 * w, 0.2812 * h, 0, 0, Math.PI * 2)
+    g.ellipse(0.664 * w, 0.469 * h, 0.1172 * w, 0.2812 * h, 0, 0, Math.PI * 2)
     g.fill()
     g.fillStyle = '#17161a'
     g.beginPath()
-    g.arc(94, 68, 13, 0, Math.PI * 2)
-    g.arc(178, 68, 13, 0, Math.PI * 2)
+    g.arc(0.367 * w, 0.531 * h, 0.0508 * w, 0, Math.PI * 2)
+    g.arc(0.695 * w, 0.531 * h, 0.0508 * w, 0, Math.PI * 2)
     g.fill()
     g.fillStyle = '#fbf7ea'
     g.beginPath()
-    g.arc(99, 62, 4.5, 0, Math.PI * 2)
-    g.arc(183, 62, 4.5, 0, Math.PI * 2)
+    g.arc(0.387 * w, 0.484 * h, 0.0176 * w, 0, Math.PI * 2)
+    g.arc(0.715 * w, 0.484 * h, 0.0176 * w, 0, Math.PI * 2)
     g.fill()
-  })
+  }
 }
 
-function stencilPlate(lines: string[]): CanvasTexture {
-  return decalTexture((g) => {
+function stencilPlate(lines: string[]): DecalDraw {
+  return (g, w, h) => {
     g.fillStyle = '#e6e0d2'
     g.textAlign = 'center'
     g.textBaseline = 'middle'
-    const rowHeight = 116 / lines.length
+    const rowHeight = (0.906 * h) / lines.length
     lines.forEach((line, index) => {
       // Measure and shrink until it fits: a stencil that overflows its plate
       // reads as a bug, and long district names are longer than they look.
       const spaced = line.split('').join(' ')
-      let size = Math.min(52, rowHeight * 0.78)
+      let size = Math.min(0.406 * h, rowHeight * 0.78)
       g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
-      while (size > 10 && g.measureText(spaced).width > 228) {
-        size -= 2
+      while (size > 0.08 * h && g.measureText(spaced).width > 0.891 * w) {
+        size -= 0.016 * h
         g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
       }
-      g.fillText(spaced, 128, 64 + (index - (lines.length - 1) / 2) * rowHeight)
+      g.fillText(spaced, w / 2, h / 2 + (index - (lines.length - 1) / 2) * rowHeight)
     })
-  })
+  }
 }
 
 // ------------------------------------------------------------ shared hardware
@@ -727,18 +748,18 @@ function groundskeeper(options: GroundskeeperOptions): RobotRig {
   group.add(tool)
 
   // ---- Decals last: 1.5 mm proud of their plates, never on the shell itself.
-  const plate = decalMesh(fleetPlate(options.name), 0.2, 0.066)
+  const plate = decalPlate(fleetPlate(options.name), 0.2, 0.066)
   plate.position.set(-0.2275, 0.336, 0.04)
   plate.rotation.y = -Math.PI / 2
   group.add(plate)
-  const dutyPlate = decalMesh(stencilPlate(['TENDING', 'ROUTE 2']), 0.2, 0.07)
+  const dutyPlate = decalPlate(stencilPlate(['TENDING', 'ROUTE 2']), 0.2, 0.07)
   dutyPlate.position.set(0.2275, 0.336, 0.04)
   dutyPlate.rotation.y = Math.PI / 2
   group.add(dutyPlate)
   // Face decal: seated on the panel's own normal, 1.6 mm proud of its face.
   const faceDecal = options.eyes
-    ? decalMesh(eyesPlate(), 0.238, 0.09)
-    : decalMesh(stencilPlate([options.name]), 0.21, 0.076)
+    ? decalPlate(eyesPlate(), 0.238, 0.09)
+    : decalPlate(stencilPlate([options.name]), 0.21, 0.076)
   const standOff = 0.007 + 0.0016
   faceDecal.position.set(
     FACE_CENTER[0] + FACE_NORMAL[0] * standOff,
@@ -1093,7 +1114,7 @@ export function buildSweeper(): RobotRig {
   group.add(tool)
 
   for (const sx of [-1, 1] as const) {
-    const plate = decalMesh(
+    const plate = decalPlate(
       sx < 0 ? stencilPlate(['SWEEP-1']) : stencilPlate(['RIM', 'PROMENADE']),
       0.22,
       0.072,
@@ -1395,7 +1416,7 @@ export function buildMule(): RobotRig {
     }
   }
 
-  const plate = decalMesh(stencilPlate(['MULE-1', 'LOAD 240KG']), 0.26, 0.09)
+  const plate = decalPlate(stencilPlate(['MULE-1', 'LOAD 240KG']), 0.26, 0.09)
   plate.position.set(0, 0.62, 0.7891)
   group.add(plate)
 

@@ -1,12 +1,11 @@
-import { Group, Vector2, Vector3 } from 'three'
+import { Group, ShapeUtils, Vector2, Vector3 } from 'three'
 import type { Material } from 'three'
 import { PartWriter } from '../archkit/writer'
 import type { DomeSlot } from './domeMaterials'
 import {
-  DOME_BAR_DEPTH,
-  DOME_BAR_HALF_WIDTH,
-  DOME_BAR_TIERS,
   DOME_CENTER_Y,
+  DOME_COLLAR_PROUD,
+  DOME_HUB_BAR_DEPTH,
   DOME_HUB_BAR_HALF_WIDTH,
   DOME_HUB_RADIUS,
   DOME_HUB_SPOKES,
@@ -15,16 +14,20 @@ import {
   DOME_OCULUS_HALF_WIDTH,
   DOME_OCULUS_RING,
   DOME_OCULUS_THETA,
+  DOME_RAIL_RADIUS,
   DOME_RIBS,
   DOME_RIB_DEPTH,
   DOME_RIB_HALF_WIDTH,
   DOME_RINGS,
   DOME_RING_DEPTH,
+  DOME_RING_FIRST,
   DOME_RING_HALF_WIDTH,
+  DOME_RING_LAST,
   DOME_RING_STEP,
   DOME_SPHERE_RADIUS,
   DOME_THETA_BASE,
   PANEWALKER_RAIL_RINGS,
+  domeCraneRailLift,
   domeTaper,
 } from './latticeField'
 
@@ -32,29 +35,35 @@ import {
  * The BUILT gridshell of Dome One — every line the analytic field in
  * latticeField.ts describes is real geometry here, at the same θ/φ:
  *
- *   ribs      48 continuous lofted box sections, foundation → oculus,
- *             tapering 0.32×0.95 m at the springing to 0.17×0.34 m at the
+ *   ribs      24 continuous lofted FLANGED sections, foundation → oculus,
+ *             tapering 0.84 × 1.55 m at the springing to 0.36 × 0.62 m at the
  *             crown (always deeper than wide — they work in bending).
- *   rings     33 parallels of segmented ring beams, one segment per rib bay,
- *             shallower than the ribs and flush with them on the inner face
- *             so the soffit reads as ONE surface.
- *   bars      glazing mullions subdividing each bay into 2.1–4.3 m panes,
- *             dropping out in halves at ring 16 and ring 8 as the bay narrows.
- *   nodes     a cast collar wraps the rib at every rib×ring crossing and the
- *             ring segments butt into it with a 15 mm reveal — no member ever
- *             clips through another, and no two faces share a plane.
+ *   rings     11 parallels of segmented ring beams (rings 2…12), one segment
+ *             per rib bay, shallower than the ribs, HAUNCHED at both ends so
+ *             the connection into the rib node reads as a moment joint.
+ *   nodes     a cast collar wraps the rib at every rib×ring crossing and
+ *             swallows the haunched ring ends with a 15 mm reveal — no member
+ *             ever clips through another, and no two faces share a plane.
  *   oculus    compression ring + hub spokes + hub cap + maintenance handrail.
  *   footing   cast-stone plinth ring, per-rib base shoes with anchor studs,
  *             and the glazing boot that seals the shell foot.
- *   rails     crane rails on ring beams 12 and 24 for the Panewalker.
+ *   rails     crane rails on ring beams 4 and 8 for the Panewalker.
+ *
+ * There are NO glazing bars. The previous shell subdivided each bay with
+ * mullion families that DOUBLED at ring 8 and again at ring 16, so one
+ * structural bay carried 1 intermediate bar near the crown and 3 near the
+ * foot: the grid changed grammar three times down the same rib, which is what
+ * made the dome read as a spider net. One bay is now one pane, and the pane
+ * joint is a silicone line the glass draws (latticeField.latticePaneSeams),
+ * not a member.
  *
  * Members cast NO shadow maps: the analytic net owns all dome shadowing, so
  * the two systems can never double-darken.
  *
  * MEMBER HIERARCHY (the rule that keeps the assembly clean): ribs are
- * continuous, rings stop at rib collars, bars stop at rings. Radially every
- * member's inner face sits DOME_MEMBER_INSET proud of the glass; only the
- * depth differs, so nothing intersects and nothing is coplanar.
+ * continuous, rings stop at rib collars. Radially every member's inner face
+ * sits DOME_MEMBER_INSET proud of the glass; only the depth differs, so
+ * nothing intersects and nothing is coplanar.
  */
 
 const TWO_PI = Math.PI * 2
@@ -80,7 +89,7 @@ function boreDistance(p: Vector3): number {
 }
 
 /** Cast collar's tangential overhang past the rib face. */
-const COLLAR_SIDE_PROUD = 0.13
+const COLLAR_SIDE_PROUD = 0.16
 /** Shadow-gap reveal at every butt joint (never flush — never coplanar). */
 const JOINT_REVEAL = 0.015
 /** Plinth ring: the shell springs out of this. */
@@ -93,6 +102,13 @@ const RIB_TOP_THETA =
   DOME_OCULUS_THETA + (DOME_OCULUS_HALF_WIDTH + JOINT_REVEAL) / DOME_SPHERE_RADIUS
 /** Ribs run on down into the plinth so the springing is never a floating cut. */
 const RIB_FOOT_THETA = DOME_THETA_BASE + 2.2 / DOME_SPHERE_RADIUS
+/** Sub-stations per ring bay along a rib: 3.85 m chords sag 11 mm on R=164. */
+const RIB_SUBDIVISIONS = 3
+/** Longest chord a ring bay may take (15 mm of sag — under a pixel at 15 m). */
+const RING_SEGMENT_ARC = 4.5
+/** Ring haunch: extra half-width at the node face, and the arc it eases over. */
+const RING_HAUNCH_GAIN = 0.5
+const RING_HAUNCH_ARC = 2.4
 
 export function shellPoint(theta: number, phi: number, lift = 0): Vector3 {
   const r = DOME_SPHERE_RADIUS + lift
@@ -106,6 +122,75 @@ export function shellPoint(theta: number, phi: number, lift = 0): Vector3 {
 /** θ of a given height on the shell (used to land parts on world datums). */
 function thetaAtHeight(y: number): number {
   return Math.acos(Math.min(1, Math.max(-1, (y - DOME_CENTER_Y) / DOME_SPHERE_RADIUS)))
+}
+
+/**
+ * A section profile in the (lateral, radial) plane of a station: lateral 0 is
+ * the member's centreline, radial 0 its inner face (the one you see from the
+ * park, through the glass). Points run counter-clockwise, and — the one
+ * convention the sweep depends on — every ODD-indexed edge is an arris band
+ * that routes to the wear slot. Both profiles below have an even point count
+ * with chamfers strictly on the odd edges.
+ */
+type ProfilePoint = readonly [number, number]
+type SectionFn = (half: number, depth: number, chamfer: number) => ProfilePoint[]
+
+/** Chamfered rectangle — collars, shoes, spokes, the portal frame. */
+const boxSection: SectionFn = (h, d, chamfer) => {
+  const c = Math.min(chamfer, h * 0.45, d * 0.4)
+  return [
+    [-h + c, 0],
+    [h - c, 0],
+    [h, c],
+    [h, d - c],
+    [h - c, d],
+    [-h + c, d],
+    [-h, d - c],
+    [-h, c],
+  ]
+}
+
+/**
+ * The real thing: a flanged girder. A wide inner flange (what the park sees),
+ * a narrow web, a slightly narrower outer flange, filleted at both web
+ * junctions and chamfered at every arris. This is what makes a rib read as
+ * structure rather than as a stick — the inner flange catches the sky, the
+ * web goes dark, and the flange returns are a hard bright line along the
+ * whole member.
+ */
+const flangedSection: SectionFn = (h, d, chamfer) => {
+  const ti = d * 0.26 // inner flange thickness
+  const to = d * 0.22 // outer flange thickness
+  const web = Math.min(Math.max(h * 0.36, 0.06), h * 0.5)
+  const ho = Math.min(Math.max(h * 0.78, web + 0.06), h - 0.02)
+  const f = Math.min(0.07, (ho - web) * 0.35, ti * 0.35, to * 0.35)
+  const c = Math.min(chamfer, ti * 0.4, to * 0.4, (ho - web - f) * 0.8)
+  return [
+    [-h + c, 0],
+    [h - c, 0],
+    [h, c],
+    [h, ti - c],
+    [h - c, ti],
+    [web + f, ti],
+    [web, ti + f],
+    [web, d - to - f],
+    [web + f, d - to],
+    [ho - c, d - to],
+    [ho, d - to + c],
+    [ho, d - c],
+    [ho - c, d],
+    [-ho + c, d],
+    [-ho, d - c],
+    [-ho, d - to + c],
+    [-ho + c, d - to],
+    [-web - f, d - to],
+    [-web, d - to - f],
+    [-web, ti + f],
+    [-web - f, ti],
+    [-h + c, ti],
+    [-h, ti - c],
+    [-h, c],
+  ]
 }
 
 interface Station {
@@ -122,20 +207,20 @@ interface SweepOptions {
   edgeSlot?: DomeSlot
   inset?: number
   chamfer?: number
+  section?: SectionFn
   capStart?: boolean
   capEnd?: boolean
   closed?: boolean
 }
 
 /**
- * Sweep a chamfered rectangular section along a station list.
+ * Sweep a section along a station list.
  *
- * The section is authored once as an 8-point profile in the (lateral, radial)
- * plane of each station — chamfers ARE profile points, not a post-process, so
- * a bend never opens a corner. The four chamfer bands route to `edgeSlot`
- * (worn edge paint on real arrises). Frames are (s, u, t) with s = u × t,
- * which makes the profile counter-clockwise seen along the sweep, so every
- * emitted quad faces outward without a winding special case.
+ * The section is authored once per station as a point list in the (lateral,
+ * radial) plane — chamfers and fillets ARE profile points, not a
+ * post-process, so a bend never opens a corner. Frames are (s, u, t) with
+ * s = u × t, which makes the profile counter-clockwise seen along the sweep,
+ * so every emitted quad faces outward without a winding special case.
  */
 function sweepSection(writer: PartWriter, stations: Station[], options: SweepOptions): void {
   const count = stations.length
@@ -144,6 +229,9 @@ function sweepSection(writer: PartWriter, stations: Station[], options: SweepOpt
   const slot = options.slot
   const edgeSlot = options.edgeSlot ?? options.slot
   const closed = options.closed ?? false
+  const section = options.section ?? boxSection
+  const chamfer = options.chamfer ?? 0.03
+  const profiles: ProfilePoint[][] = []
   const rings: Vector3[][] = []
   const u = new Vector3()
   const s = new Vector3()
@@ -157,19 +245,8 @@ function sweepSection(writer: PartWriter, stations: Station[], options: SweepOpt
     u.subVectors(station.p, CENTER).normalize()
     s.crossVectors(u, tangent).normalize()
 
-    const h = station.half
-    const d = station.depth
-    const c = Math.min(options.chamfer ?? 0.03, h * 0.45, d * 0.4)
-    const profile: Array<[number, number]> = [
-      [-h + c, 0],
-      [h - c, 0],
-      [h, c],
-      [h, d - c],
-      [h - c, d],
-      [-h + c, d],
-      [-h, d - c],
-      [-h, c],
-    ]
+    const profile = section(station.half, station.depth, chamfer)
+    profiles.push(profile)
     rings.push(
       profile.map(([x, y]) =>
         station.p.clone().addScaledVector(s, x).addScaledVector(u, inset + y),
@@ -177,19 +254,42 @@ function sweepSection(writer: PartWriter, stations: Station[], options: SweepOpt
     )
   }
 
+  const points = profiles[0].length
   const segments = closed ? count : count - 1
   for (let i = 0; i < segments; i++) {
     const a = rings[i]
     const b = rings[(i + 1) % count]
-    for (let e = 0; e < 8; e++) {
-      const e2 = (e + 1) % 8
-      // Profile edges 1/3/5/7 are the chamfer bands.
+    for (let e = 0; e < points; e++) {
+      const e2 = (e + 1) % points
+      // Odd profile edges are the chamfer/fillet bands.
       writer.quad(e % 2 === 1 ? edgeSlot : slot, a[e], a[e2], b[e2], b[e])
     }
   }
 
-  if (!closed && options.capStart) capSection(writer, slot, rings[0], true)
-  if (!closed && options.capEnd) capSection(writer, slot, rings[count - 1], false)
+  if (!closed && options.capStart) capSection(writer, slot, profiles[0], rings[0], true)
+  if (!closed && options.capEnd) {
+    capSection(writer, slot, profiles[count - 1], rings[count - 1], false)
+  }
+}
+
+/**
+ * Close a swept section. Ear-clipped from the 2-D profile rather than fanned
+ * from a centroid: a flanged section is NOT star-shaped about its centroid,
+ * and a centroid fan lays triangles straight across both web notches.
+ */
+function capSection(
+  writer: PartWriter,
+  slot: DomeSlot,
+  profile: ProfilePoint[],
+  ring: Vector3[],
+  flip: boolean,
+): void {
+  const contour = profile.map(([x, y]) => new Vector2(x, y))
+  for (const face of ShapeUtils.triangulateShape(contour, [])) {
+    const [a, b, c] = face
+    if (flip) writer.tri(slot, ring[a], ring[c], ring[b])
+    else writer.tri(slot, ring[a], ring[b], ring[c])
+  }
 }
 
 /** Station on the shell between two stations, re-projected onto the sphere. */
@@ -206,8 +306,8 @@ function lerpStation(a: Station, b: Station, t: number): Station {
  * Emit a member, cut around the portal opening. A member that grazes the
  * aperture is split into runs and each run's boundary is walked out to the
  * frame's reveal line by bisection — so the rib on the portal meridian and
- * the three ring beams that cross it end ON the portal frame instead of
- * flying through the tram tube.
+ * the ring beam that crosses it end ON the portal frame instead of flying
+ * through the tram tube.
  */
 function emitMember(writer: PartWriter, stations: Station[], options: SweepOptions): void {
   const outside = stations.map((s) => boreDistance(s.p) >= PORTAL_CLEAR)
@@ -246,18 +346,6 @@ function emitMember(writer: PartWriter, stations: Station[], options: SweepOptio
   }
 }
 
-/** Close a swept section with a fan; `flip` for the start (−tangent) face. */
-function capSection(writer: PartWriter, slot: DomeSlot, ring: Vector3[], flip: boolean): void {
-  const center = new Vector3()
-  for (const p of ring) center.add(p)
-  center.multiplyScalar(1 / ring.length)
-  for (let i = 0; i < ring.length; i++) {
-    const j = (i + 1) % ring.length
-    if (flip) writer.tri(slot, center, ring[j], ring[i])
-    else writer.tri(slot, center, ring[i], ring[j])
-  }
-}
-
 function ribStation(theta: number, phi: number): Station {
   return {
     p: shellPoint(theta, phi),
@@ -270,14 +358,17 @@ function buildRibs(writer: PartWriter): void {
   for (let i = 0; i < DOME_RIBS; i++) {
     const phi = (i / DOME_RIBS) * TWO_PI
     const stations: Station[] = [ribStation(RIB_FOOT_THETA, phi)]
-    for (let j = DOME_RINGS; j > DOME_OCULUS_RING; j--) {
-      stations.push(ribStation(j * DOME_RING_STEP, phi))
+    // One station every third of a ring bay: the bays are 11.5 m of arc now,
+    // and a full-bay chord would stand 10 cm off the sphere.
+    for (let k = DOME_RINGS * RIB_SUBDIVISIONS; k > DOME_OCULUS_RING * RIB_SUBDIVISIONS; k--) {
+      stations.push(ribStation((k / RIB_SUBDIVISIONS) * DOME_RING_STEP, phi))
     }
     stations.push(ribStation(RIB_TOP_THETA, phi))
     emitMember(writer, stations, {
       slot: 'shell',
       edgeSlot: 'shellEdge',
-      chamfer: 0.035,
+      section: flangedSection,
+      chamfer: 0.05,
       capStart: true,
       capEnd: true,
     })
@@ -290,31 +381,46 @@ function ringBayGap(theta: number): number {
   return (domeTaper(DOME_RIB_HALF_WIDTH, theta) + COLLAR_SIDE_PROUD + JOINT_REVEAL) / radius
 }
 
+/**
+ * Ring beams, one segment per rib bay, haunched into the node at both ends.
+ *
+ * The haunch is IN PLANE only (half-width, never depth): the crane rails are
+ * laid on the ring's outer face at a lift derived from the nominal depth, and
+ * a deepening haunch would push the beam straight through its own rail.
+ */
 function buildRingBeams(writer: PartWriter): void {
-  const finestTier = DOME_BAR_TIERS[DOME_BAR_TIERS.length - 1][0]
-  for (let j = DOME_OCULUS_RING + 1; j < DOME_RINGS; j++) {
+  for (let j = DOME_RING_FIRST; j <= DOME_RING_LAST; j++) {
     const theta = j * DOME_RING_STEP
+    const ringRadius = DOME_SPHERE_RADIUS * Math.sin(theta)
     const half = domeTaper(DOME_RING_HALF_WIDTH, theta)
     const depth = domeTaper(DOME_RING_DEPTH, theta)
     const gap = ringBayGap(theta)
-    // Sub-stations keep the arc honest: 4.25 m chords sag 17 mm on a 130 m
-    // ring, which is below a pixel from anywhere in the park.
-    const subdivisions = j >= finestTier ? 4 : 2
+    const bayArc = (TWO_PI / DOME_RIBS - 2 * gap) * ringRadius
+    // Three stations inside each haunch, then even sub-stations across the
+    // clear span — so the flare is a shaped haunch, not a one-segment step.
+    const haunch = Math.min(0.34, Math.min(RING_HAUNCH_ARC, bayArc * 0.3) / bayArc)
+    const spans = Math.max(2, Math.ceil(((1 - 2 * haunch) * bayArc) / RING_SEGMENT_ARC))
+    const fractions: number[] = [0, haunch * 0.35, haunch]
+    for (let k = 1; k < spans; k++) fractions.push(haunch + ((1 - 2 * haunch) * k) / spans)
+    fractions.push(1 - haunch, 1 - haunch * 0.35, 1)
+
     for (let i = 0; i < DOME_RIBS; i++) {
       const phi0 = (i / DOME_RIBS) * TWO_PI + gap
       const phi1 = ((i + 1) / DOME_RIBS) * TWO_PI - gap
-      const stations: Station[] = []
-      for (let k = 0; k <= subdivisions; k++) {
-        stations.push({
-          p: shellPoint(theta, phi0 + (phi1 - phi0) * (k / subdivisions)),
-          half,
+      const stations: Station[] = fractions.map((t) => {
+        const toNode = Math.min(t, 1 - t) / haunch
+        const flare = Math.max(0, 1 - toNode)
+        return {
+          p: shellPoint(theta, phi0 + (phi1 - phi0) * t),
+          half: half * (1 + RING_HAUNCH_GAIN * flare * flare),
           depth,
-        })
-      }
+        }
+      })
       emitMember(writer, stations, {
         slot: 'shell',
         edgeSlot: 'shellEdge',
-        chamfer: 0.028,
+        section: flangedSection,
+        chamfer: 0.04,
         capStart: true,
         capEnd: true,
       })
@@ -323,55 +429,19 @@ function buildRingBeams(writer: PartWriter): void {
 }
 
 /**
- * Glazing bars. Every tier count is a multiple of DOME_RIBS and of the tier
- * below it, so a bar line always lands on the previous family's line and a
- * "drop" is simply half the bars stopping at a ring beam.
- */
-function buildGlazingBars(writer: PartWriter): void {
-  const tiers = DOME_BAR_TIERS
-  for (let tier = 0; tier < tiers.length; tier++) {
-    const [startRing, count] = tiers[tier]
-    const coarser = tier === 0 ? DOME_RIBS : tiers[tier - 1][1]
-    const stride = count / coarser
-    for (let line = 0; line < count; line++) {
-      if (line % stride === 0) continue // already carried by a coarser family
-      const phi = (line / count) * TWO_PI
-      for (let j = startRing; j < DOME_RINGS; j++) {
-        const thetaA = j * DOME_RING_STEP
-        const thetaB = (j + 1) * DOME_RING_STEP
-        const clearA = (domeTaper(DOME_RING_HALF_WIDTH, thetaA) + JOINT_REVEAL) / DOME_SPHERE_RADIUS
-        // The outermost interval dies in the plinth; there is no ring 36 beam.
-        const clearB =
-          j + 1 >= DOME_RINGS
-            ? -0.9 / DOME_SPHERE_RADIUS
-            : (domeTaper(DOME_RING_HALF_WIDTH, thetaB) + JOINT_REVEAL) / DOME_SPHERE_RADIUS
-        const stations: Station[] = [
-          { p: shellPoint(thetaA + clearA, phi), half: DOME_BAR_HALF_WIDTH, depth: DOME_BAR_DEPTH },
-          { p: shellPoint(thetaB - clearB, phi), half: DOME_BAR_HALF_WIDTH, depth: DOME_BAR_DEPTH },
-        ]
-        emitMember(writer, stations, {
-          slot: 'shell',
-          edgeSlot: 'shellEdge',
-          chamfer: 0.016,
-          capStart: true,
-          capEnd: true,
-        })
-      }
-    }
-  }
-}
-
-/**
  * The cast node collar: a short section swept ALONG the rib that encloses the
  * rib's whole cross-section (proud on all four faces, so no face is shared)
- * and gives the two ring segments something to butt into.
+ * and gives the two haunched ring ends something to butt into.
  */
 function buildNodeCollars(writer: PartWriter): void {
-  for (let j = DOME_OCULUS_RING + 1; j < DOME_RINGS; j++) {
+  for (let j = DOME_RING_FIRST; j <= DOME_RING_LAST; j++) {
     const theta = j * DOME_RING_STEP
-    const halfLength = (domeTaper(DOME_RING_HALF_WIDTH, theta) + 0.16) / DOME_SPHERE_RADIUS
+    // Long enough in θ to swallow the haunched ring end plus a 0.26 m margin.
+    const halfLength =
+      (domeTaper(DOME_RING_HALF_WIDTH, theta) * (1 + RING_HAUNCH_GAIN) + 0.26) /
+      DOME_SPHERE_RADIUS
     const half = domeTaper(DOME_RIB_HALF_WIDTH, theta) + COLLAR_SIDE_PROUD
-    const depth = domeTaper(DOME_RIB_DEPTH, theta) + 0.17
+    const depth = domeTaper(DOME_RIB_DEPTH, theta) + DOME_COLLAR_PROUD
     for (let i = 0; i < DOME_RIBS; i++) {
       const phi = (i / DOME_RIBS) * TWO_PI
       emitMember(
@@ -383,7 +453,7 @@ function buildNodeCollars(writer: PartWriter): void {
         {
           slot: 'node',
           inset: DOME_MEMBER_INSET - 0.05,
-          chamfer: 0.045,
+          chamfer: 0.055,
           capStart: true,
           capEnd: true,
         },
@@ -393,7 +463,8 @@ function buildNodeCollars(writer: PartWriter): void {
 }
 
 function buildOculus(writer: PartWriter): void {
-  // Compression ring: one continuous fabricated ring, the deepest member.
+  // Compression ring: one continuous fabricated ring, the deepest member and
+  // the structural climax — every rib dies into it.
   const ringStations: Station[] = []
   const ringSegments = 96
   for (let i = 0; i < ringSegments; i++) {
@@ -406,8 +477,9 @@ function buildOculus(writer: PartWriter): void {
   sweepSection(writer, ringStations, {
     slot: 'shell',
     edgeSlot: 'shellEdge',
+    section: flangedSection,
     inset: 0.02,
-    chamfer: 0.06,
+    chamfer: 0.07,
     closed: true,
   })
 
@@ -416,39 +488,46 @@ function buildOculus(writer: PartWriter): void {
   const spokeInner = Math.asin((DOME_HUB_RADIUS + 0.02) / DOME_SPHERE_RADIUS)
   for (let i = 0; i < DOME_HUB_SPOKES; i++) {
     const phi = (i / DOME_HUB_SPOKES) * TWO_PI
-    sweepSection(
-      writer,
-      [
-        { p: shellPoint(spokeInner, phi), half: DOME_HUB_BAR_HALF_WIDTH, depth: 0.22 },
-        { p: shellPoint(spokeOuter, phi), half: DOME_HUB_BAR_HALF_WIDTH, depth: 0.22 },
-      ],
-      { slot: 'shell', edgeSlot: 'shellEdge', chamfer: 0.02, capStart: true, capEnd: true },
-    )
+    const stations: Station[] = []
+    for (let k = 0; k <= 3; k++) {
+      stations.push({
+        p: shellPoint(spokeInner + ((spokeOuter - spokeInner) * k) / 3, phi),
+        half: DOME_HUB_BAR_HALF_WIDTH,
+        depth: DOME_HUB_BAR_DEPTH,
+      })
+    }
+    sweepSection(writer, stations, {
+      slot: 'shell',
+      edgeSlot: 'shellEdge',
+      chamfer: 0.025,
+      capStart: true,
+      capEnd: true,
+    })
   }
 
-  // Hub cap: the small pressure plate the spokes land on (disc + lathed rim).
+  // Hub cap: the pressure plate the spokes land on (disc + lathed rim).
   const poleY = DOME_CENTER_Y + DOME_SPHERE_RADIUS
-  writer.disc(new Vector3(0, poleY + 0.34, 0), DOME_HUB_RADIUS - 0.05, 'shell', { segments: 48 })
+  writer.disc(new Vector3(0, poleY + 0.46, 0), DOME_HUB_RADIUS - 0.07, 'shell', { segments: 64 })
   writer.lathe({
     center: new Vector3(0, poleY, 0),
     profile: [
-      new Vector2(DOME_HUB_RADIUS - 0.05, 0.34),
-      new Vector2(DOME_HUB_RADIUS, 0.26),
-      new Vector2(DOME_HUB_RADIUS, -0.04),
-      new Vector2(DOME_HUB_RADIUS - 0.08, -0.12),
+      new Vector2(DOME_HUB_RADIUS - 0.07, 0.46),
+      new Vector2(DOME_HUB_RADIUS, 0.34),
+      new Vector2(DOME_HUB_RADIUS, -0.05),
+      new Vector2(DOME_HUB_RADIUS - 0.11, -0.16),
     ],
     slot: 'shell',
-    segments: 48,
+    segments: 64,
   })
-  writer.disc(new Vector3(0, poleY - 0.12, 0), DOME_HUB_RADIUS - 0.08, 'shell', {
-    segments: 48,
+  writer.disc(new Vector3(0, poleY - 0.16, 0), DOME_HUB_RADIUS - 0.11, 'shell', {
+    segments: 64,
     down: true,
   })
 
   // Maintenance handrail: the crown platform's edge protection, mounted on
-  // every second rib so its posts have something to bolt to.
-  const railTheta = DOME_OCULUS_THETA + 1.6 / DOME_SPHERE_RADIUS
-  for (let i = 0; i < DOME_RIBS; i += 2) {
+  // every rib so its posts have something to bolt to.
+  const railTheta = DOME_OCULUS_THETA + (DOME_OCULUS_HALF_WIDTH + 1.1) / DOME_SPHERE_RADIUS
+  for (let i = 0; i < DOME_RIBS; i++) {
     const phi = (i / DOME_RIBS) * TWO_PI
     writer.tube({
       path: [shellPoint(railTheta, phi, 0.34), shellPoint(railTheta, phi, 1.56)],
@@ -461,7 +540,7 @@ function buildOculus(writer: PartWriter): void {
   }
   for (const lift of [1.5, 0.98]) {
     const path: Vector3[] = []
-    for (let i = 0; i <= 72; i++) path.push(shellPoint(railTheta, (i / 72) * TWO_PI, lift))
+    for (let i = 0; i <= 96; i++) path.push(shellPoint(railTheta, (i / 96) * TWO_PI, lift))
     writer.tube({ path, radius: 0.05, slot: 'hardware', radialSegments: 8 })
   }
 }
@@ -544,31 +623,31 @@ function buildFooting(writer: PartWriter): void {
   const shoeTop = thetaAtHeight(2.6)
   for (let i = 0; i < DOME_RIBS; i++) {
     const phi = (i / DOME_RIBS) * TWO_PI
-    const half = domeTaper(DOME_RIB_HALF_WIDTH, DOME_THETA_BASE) + 0.22
+    const half = domeTaper(DOME_RIB_HALF_WIDTH, DOME_THETA_BASE) + 0.24
     const depth = domeTaper(DOME_RIB_DEPTH, DOME_THETA_BASE) + 0.26
     emitMember(
       writer,
       [
         { p: shellPoint(shoeBottom, phi), half, depth },
-        { p: shellPoint(shoeTop, phi), half: half - 0.05, depth: depth - 0.06 },
+        { p: shellPoint(shoeTop, phi), half: half - 0.06, depth: depth - 0.09 },
       ],
-      { slot: 'node', inset: 0.015, chamfer: 0.05, capStart: true, capEnd: true },
+      { slot: 'node', inset: 0.015, chamfer: 0.06, capStart: true, capEnd: true },
     )
     const studTheta = thetaAtHeight(1.9)
     if (boreDistance(shellPoint(studTheta, phi)) < PORTAL_CLEAR + 1) continue
     for (const side of [-1, 1]) {
-      for (const along of [-0.32, 0.32]) {
+      for (const along of [-0.42, 0.42]) {
         const base = shellPoint(studTheta + along / DOME_SPHERE_RADIUS, phi)
         const u = base.clone().sub(CENTER).normalize()
         const tangent = shellPoint(studTheta + 0.002, phi).sub(base).normalize()
         const s = new Vector3().crossVectors(u, tangent).normalize()
         const seat = base
           .clone()
-          .addScaledVector(s, side * (half - 0.12))
-          .addScaledVector(u, 0.015 + depth - 0.1)
+          .addScaledVector(s, side * (half - 0.14))
+          .addScaledVector(u, 0.015 + depth - 0.12)
         writer.tube({
-          path: [seat, seat.clone().addScaledVector(u, 0.14)],
-          radius: 0.045,
+          path: [seat, seat.clone().addScaledVector(u, 0.16)],
+          radius: 0.05,
           slot: 'hardware',
           radialSegments: 8,
           capEnd: true,
@@ -580,9 +659,9 @@ function buildFooting(writer: PartWriter): void {
 
 /**
  * The trimmed opening's reinforcing ring: a deep frame following the shell
- * around the tube bore, picking up the cut rib and the three cut ring beams.
- * Its inner edge lands exactly on the glass aperture, so it dresses the cut
- * pane edge as well as carrying the load.
+ * around the tube bore, picking up the cut rib and the cut ring beam. Its
+ * inner edge lands exactly on the glass aperture, so it dresses the cut pane
+ * edge as well as carrying the load.
  */
 function buildPortalFrame(writer: PartWriter): void {
   const stations: Station[] = []
@@ -593,7 +672,7 @@ function buildPortalFrame(writer: PartWriter): void {
     const y = PORTAL_AXIS_Y + Math.sin(angle) * PORTAL_FRAME_CENTER
     const dy = y - DOME_CENTER_Y
     const z = Math.sqrt(Math.max(1, DOME_SPHERE_RADIUS ** 2 - x * x - dy * dy))
-    stations.push({ p: new Vector3(x, y, z), half: PORTAL_FRAME_HALF, depth: 0.9 })
+    stations.push({ p: new Vector3(x, y, z), half: PORTAL_FRAME_HALF, depth: 1.15 })
   }
   sweepSection(writer, stations, {
     slot: 'node',
@@ -604,14 +683,79 @@ function buildPortalFrame(writer: PartWriter): void {
   })
 }
 
-/** Crane rails the Panewalker rides, laid on ring beams 12 and 24. */
+/**
+ * Crane rails the Panewalker rides, on ring beams 4 and 8.
+ *
+ * The rail runs in φ, so it crosses every rib and every node collar — both
+ * deeper than the ring beam it follows. It therefore flies ABOVE the node
+ * line (domeCraneRailLift) on a sole plate at each node and on stools every
+ * ~3.5 m between them, rather than being buried in 24 ribs.
+ */
 function buildCraneRails(writer: PartWriter): void {
   for (const ring of PANEWALKER_RAIL_RINGS) {
     const theta = ring * DOME_RING_STEP
-    const lift = DOME_MEMBER_INSET + domeTaper(DOME_RING_DEPTH, theta) + 0.095
+    const ringRadius = DOME_SPHERE_RADIUS * Math.sin(theta)
+    const lift = domeCraneRailLift(theta)
+    const railSoffit = lift - DOME_RAIL_RADIUS
     const path: Vector3[] = []
-    for (let i = 0; i <= 192; i++) path.push(shellPoint(theta, (i / 192) * TWO_PI, lift))
-    writer.tube({ path, radius: 0.08, slot: 'rail', radialSegments: 10 })
+    for (let i = 0; i <= 256; i++) path.push(shellPoint(theta, (i / 256) * TWO_PI, lift))
+    writer.tube({ path, radius: DOME_RAIL_RADIUS, slot: 'rail', radialSegments: 10 })
+
+    // Sole plate on each node collar: sunk 30 mm into the casting so no two
+    // faces are ever flush, lapped 20 mm into the rail.
+    const collarTop =
+      DOME_MEMBER_INSET - 0.05 + domeTaper(DOME_RIB_DEPTH, theta) + DOME_COLLAR_PROUD
+    const plateHalfPhi = 0.34 / ringRadius
+    // Stools between the nodes, standing on the ring beam's outer face.
+    const ringTop = DOME_MEMBER_INSET + domeTaper(DOME_RING_DEPTH, theta)
+    const gap = ringBayGap(theta)
+    const bayArc = (TWO_PI / DOME_RIBS - 2 * gap) * ringRadius
+    const stools = Math.max(1, Math.round(bayArc / 3.5) - 1)
+    const stoolHalfPhi = 0.12 / ringRadius
+
+    for (let i = 0; i < DOME_RIBS; i++) {
+      const phi = (i / DOME_RIBS) * TWO_PI
+      emitMember(
+        writer,
+        [
+          { p: shellPoint(theta, phi - plateHalfPhi), half: 0.26, depth: railSoffit - collarTop + 0.05 },
+          { p: shellPoint(theta, phi + plateHalfPhi), half: 0.26, depth: railSoffit - collarTop + 0.05 },
+        ],
+        {
+          slot: 'node',
+          inset: collarTop - 0.03,
+          chamfer: 0.02,
+          capStart: true,
+          capEnd: true,
+        },
+      )
+      for (let k = 1; k <= stools; k++) {
+        const t = k / (stools + 1)
+        const stoolPhi = phi + gap + (TWO_PI / DOME_RIBS - 2 * gap) * t
+        emitMember(
+          writer,
+          [
+            {
+              p: shellPoint(theta, stoolPhi - stoolHalfPhi),
+              half: 0.1,
+              depth: railSoffit - ringTop + 0.05,
+            },
+            {
+              p: shellPoint(theta, stoolPhi + stoolHalfPhi),
+              half: 0.1,
+              depth: railSoffit - ringTop + 0.05,
+            },
+          ],
+          {
+            slot: 'hardware',
+            inset: ringTop - 0.03,
+            chamfer: 0.018,
+            capStart: true,
+            capEnd: true,
+          },
+        )
+      }
+    }
   }
 }
 
@@ -619,7 +763,6 @@ export function buildDomeStructure(materials: Record<DomeSlot, Material>): Group
   const writer = new PartWriter()
   buildRibs(writer)
   buildRingBeams(writer)
-  buildGlazingBars(writer)
   buildNodeCollars(writer)
   buildOculus(writer)
   buildPortalFrame(writer)

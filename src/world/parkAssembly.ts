@@ -99,7 +99,25 @@ export class ParkAssemblySystem implements GameSystem {
 
     if (this.player && this.interaction) {
       const player = this.player
+      // One step so the query pipeline exists — rapier queries see NOTHING
+      // before the first world.step() (notes.md), and the sight-line casts
+      // below depend on it. Everything is fixed/kinematic; nothing moves.
+      world?.step()
       for (const seatSpec of services.seats) {
+        // A seat whose sight-line is bricked shut is worse than no seat
+        // (audit: a path bench faced a play block at 0.4 m). Head-height
+        // cast from just ahead of the backrest: blocked → the bench stays
+        // as dressing, no interactable.
+        if (world && api) {
+          const dx = -Math.sin(seatSpec.yaw)
+          const dz = -Math.cos(seatSpec.yaw)
+          const origin = {
+            x: seatSpec.seat.x + dx * 0.35,
+            y: seatSpec.seat.y + 0.85,
+            z: seatSpec.seat.z + dz * 0.35,
+          }
+          if (world.castRay(new api.Ray(origin, { x: dx, y: 0, z: dz }), 0.4, true)) continue
+        }
         this.interaction.register({
           position: seatSpec.seat.clone().setY(seatSpec.seat.y + 0.55),
           label: () => (player.seated ? 'Stand' : (seatSpec.label ?? 'Sit')),

@@ -14,20 +14,31 @@ export interface Interactable {
 
 const CAPTION_CSS = `
 #prompt {
-  position: fixed; left: 50%; bottom: 12vh; transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: 9vh;
+  transform: translate(-50%, 8px);
+  display: inline-flex; align-items: center; gap: 11px;
+  padding: 8px 16px 8px 9px;
+  background: rgba(14, 10, 8, 0.52);
+  border: 1px solid rgba(244, 239, 228, 0.14);
+  border-radius: 12px;
+  backdrop-filter: blur(12px) saturate(0.9);
+  -webkit-backdrop-filter: blur(12px) saturate(0.9);
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  font-size: 12px; letter-spacing: 0.34em; text-transform: uppercase;
-  color: rgba(244, 239, 228, 0.92);
-  text-shadow: 0 1px 10px rgba(10, 6, 4, 0.7);
-  opacity: 0; transition: opacity 0.22s ease; pointer-events: none;
-  z-index: 30; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(246, 242, 233, 0.94);
+  opacity: 0; transition: opacity 0.16s ease, transform 0.16s ease;
+  pointer-events: none; z-index: 30; white-space: nowrap;
 }
 #prompt .key {
-  display: inline-block; border: 1px solid rgba(244,239,228,0.5);
-  border-radius: 3px; padding: 1px 6px 2px; margin-right: 10px;
-  font-size: 10px; letter-spacing: 0.12em;
+  display: grid; place-items: center;
+  min-width: 22px; height: 22px; padding: 0 5px;
+  border-radius: 6px;
+  background: rgba(244, 239, 228, 0.92); color: #17130f;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
 }
-#prompt.visible { opacity: 1; }
+#prompt.visible { opacity: 1; transform: translate(-50%, 0); }
 `
 
 /**
@@ -67,7 +78,28 @@ export class InteractionSystem implements GameSystem {
     }
   }
 
+  /**
+   * Sticky caption that bypasses the view-cone pick (seated-in-vehicle
+   * hints: "Exit" while the tram dwells). The owner of the override also
+   * owns the KeyE press — normal interactables are muted while it's up.
+   */
+  setOverride(label: string | null): void {
+    if (this.override === label) return
+    this.override = label
+    if (label !== null) this.showCaption(label)
+    else if (this.active) this.showCaption(labelOf(this.active))
+    else this.prompt?.classList.remove('visible')
+  }
+
+  private override: string | null = null
+
   update(ctx: GameContext): void {
+    if (this.override !== null) {
+      this.setActive(null)
+      if (ctx.time.paused) this.prompt?.classList.remove('visible')
+      else this.prompt?.classList.add('visible')
+      return
+    }
     if (ctx.time.paused || this.interactables.length === 0) {
       this.setActive(null)
       return
@@ -112,20 +144,27 @@ export class InteractionSystem implements GameSystem {
   private setActive(interactable: Interactable | null): void {
     if (this.active === interactable && interactable === null) return
     this.active = interactable
+    if (interactable) this.showCaption(labelOf(interactable))
+    else this.prompt?.classList.remove('visible')
+  }
+
+  private showCaption(label: string): void {
     const prompt = this.prompt
     if (!prompt) return
-    if (interactable) {
-      const label =
-        typeof interactable.label === 'function' ? interactable.label() : interactable.label
-      prompt.innerHTML = `<span class="key">E</span>${label}`
-      prompt.classList.add('visible')
-    } else {
-      prompt.classList.remove('visible')
-    }
+    prompt.textContent = ''
+    const key = document.createElement('span')
+    key.className = 'key'
+    key.textContent = 'E'
+    prompt.append(key, label)
+    prompt.classList.add('visible')
   }
 
   dispose(): void {
     this.prompt?.remove()
     this.prompt = null
   }
+}
+
+function labelOf(interactable: Interactable): string {
+  return typeof interactable.label === 'function' ? interactable.label() : interactable.label
 }

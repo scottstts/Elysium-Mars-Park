@@ -134,23 +134,42 @@ export function heroGlass(tint = new Color(0.86, 0.93, 0.88)): MeshPhysicalNodeM
   return material
 }
 
-/** Stencil signage: crisp uppercase text on a plate, canvas-rasterized. */
+/**
+ * Stencil signage: crisp uppercase text on a plate, canvas-rasterized.
+ * `aspect` is the TARGET PLANE's width/height — the canvas matches it so
+ * texels stay square on the mesh. The old fixed 1:0.28 canvas squashed the
+ * type flat on every portrait plate (hydro totem finding). Callers with a
+ * 1:0.28 plate (stencilSign) need pass nothing.
+ */
 export function signageMaterial(
   lines: string[],
-  options?: { background?: string; ink?: string; widthPx?: number; accent?: string },
+  options?: {
+    background?: string
+    ink?: string
+    widthPx?: number
+    accent?: string
+    aspect?: number
+  },
 ): MeshStandardNodeMaterial {
   const width = options?.widthPx ?? 1024
+  const aspect = options?.aspect ?? 1 / 0.28
   const canvas = document.createElement('canvas')
   canvas.width = width
-  canvas.height = Math.round(width * 0.28)
+  canvas.height = Math.max(64, Math.min(4096, Math.round(width / aspect)))
   const g = canvas.getContext('2d')
   if (g) {
+    const ink = options?.ink ?? '#efe9dc'
     g.fillStyle = options?.background ?? '#1c1a19'
     g.fillRect(0, 0, canvas.width, canvas.height)
-    g.strokeStyle = 'rgba(240,235,225,0.25)'
+    // The border is the ink at a quarter strength, NOT a hard-coded pale
+    // grey: on a light plate (the water tower) a pale border is invisible.
+    // For the default cream ink this is the same pixel it always was.
+    g.globalAlpha = 0.25
+    g.strokeStyle = ink
     g.lineWidth = 6
     g.strokeRect(14, 14, canvas.width - 28, canvas.height - 28)
-    g.fillStyle = options?.ink ?? '#efe9dc'
+    g.globalAlpha = 1
+    g.fillStyle = ink
     g.textAlign = 'center'
     g.textBaseline = 'middle'
     const lineHeight = canvas.height / (lines.length + 0.6)

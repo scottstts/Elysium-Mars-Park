@@ -35,6 +35,89 @@ interface Slot {
 const ZERO2 = new Vector2()
 const ZERO3 = new Vector3()
 
+/**
+ * Ear-clip a planar polygon on its OWN plane, returning index triples into
+ * `corners`. The vertex ORDER is preserved (the ears are chosen with the
+ * outline's own signed-area sign), so emitted triangles keep exactly the facing
+ * the caller's winding asked for — this is a triangulation fix, never a
+ * flip. Falls back to a fan if the outline is too degenerate to clip.
+ */
+function earClip(corners: GroundVertex[], normal: Vector3): Array<[number, number, number]> {
+  const count = corners.length
+  // An in-plane basis. The first candidate degenerates when the normal is
+  // parallel to Z, so fall back to X there.
+  let ux = normal.y
+  let uy = -normal.x
+  let uz = 0
+  if (ux * ux + uy * uy < 1e-12) {
+    ux = 1
+    uy = 0
+    uz = 0
+  }
+  const ul = Math.hypot(ux, uy, uz)
+  ux /= ul
+  uy /= ul
+  uz /= ul
+  const vx = normal.y * uz - normal.z * uy
+  const vy = normal.z * ux - normal.x * uz
+  const vz = normal.x * uy - normal.y * ux
+  const px: number[] = []
+  const py: number[] = []
+  for (const corner of corners) {
+    const p = corner.p
+    px.push(p.x * ux + p.y * uy + p.z * uz)
+    py.push(p.x * vx + p.y * vy + p.z * vz)
+  }
+  let area2 = 0
+  for (let i = 0; i < count; i++) {
+    const j = (i + 1) % count
+    area2 += px[i] * py[j] - px[j] * py[i]
+  }
+  const sign = area2 >= 0 ? 1 : -1
+  const cross = (i: number, j: number, k: number): number =>
+    (px[j] - px[i]) * (py[k] - py[i]) - (py[j] - py[i]) * (px[k] - px[i])
+
+  const ring: number[] = []
+  for (let i = 0; i < count; i++) ring.push(i)
+  const out: Array<[number, number, number]> = []
+  let guard = count * count + 8
+  while (ring.length > 3 && guard-- > 0) {
+    let clipped = false
+    for (let k = 0; k < ring.length; k++) {
+      const i0 = ring[(k + ring.length - 1) % ring.length]
+      const i1 = ring[k]
+      const i2 = ring[(k + 1) % ring.length]
+      // Convex corner for this outline's orientation?
+      if (cross(i0, i1, i2) * sign <= 0) continue
+      let contains = false
+      for (const m of ring) {
+        if (m === i0 || m === i1 || m === i2) continue
+        if (
+          cross(i0, i1, m) * sign >= 0 &&
+          cross(i1, i2, m) * sign >= 0 &&
+          cross(i2, i0, m) * sign >= 0
+        ) {
+          contains = true
+          break
+        }
+      }
+      if (contains) continue
+      out.push([i0, i1, i2])
+      ring.splice(k, 1)
+      clipped = true
+      break
+    }
+    if (!clipped) break
+  }
+  if (ring.length === 3) {
+    out.push([ring[0], ring[1], ring[2]])
+    return out
+  }
+  out.length = 0
+  for (let i = 1; i < count - 1; i++) out.push([0, i, i + 1])
+  return out
+}
+
 export class GroundWriter {
   private readonly slots = new Map<string, Slot>()
 
@@ -47,7 +130,8 @@ export class GroundWriter {
     return slot
   }
 
-  /** Convex polygon (3..n corners), wound counter-clockwise about its normal. */
+  /** Planar polygon (3..n corners), wound counter-clockwise about its normal.
+   *  Concave outlines are ear-clipped; see the note at the bottom of the body. */
   face(slotName: string, corners: GroundVertex[]): void {
     if (corners.length < 3) return
     const a = corners[0].p
@@ -70,8 +154,21 @@ export class GroundWriter {
       slot.uvs.push(uvValue.x, uvValue.y)
       slot.pavs.push(pavValue.x, pavValue.y, pavValue.z)
     }
-    for (let i = 1; i < corners.length - 1; i++) {
-      slot.indices.push(base, base + i, base + i + 1)
+    // Quads and triangles keep the fan: it is correct for them, and a slab cell
+    // is non-planar over the grade, so its diagonal is load-bearing and must
+    // not move. Anything with MORE corners here is a sweep cap, and every sweep
+    // cap in this file is a channel section (a U) — a fan across a U emits
+    // triangles that fold outside the outline and overlap each other, which is
+    // how the embedded floor-light housings shipped 2 258 cm² of self-z-fight.
+    // Same trap that made `tram/tramMesh.ts` ear-clip; do not reintroduce a fan.
+    if (corners.length <= 4) {
+      for (let i = 1; i < corners.length - 1; i++) {
+        slot.indices.push(base, base + i, base + i + 1)
+      }
+      return
+    }
+    for (const [i, j, k] of earClip(corners, normal)) {
+      slot.indices.push(base + i, base + j, base + k)
     }
   }
 

@@ -202,10 +202,29 @@ export function plantGreenhouses(crops: GreenhouseCrops, rng: Rng): CropStats {
  *     structurally identical graphs share ONE compiled program; twenty graphs
  *     with different literals compile twenty times at boot.
  */
+/** Burst window inside the 90 s cycle, and its fade shoulders (seconds). */
+const MIST_PERIOD = 90
+const MIST_BURST = 10
+const MIST_FADE_IN = 2.5
+const MIST_FADE_OUT = 3.5
+
+const smootherstep = (edge0: number, edge1: number, x: number): number => {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)))
+  return t * t * t * (t * (t * 6 - 15) + 10)
+}
+
 export class MistSystem {
   private readonly sprites: Sprite[] = []
   private readonly phases: Array<{ node: ReturnType<typeof uniform>; seed: number; baseY: number }> = []
   private readonly life = uniform(0)
+  /**
+   * ONE envelope uniform shared by every puff's material. The burst used to
+   * switch `sprite.visible`, which is a hard on/off at full opacity — the
+   * mist snapped into and out of existence mid-room. The per-puff `life`
+   * fade stays exactly as it was; this multiplies the whole valve on top of
+   * it, so a burst opens and closes like a valve instead of a light switch.
+   */
+  private readonly env = uniform(0)
 
   constructor() {
     MIST_NOZZLES.forEach((nozzle, index) => {
@@ -223,12 +242,20 @@ export class MistSystem {
         .mul(float(1).sub(life))
         .mul(life.mul(5).min(1))
         .mul(radial)
+        .mul(this.env)
 
       const sprite = new Sprite(material)
       // Puffs fall from the nozzle mouth toward the trays.
       sprite.position.set(nozzle[0], nozzle[1], nozzle[2])
       sprite.scale.setScalar(2.1)
       sprite.visible = false
+      // The glazing is `transparent` with `depthWrite: false` at renderOrder
+      // 12, so at the default order the panes composited OVER the puffs — the
+      // mist was attenuated by glass BEHIND it whenever the camera was inside
+      // the house, and not attenuated at all once you stepped through the
+      // door. Additive mist drawn last is continuous on both sides of the
+      // glazing, which is what the doorway walk-through has to look like.
+      sprite.renderOrder = 13
       this.sprites.push(sprite)
       this.phases.push({ node: seedUniform, seed, baseY: nozzle[1] })
     })
@@ -240,12 +267,16 @@ export class MistSystem {
 
   /** Burst 10 s in every 90 s of park time — the window audio syncs against. */
   update(simTime: number): void {
-    const active = simTime % 90 < 10
+    const t = ((simTime % MIST_PERIOD) + MIST_PERIOD) % MIST_PERIOD
+    const envelope =
+      smootherstep(0, MIST_FADE_IN, t) * (1 - smootherstep(MIST_BURST - MIST_FADE_OUT, MIST_BURST, t))
+    this.env.value = envelope
     this.life.value = (simTime * 0.22) % 1
     for (let i = 0; i < this.sprites.length; i++) {
       const sprite = this.sprites[i]
-      sprite.visible = active
-      if (!active) continue
+      // Culled only where the envelope is genuinely zero, and the positions
+      // keep advancing regardless so a burst never opens on a stale frame.
+      sprite.visible = envelope > 0.002
       const phase = this.phases[i]
       const life = ((this.life.value as number) + phase.seed) % 1
       // The puff sinks and spreads: it is being sprayed DOWN onto a bench.

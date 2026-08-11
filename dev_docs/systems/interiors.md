@@ -21,3 +21,24 @@
   shadows are the money read).
 - Probing gotcha: the player BOOTS riding the tram — interior probes must
   `tram.riding=false; player.standAt(...)` before interacting.
+
+## Glasshouse entrances (overhaul, owner-flagged)
+
+- The three farmside ranges are **walk-through**: an identical entrance at
+  BOTH gables of all three, six `DoorSpec`s in total. The entrance belongs to
+  `farmside.ts`, not to `greenhouseInterior.ts` — the doorway is an aperture
+  cut from the gable's own welded grid, so its jambs, header, threshold and
+  leaf have to be authored where that grid is.
+- The grid IS the door frame: the door bay's two mullions are its jambs (at a
+  heavier section, on the same grid lines), and the door-head transom is its
+  header. Nothing else is added, and every member/pane that would cross the
+  clear opening is simply never emitted. `DOOR_CLEAR_WIDTH` is therefore
+  derived — `bay − 2 × JAMB_HALF` — not a number invented next to a grid line.
+- The leaf hangs **inboard**, 30 mm clear of the foundation upstand's inner
+  face. Any leaf hung outboard has to clear a 488 mm × 140 mm concrete
+  upstand along its whole travel, which means either a 300 mm stand-off or
+  breaking the upstand under the parking bay. Inboard costs nothing.
+- Thresholds: the doorway sits 55–194 mm above the apron across the three
+  ranges (`interiorHeight` fall differs per house). The approach is divided
+  into risers of ≤58 mm, each with its own collider, rather than leaning on
+  the character controller's 0.42 m autostep.

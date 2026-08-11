@@ -77,6 +77,15 @@ const V_COLUMN = 3.6
 const CANOPY_BAYS = 4
 /** Roof falls toward the track so the gutter is over the trackbed, not the seats. */
 const ROOF_FALL = 0.05
+/**
+ * Access-ramp anchor (arc u). The back band has only ±11.2 m of clear arc
+ * (boulevard planters resume beyond) and the grand flight owns the middle
+ * 5 m — the old 13 m 1:14 run from u −7.6 ran STRAIGHT OVER the flight and
+ * entombed the signposted Meridian route (traversal-audit find). At 0.38 g
+ * a 1:8 grade is gentler than Earth's 1:14, so the ramp fits east of the
+ * flight: u 2.7 → ~10, clear of both flight and planters.
+ */
+const RAMP_U0 = 2.7
 
 export class PortalStationSystem implements GameSystem {
   readonly id = 'archkit'
@@ -183,10 +192,10 @@ export class PortalStationSystem implements GameSystem {
         width: 3.2,
       })
     }
-    // ---- 1:14 ramp behind the west end.
+    // ---- 1:8 ramp behind the east half (see RAMP_U0 for why not 1:14 west).
     const rampFootY = slabTop(0, backR - 1)
-    const rampRun = Math.min(13, (platformDeckY(spec, -half + 1.4) - rampFootY) * 14)
-    accessRamp(writer, spec, -half + 1.4, rampRun, rampFootY)
+    const rampRun = Math.min(8.2, (platformDeckY(spec, RAMP_U0) - rampFootY) * 8)
+    accessRamp(writer, spec, RAMP_U0, rampRun, rampFootY)
 
     const materials: Record<string, Material> = {
       ...(kitMaterials() as unknown as Record<string, Material>),
@@ -209,7 +218,7 @@ export class PortalStationSystem implements GameSystem {
       const player = this.player
       for (const seat of benchSeats) {
         this.interaction.register({
-          position: seat.seat.clone().add(new Vector3(0, 0.5, 0)),
+          position: seat.seat.clone().add(new Vector3(0, 0.55, 0)),
           label: () => (player.seated ? 'Stand' : 'Sit'),
           range: 2.2,
           onUse: () => {
@@ -264,7 +273,12 @@ export class PortalStationSystem implements GameSystem {
     }
     for (let i = 0; i < 3; i++) {
       const u = -half + (DECK_ARC * (i + 0.5)) / 3
-      const outward = platformOutward(spec, u)
+      // `box`'s yaw sends local +Z to the given direction. These three boxes'
+      // centres march along the ARC, so the arc half-chunk is local +Z and the
+      // depth is local +X — the frame is the tangent. Built on `outward` the
+      // deck came out 90 deg round (6 m deep, 13.2 m long instead of 6.6 x 18)
+      // and left a fall-through hole at each of the two seams.
+      const along = platformTangent(spec, u)
       const top = platformDeckY(spec, u)
       const bottom = spec.baseY - 0.9
       const centre = platformPoint(spec, u, DECK_DEPTH / 2, (top + bottom) / 2)
@@ -272,7 +286,7 @@ export class PortalStationSystem implements GameSystem {
         centre,
         new Vector3(DECK_DEPTH / 2, (top - bottom) / 2, DECK_ARC / 6),
         0,
-        Math.atan2(outward.x, outward.z),
+        Math.atan2(along.x, along.z),
       )
     }
     // Grand flight: one pitched slab.
@@ -289,25 +303,28 @@ export class PortalStationSystem implements GameSystem {
       const sign = i === 0 ? -1 : 1
       const steps = endSteps[i]
       const u = sign * (half + 0.08 + (steps * 0.32) / 2)
-      const outward = platformOutward(spec, u)
+      // The flight runs off the END of the deck, i.e. along the tangent, and
+      // is 3.2 m wide across it — same frame as the access ramp below, and the
+      // only frame whose local +X (outward) is a legal pitch axis for it.
+      const along = platformTangent(spec, u)
       const drop = steps * endRise[i]
       const centre = platformPoint(spec, u, DECK_DEPTH / 2, platformDeckY(spec, u) - drop / 2)
       box(
         centre,
         new Vector3(1.6, 0.1, (steps * 0.32) / 2 + 0.12),
         -sign * Math.atan2(drop, steps * 0.32),
-        Math.atan2(outward.x, outward.z),
+        Math.atan2(along.x, along.z),
       )
     }
     // Access ramp.
-    const rampHead = platformDeckY(spec, -half + 1.4)
+    const rampHead = platformDeckY(spec, RAMP_U0)
     const rampMid = platformPoint(
       spec,
-      -half + 1.4 + rampRun / 2,
+      RAMP_U0 + rampRun / 2,
       DECK_DEPTH + 0.95,
       (rampHead + rampFootY) / 2 + 0.09,
     )
-    const rampTangent = platformTangent(spec, -half + 1.4 + rampRun / 2)
+    const rampTangent = platformTangent(spec, RAMP_U0 + rampRun / 2)
     box(
       rampMid,
       new Vector3(0.95, 0.1, rampRun / 2),
@@ -326,8 +343,13 @@ export class PortalStationSystem implements GameSystem {
     for (let i = 0; i < 5; i++) {
       const u = -7.2 + i * 3.6
       const p = platformPoint(spec, u, V_BACK + 0.25, platformDeckY(spec, u) + 1.1)
-      const outward = platformOutward(spec, u)
-      box(p, new Vector3(0.08, 1.1, 1.8), 0, Math.atan2(outward.x, outward.z))
+      // The panels sit 3.6 m apart along the arc and must MEET: 3.6 m of
+      // local +Z on the tangent, 0.16 m of local +X across it. On `outward`
+      // each one became a 3.6 m fin pointing into the platform with a 3.4 m
+      // gap beside it — five phantom walls across the concourse, and the
+      // windbreak itself walk-through.
+      const along = platformTangent(spec, u)
+      box(p, new Vector3(0.08, 1.1, 1.8), 0, Math.atan2(along.x, along.z))
     }
     // The arrival viaduct — the only guideway a walker can collide with.
     for (const collider of guidewayColliders(buildTrackData())) {
@@ -735,7 +757,12 @@ function departureBoard(
         'OVERLOOK W    9 MIN',
         'PORTAL        22 MIN',
       ],
-      { background: '#171614', accent: '#c94f1d', widthPx: 768 },
+      {
+        background: '#171614',
+        accent: '#c94f1d',
+        widthPx: 768,
+        aspect: (width - 0.1) / (height - 0.1),
+      },
     ),
   )
   plate.position.copy(anchor.clone().addScaledVector(outward, 0.086))

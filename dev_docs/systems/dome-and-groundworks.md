@@ -74,22 +74,66 @@ z-fights (sit it ≥30 mm proud, or let paving own the area).
 ### Why a priority field instead of decals
 
 Paved regions (`PAVED_REGIONS`) are discs / annuli / rects / ribbons with a
-**priority**. A lower-priority slab's vertices are PROJECTED onto the boundary
-of any higher-priority region containing them, and quads swallowed whole are
-dropped. Consequences worth keeping:
+**priority**. A lower-priority slab is CLIPPED, cell by cell, to the part no
+higher-priority pour covers. Consequences worth keeping:
 
 - Two slabs can never stack at the same datum → structurally z-fight free.
-- Because the projection is exact, junctions close with **zero gap**: a spoke
-  butts the plaza on the plaza's own circle, curved, no sliver.
 - parkPlan's spines stop short of the plaza/boulevard on purpose; paving
   extends them (`RIBBON_RUNOUT`) INTO the neighbour and lets the trim cut them.
 - The tram channel is priority 99 so it cuts through the station forecourt —
   a street-running loop is never interrupted by a building's apron.
 
+**The trim is a clip, never a projection** (rebuilt after the projection
+version shipped 145 m² of same-slot z-fight). Projection is many-to-one: it
+collapses a cell's area onto the neighbour's boundary curve, so every cell that
+sat deep inside a neighbouring pour came back as a stretched triangle lying
+across the cells that legitimately paved there. `emitPatchCell` instead runs
+marching squares over `coverDistance` on each parametric cell — inside cells
+vanish, outside cells are untouched, crossed cells are cut on the boundary
+itself. Three properties are load-bearing:
+
+- **Nine samples per cell** (4 corners, 4 edge midpoints, centre). The
+  midpoints catch a boundary entering and leaving through one edge; the centre
+  catches a notch between two pours inside an apparently-covered cell. A naive
+  "drop it when all four corners are covered" rule opens holes in walkable
+  floor, which is worse than the z-fight it fixes.
+- **Cut against the neighbour's MESH, not the plan.** A curved pour emits an
+  inscribed polygon, so cutting on the plan's ideal circle leaves a crescent of
+  bare regolith up to a sagitta wide (27 mm at an apron). `surfaceSigned` uses
+  the polygon actually emitted, and `footprintWalk` threads that polygon's own
+  vertices into the cut. The guideway channel's footprint includes its
+  chamfered LIPS, so paving no longer overhangs the arris meant to protect it.
+- **One angular step per polar surface.** Per-band step counts met each other
+  as two inscribed polygons of different fineness on the same circle, leaving a
+  67 mm slot of bare regolith at the plaza's r = 6.5 seam. The panel count now
+  lives only in `vScale` (joints are shader-side from `uv`), so the visual
+  pattern is unchanged and every band seam shares vertices.
+
 Curbs, the slab skirt and the floor lights all march the same boundary walk,
-and all three break on one rule: skip where a higher-priority region covers
-the station, or where the ground 0.34 m outside is already paved (a junction).
-That is why curb runs open exactly at path mouths without any authored gaps.
+and all three break on one rule: skip where a higher-priority region covers the
+station, or where the ground is already paved 0.14 m or 0.34 m outside (a
+junction). Two probes, not one: the terrace's south edge is tangent to the
+boulevard's inner circle, and a single 0.34 m probe stepped clean over it so
+both pours kerbed the same junction and the castings ran through each other.
+
+### Proving the floor, not eyeballing it
+
+`node --experimental-strip-types tools/paving-coverage.mjs` builds the paving
+headless and rasters the union of the paved plan, counting how many
+`ground:paving` triangles cover each sample: **0 is a hole in a walkable floor,
+>1 is a z-fight, and only 1 is correct.** It also replicates the shipped gate's
+coplanar test bucketed by position, and checks winding (an inside-out cell is
+invisible AND a z-fight, and the coplanar gate cannot see it — it reads normals
+from the vertex attribute, which is authored upward regardless). Run it after
+ANY change to the trim, the bands or the region plan. Current state: 0.07 m² of
+hole and 0.00 m² of double coverage over 13,084 m² of floor, 13 cm² of
+coplanar overlap in the whole build, zero flipped triangles.
+
+Residual, and why it is not a defect: ~10 m² of samples within 80 mm of a
+region edge read as uncovered, every one of them inside a single region. That
+is the polygon-vs-circle sagitta at a FREE edge (≤14 mm), and a free edge
+always carries a kerb reaching 165 mm back over the slab, so it is buried in
+the casting.
 
 ### Edge construction (no coplanar pairs anywhere)
 
@@ -170,20 +214,23 @@ Two independent causes, both inside `glassShell.ts`:
 
 ## The grid, and why these numbers
 
-Everything derives from `DOME_RINGS = 36` (θ_base/36 = 4.168 m of arc) and
+> **Replaced by the sparse rebuild — see "Sparse gridshell rebuild" at the
+> end of this file.** The tiered grid described here (48 ribs, 36 rings,
+> glazing bars doubling at rings 8 and 16) is gone; the paragraphs below are
+> kept only because they explain what the tiering was *for*, which is the
+> trap the rebuild had to solve differently.
+
+Everything derived from `DOME_RINGS = 36` (θ_base/36 = 4.168 m of arc) and
 `DOME_RIBS = 48`:
 
-- Bay width at the foot is 2π·130/48 = 17.0 m; glazing bars halve it twice,
+- Bay width at the foot is 2π·130/48 = 17.0 m; glazing bars halved it twice,
   dropping AT a ring beam (192 lines outboard of ring 16, 96 outboard of
-  ring 8, 48 above). Every pane lands in 2.1–4.3 m wide × 4.17 m tall — the
-  masterplan's "3–4 m panes" over the whole shell with no special cases.
-- Tier counts are multiples of each other on purpose: a finer family always
+  ring 8, 48 above), to hold every pane at 2.1–4.3 m wide × 4.17 m tall.
+- Tier counts were multiples of each other on purpose: a finer family always
   *contains* the coarser one, so bars line up through every drop and the
   analytic `max()` of the families never doubles a line.
-- The oculus is ring 2 (r = 8.33 m, y = 63.79) so the compression ring sits
-  on the same parallel grid as everything else.
-- The Panewalker band is rings 12 and 24 — it rides crane rails laid on
-  those ring beams. `PANEWALKER_THETA_MIN/MAX` are now *derived* from
+- The Panewalker band was rings 12 and 24 — it rides crane rails laid on
+  ring beams. `PANEWALKER_THETA_MIN/MAX` are *derived* from
   `DOME_RING_STEP`, so the machine can never drift off the structure.
 
 ## One field, two widths
@@ -198,9 +245,10 @@ the shadow net follow.
 
 ## Assembly rule that keeps the shell clean
 
-Strict hierarchy — **ribs continuous, rings stop at rib collars, bars stop
-at rings** — plus one radial datum (`DOME_MEMBER_INSET`, every member's
-inner face) and differing depths only. Consequences:
+Strict hierarchy — **ribs continuous, rings stop at rib collars** (bars used
+to stop at rings; there are no bars any more) — plus one radial datum
+(`DOME_MEMBER_INSET`, every member's inner face) and differing depths only.
+Consequences:
 
 - No member ever intersects another; the only "overlap" is the cast collar
   deliberately swallowing the rib's whole section (proud on all four faces,
@@ -214,8 +262,10 @@ inner face) and differing depths only. Consequences:
 
 `emitMember` cuts any member entering the tube bore and walks the cut end
 out to the reveal line by bisection (re-projecting onto the sphere). The rib
-on the portal meridian and ring beams 33–35 land on a reinforcing frame ring
-whose inner edge is the glass aperture. The plinth does not stop at the
+on the portal meridian and (since the rebuild) ring beam 12 land on a
+reinforcing frame ring whose inner edge is the glass aperture — the frame is
+the same code path whatever the grid density is, which is why halving the
+member count needed no portal work at all. The plinth does not stop at the
 portal either — `revolveVarying` gives the footing a per-longitude profile so
 it *dips* under the tube as one continuous casting (an arc with end caps
 would have needed a patch under the bore).
@@ -231,6 +281,116 @@ run straight at x = 0, y = 3.0 for all z ≥ 126 and start its bend inboard.
 
 ## Budget
 
-Gridshell 321 k tris in 6 merged meshes (one per material slot); connector
-tube + portal 27 k. 8.6 ms/frame GPU at 2666×1500 (≈116 fps) measured with
-`device.queue.onSubmittedWorkDone()` around 60 stepped frames.
+Gridshell was 321 k tris in 6 merged meshes (one per material slot);
+connector tube + portal 27 k. 8.6 ms/frame GPU at 2666×1500 (≈116 fps)
+measured with `device.queue.onSubmittedWorkDone()` around 60 stepped frames.
+The sparse rebuild took the gridshell to ~200 k (see below).
+
+# Sparse gridshell rebuild (2026-08-10)
+
+Owner's review from inside the dome: *"the dome structure has inconsistent
+branch count per grid as it goes lower. i want the dome structure to be less
+dense with much less bone branches (like a structure instead of a spider
+net), and what remains should look thick and sturdy."*
+
+## What was actually wrong (worth naming, because it is a general trap)
+
+The tiered glazing bars were a *locally* sensible idea — hold the pane size
+roughly constant as the bay widens — with a *globally* fatal consequence: the
+grid changes grammar as you walk your eye down a rib. One structural bay
+showed 1 intermediate bar near the crown, 2 outboard of ring 8 and 3 outboard
+of ring 16. Nothing is wrong at any one place, and the whole thing reads as
+noise. **A repeating structure is read as a grammar, not as a set of local
+decisions; if the grammar changes anywhere, the eye reports "mess" long
+before it can say why.** Constant pane size is worth less than a constant
+rule.
+
+## The grammar now
+
+24 ribs (every 15°) × 13 ring parallels (11.54 m of arc), and *nothing else*.
+Ring 1 is the oculus compression ring, rings 2–12 are ring beams, ring 13 is
+the springing (plinth + glazing boot, no beam). 288 member runs where there
+were 4896. Bays run 3.0 × 11.5 m at the oculus to 34.0 × 11.5 m at the foot:
+the aspect ratio is deliberately *allowed* to drift, because that is what a
+single rule produces on a sphere, and it is the drift-free thing to look at.
+
+**A bay is glazed, not filled with one pane.** A structural bay is far too
+big to be a single sheet (34 × 11.5 m at the foot), so each bay carries a
+pane grid — `DOME_PANE_COLUMNS = 4` × `DOME_PANE_ROWS = 2`, i.e. 3 vertical
+seams and 1 horizontal mid-seam per bay — drawn as **hairlines by the glass**
+(`latticePaneSeams`) and never as 3-D bars. 96 meridian and 26 parallel seam
+lines over the shell, 2304 panes, 8.5 × 5.8 m at the springing down to
+~0.8 × 5.8 m at the compression ring.
+
+The rule that makes this safe is that the counts are **per bay and constant
+over the whole dome**. The killed defect was not "many lines", it was a
+subdivision count that *changed with height*; a constant count merely
+converges toward the crown, which the eye reads as perspective. Both counts
+are exact multiples of the member counts (96 = 24×4, 26 = 13×2), so every
+4th meridian seam and every 2nd parallel seam lands ON a member's own joint —
+the `max()` can never draw a doubled line and the pane grid can never drift
+out of its bay. **If you ever retune the grid, keep that divisibility.**
+
+Seams are in `SEAM_WIDTHS` only, not in `MEMBER_WIDTHS`: they are drawn on
+the glass but deliberately absent from the shadow field. A 32 mm silicone
+joint contributes ~0.9 % of *patternless* coverage that the 0.35° penumbra
+smears into precisely the uniform grey wash this rewrite removed, and it
+would be paid for per step inside the interior shaft march. One constant
+(`pane:` in `MEMBER_WIDTHS`) flips it back if seam shadows are ever wanted.
+
+## Thick means WIDE here, not deep
+
+The gridshell is an exoskeleton: every member sits radially *outboard* of the
+glass (`DOME_MEMBER_INSET`), which is why the Panewalker can ride its ring
+beams and why internal pressure presses the panes onto the frame. From inside
+the park you therefore see a member's **width** and almost none of its depth.
+Sections went 0.32 → 0.84 m wide at the springing (0.17 → 0.36 m at the
+crown); depth grew too (0.95 → 1.55 m) but that buys exterior silhouette and
+self-shading, not apparent mass from the floor. If a future pass is told "the
+structure still looks thin", widen; deepening will not do it.
+
+Members are now **flanged sections**, not chamfered boxes: wide inner flange,
+narrow web, slightly narrower outer flange, filleted at both web junctions.
+That is what separates "structure" from "stick" at 130 m — the inner flange
+catches sky, the web goes dark, and the flange returns draw a hard bright
+line down the whole member. Consequence to know: a flanged profile is **not
+star-shaped about its centroid**, so the old centroid-fan end cap laid
+triangles straight across both web notches. Caps are ear-clipped
+(`ShapeUtils.triangulateShape`) from the 2-D profile instead.
+
+## The half-bay phase bug (this one had been shipping)
+
+`latticeField`'s line families were written as `|fract(x) − 0.5|`, which puts
+lines at **half** indices — φ = (i+½)·2π/N and θ = (k+½)·step, i.e. exactly
+mid-bay — while `domeGeometry` builds ribs at φ = i·2π/N and rings at
+θ = k·step. Every shadow stripe on the park floor, and every silicone seam on
+the glass, was therefore **half a bay out of register with the members it was
+supposed to belong to** (17 m at the springing). It survived because both
+families are periodic, so the *pattern* looks right in isolation. The form is
+now `|fract(x + 0.5) − 0.5|`; if you add a family, use the same helper.
+
+Two more fidelity fixes in the same pass: the ring family is masked to the
+rings that are actually built (`DOME_RING_FIRST…DOME_RING_LAST`), and the
+opaque hub cap is now a disc of coverage in the field, so the crown plate
+casts the soft blob it should.
+
+## Brightness delta (honest numbers)
+
+Area-weighted mean coverage over the cap: **8.3 % → 7.2 %**, i.e. open sky
+91.7 % → 92.8 %, about **+1.2 % more direct sun**. Nearly a wash, on purpose:
+half the member count at 2.6× the width is roughly the same occlusion. What
+changed is the *distribution* — the fine net (which the 0.35° penumbra
+smeared into a uniform grey wash, and which beat against the regolith mesh as
+moiré) is replaced by 24 broad radial bands and 11 ring bands with solid
+cores. Expect the floor to read *contrastier*, not brighter.
+
+## The crane rail was buried in the ribs (pre-existing)
+
+The rail runs in φ, so it crosses every rib and every node collar — both far
+deeper than the ring beam it follows. Laying it at `ring depth + 95 mm` (the
+old formula) buried it inside 48 ribs. It now flies above the node line on a
+90 mm sole plate at each node and on stools every ~3.5 m between them, which
+is how a crane rail is built anyway. `domeCraneRailLift(θ)` is exported so
+the Panewalker derives its stand-off instead of hardcoding one — **the gantry
+in `robots/panewalker.ts` must use it** (see the shared-file note in that
+file's header when it is updated).

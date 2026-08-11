@@ -7,12 +7,15 @@ import {
   float,
   fwidth,
   hash,
+  instanceIndex,
   max,
   min,
   mix,
   mx_noise_float,
   normalLocal,
   normalWorld,
+  positionLocal,
+  positionView,
   positionWorld,
   select,
   smoothstep,
@@ -95,59 +98,203 @@ function groundNormal(height: F, strength: F | number = 1): Node<'vec3'> {
 
 // ------------------------------------------------------------- regolith ----
 
-/** Wind bearing for aeolian ripples + streaks (matches the frozen sun side). */
+/**
+ * Mean transport bearing (matches the frozen sun side). It is only a MEAN: the
+ * ripple axis wanders about it through the flow field below. A single global
+ * bearing gives corduroy — one direction, one pitch, over the whole floor —
+ * which reads as combed sand AND beats against the dome lattice's shadow
+ * stripes into criss-cross moiré at 10–40 m.
+ */
 const WIND = { x: Math.cos(2.35), z: Math.sin(2.35) }
 
 /**
- * Aeolian + clastic relief, in metres. One field feeds BOTH the normal and
- * the albedo so ripples, pebbles and grit agree with their own shading.
+ * Crest-line wander: (patch wavelength in metres, maximum lateral slope).
+ *
+ * A transverse ripple train's orientation is the perpendicular of its phase
+ * gradient, so bending the crests is a lateral displacement of the along-wind
+ * coordinate: `along' = along + wander(across, along)`. The wander's slope
+ * ACROSS the flow IS the axis swing (`atan(slope)`); its slope ALONG the flow
+ * is a crest-spacing change, which is why every octave is sampled 6:1
+ * stretched along the flow — swing without pitch chaos. Total swing here is
+ * about ±50°, arriving as a regional bias, a 23 m patch, and a local wiggle
+ * that occasionally forks a crest (real trains bifurcate).
+ *
+ * Deliberately NOT `p · dir(p)` with a rotating `dir`: that form's gradient
+ * carries a |p| factor, so 100 m from the origin a 0.05 rad/m bearing field
+ * folds the coordinate five times over and the whole field turns to swirl.
  */
-function regolithRelief(p: V2, openness: F, rippleFade: F, microFade: F): F {
-  // Ripples: 0.55 m crest spacing, domain-warped so they meander like real
-  // transverse ripples instead of reading as a sine grating. They are the
-  // hero of every grazing view, so their LOD fade is keyed to their OWN
-  // wavelength (alias at footprint ≈ λ/2), not to a global detail cutoff.
-  const along = p.x.mul(WIND.x).add(p.y.mul(WIND.z))
-  const across = p.x.mul(-WIND.z).add(p.y.mul(WIND.x))
-  const warp = noise(p, 0.09, 4.1).sub(0.5).mul(3.4).add(noise(p, 0.42, 19.7).sub(0.5).mul(0.55))
-  const crest = along.mul(11.42).add(warp).add(across.mul(0.12)).sin()
-  const crest2 = along.mul(20.1).add(warp.mul(1.7)).sin()
-  const rippleZone = smoothstep(0.42, 0.72, noise(p, 0.055, 31.3))
-  const ripple = crest.mul(0.017).add(crest2.mul(0.005)).mul(rippleZone).mul(rippleFade)
+const WANDER = [
+  { length: 96, slope: 0.42 },
+  { length: 23, slope: 0.5 },
+  { length: 3.6, slope: 0.34 },
+] as const
 
-  // Clasts: one pebble per 0.34 m cell, radius and tone hashed per cell.
+const RIPPLE = {
+  /** Primary crest spacing, metres. */
+  lambda: 0.62,
+  /** Secondary set, metres — crossing the primary at 19°, as real trains do. */
+  lambdaFine: 0.265,
+  /** Coarse transverse drift banks, metres. */
+  lambdaBank: 4.3,
+}
+
+/** `mx_noise_float`'s gradient is ≈1.75 per unit input; wander amplitudes solve from it. */
+const NOISE_SLOPE = 1.75
+
+/** Survival weight per detail band — see `reliefFades()`. */
+interface ReliefFade {
+  coarse: F
+  mid: F
+  fine: F
+  micro: F
+}
+
+/** `1 − smoothstep(lo, hi, x)`; never the reversed-edge form (notes.md, WGSL). */
+function keepBelow(lo: number, hi: number, x: F): F {
+  return float(1).sub(smoothstep(lo, hi, x)) as unknown as F
+}
+
+/**
+ * Detail-band survival. Every band retires by BOTH its own pixel footprint
+ * (grazing views) and a view-DISTANCE band, because those are two different
+ * failures. The footprint fade alone cannot stop a 0.6 m ripple beating
+ * against the dome lattice's shadow stripes at 10–40 m, where the footprint is
+ * still small but the pattern is only a few pixels per period and the two
+ * gratings interfere. The distance bands are what keep the floor free of
+ * criss-cross moiré; past them only broad variation is left, which is also
+ * what a real plain does at that range.
+ */
+function reliefFades(): ReliefFade {
+  const footprint = pixelFootprint()
+  const distance = positionView.length() as unknown as F
+  return {
+    coarse: keepBelow(1.1, 3.4, footprint),
+    mid: keepBelow(0.19, 0.6, footprint).mul(keepBelow(34, 74, distance)) as unknown as F,
+    fine: keepBelow(0.075, 0.24, footprint).mul(keepBelow(11, 22, distance)) as unknown as F,
+    micro: keepBelow(0.03, 0.13, footprint).mul(keepBelow(9, 20, distance)) as unknown as F,
+  }
+}
+
+/** Pebble cell: one clast per 0.34 m cell, radius/tone/presence hashed per cell. */
+function regolithClasts(p: V2, lag: F): { height: F; cover: F } {
   const cellScale = float(2.95)
   const cell = p.mul(cellScale)
   const id = cell.floor()
   const f = cell.fract()
   const seed = id.x.mul(127.31).add(id.y.mul(311.7))
   const centre = vec2(hash(seed).mul(0.5).add(0.25), hash(seed.add(37.1)).mul(0.5).add(0.25))
-  const radius = hash(seed.add(11.7)).mul(0.16).add(0.1)
+  // A wide size spread (24–100 mm) matters more than the count: equal-sized
+  // stones on a fixed lattice read as polka dots however well they are placed.
+  const radius = hash(seed.add(11.7)).mul(0.22).add(0.07)
   const distance = f.sub(centre).length()
-  const present = smoothstep(0.63, 0.78, hash(seed.add(91.3)))
+  // Lag concentration: clasts are EXPOSED on deflated compacted flats and
+  // buried inside an active ripple train, so coverage rides `lag` rather than
+  // sprinkling evenly over the whole floor.
+  const present = smoothstep(0.68, 0.84, hash(seed.add(91.3))).mul(lag).clamp(0, 1)
   const dome = float(1).sub(smoothstep(radius.mul(0.35), radius, distance))
-  const pebble = dome.mul(present)
-  const pebbleHeight = pebble.mul(radius).mul(0.34).div(cellScale)
-
-  const grit = noise(p, 5.5, 63.1).sub(0.5).mul(0.006)
-  return ripple
-    .add(pebbleHeight.add(grit).mul(microFade))
-    .mul(openness) as unknown as F
+  return {
+    height: dome.mul(present).mul(radius).mul(0.34).div(cellScale) as unknown as F,
+    cover: float(1)
+      .sub(smoothstep(radius.mul(0.55), radius.mul(1.02), distance))
+      .mul(present) as unknown as F,
+  }
 }
 
-/** Pebble coverage mask alone (albedo needs it without the ripple term). */
-function regolithClasts(p: V2): F {
-  const cell = p.mul(2.95)
-  const id = cell.floor()
-  const f = cell.fract()
-  const seed = id.x.mul(127.31).add(id.y.mul(311.7))
-  const centre = vec2(hash(seed).mul(0.5).add(0.25), hash(seed.add(37.1)).mul(0.5).add(0.25))
-  const radius = hash(seed.add(11.7)).mul(0.16).add(0.1)
-  const distance = f.sub(centre).length()
-  const present = smoothstep(0.63, 0.78, hash(seed.add(91.3)))
-  return float(1)
-    .sub(smoothstep(radius.mul(0.55), radius.mul(1.02), distance))
-    .mul(present) as unknown as F
+/**
+ * The aeolian + clastic field. One evaluation feeds the normal AND the albedo,
+ * so ripples, sorting, drift banks, pebbles and grit can never disagree about
+ * where a feature is.
+ */
+interface RegolithField {
+  /** Relief in metres — the normal only; physics never sees this. */
+  height: F
+  /** Aeolian sorting, 0 in the troughs → 1 on the crests, fading to 0.5 far. */
+  sort: F
+  /** Coarse drift-bank coverage. */
+  bank: F
+  /** Surface clast coverage, for the albedo. */
+  clasts: F
+  /** Flow coordinates in metres, and the lateral wander that bends them. */
+  along: F
+  across: F
+  wander: F
+}
+
+function regolithField(p: V2, openness: F, fade: ReliefFade): RegolithField {
+  const along = p.x.mul(WIND.x).add(p.y.mul(WIND.z)) as unknown as F
+  const across = p.x.mul(-WIND.z).add(p.y.mul(WIND.x)) as unknown as F
+
+  let wander = float(0) as unknown as F
+  for (let octave = 0; octave < WANDER.length; octave++) {
+    const { length, slope } = WANDER[octave]
+    const amplitude = (slope * length) / NOISE_SLOPE
+    const sample = noise(
+      vec2(across.div(length), along.div(length * 6)) as unknown as V2,
+      1,
+      17.3 + octave * 29.1,
+    )
+    wander = wander.add(sample.sub(0.5).mul(2 * amplitude)) as unknown as F
+  }
+  // Pitch variation is the wander's complement: sampled 6:1 the OTHER way (it
+  // varies ALONG the flow), so its gradient lands on crest SPACING instead of
+  // crest direction. A train whose pitch never changes reads as machined even
+  // when its axis wanders — this is the second half of "combed".
+  const pitch = noise(vec2(across.div(33), along.div(5.5)) as unknown as V2, 1, 53.7)
+  const alongWander = along
+    .add(wander)
+    .add(pitch.sub(0.5).mul((2 * (0.24 * 5.5)) / NOISE_SLOPE)) as unknown as F
+
+  // Amplitude patchiness: deflated compacted flats where the train dies out,
+  // and coarse drift banks where sand piles up. Without this the ripples cover
+  // the floor at one amplitude, which is the third half of "combed".
+  const calm = keepBelow(0.4, 0.7, noise(p, 1 / 13.5, 31.3) as unknown as F)
+  const bank = smoothstep(0.58, 0.86, noise(p, 1 / 31, 67.9)) as unknown as F
+  // Train segmentation. A ripple train is not one comb running to the horizon:
+  // crests die out and restart. Terminations happen ALONG a crest, and
+  // neighbouring crests die together, so the mask is sampled fast across the
+  // flow (5 m) and slow along it (15 m) — a dislocation zone, not a blotch.
+  const train = smoothstep(
+    0.3,
+    0.64,
+    noise(vec2(across.div(5), along.div(15)) as unknown as V2, 1, 71.9),
+  )
+    .mul(0.74)
+    .add(0.26) as unknown as F
+  const active = float(1).sub(calm.mul(0.9)).mul(train) as unknown as F
+
+  // Crest profile: `sin φ − 0.22·cos 2φ` sharpens the crest and broadens the
+  // trough (the real stoss/lee asymmetry). cos 2φ = 1 − 2sin²φ, so the second
+  // harmonic costs a multiply-add and no extra transcendental.
+  const s = alongWander.mul((Math.PI * 2) / RIPPLE.lambda).sin()
+  const crest = s.sub(s.mul(s).mul(2).oneMinus().mul(0.22)) as unknown as F
+  const alongFine = alongWander
+    .mul(Math.cos(0.33))
+    .add(across.mul(Math.sin(0.33))) as unknown as F
+  const fineWave = alongFine.mul((Math.PI * 2) / RIPPLE.lambdaFine).sin() as unknown as F
+  const bankWave = alongWander.mul((Math.PI * 2) / RIPPLE.lambdaBank).sin() as unknown as F
+
+  const clast = regolithClasts(p, calm.mul(1.05).add(0.4) as unknown as F)
+  const grit = noise(p, 5.5, 63.1).sub(0.5).mul(0.006) as unknown as F
+
+  const height = crest
+    .mul(0.0165)
+    .mul(active)
+    .mul(fade.mid)
+    .add(fineWave.mul(0.0048).mul(active).mul(fade.fine))
+    .add(bankWave.mul(0.055).mul(bank.mul(0.8).add(0.2)).mul(fade.coarse))
+    .add(clast.height.add(grit).mul(fade.micro))
+    .mul(openness) as unknown as F
+
+  // Sorting is albedo, so it would carry the ripple read at ranges where the
+  // normal has already gone — and alias there on its own. It fades on the SAME
+  // band, and it fades to its own MEAN (0.5), never to an end stop.
+  const sort = mix(
+    float(0.5),
+    smoothstep(-0.5, 0.3, crest),
+    active.mul(fade.mid),
+  ) as unknown as F
+
+  return { height, sort, bank, clasts: clast.cover, along, across, wander }
 }
 
 /**
@@ -164,6 +311,16 @@ export function createRegolithMaterial(): MeshStandardNodeMaterial {
   const garden = attribute('garden', 'float') as unknown as F
   const pavedDistance = attribute('paved', 'float') as unknown as F
 
+  // Feet destroy a ripple train long before they change the sediment, so
+  // compaction and the paving fringe both flatten the field before anything
+  // else is decided.
+  const compaction = smoothstep(0.22, 0.92, wear) as unknown as F
+  const openness = float(1)
+    .sub(compaction.mul(0.75))
+    .mul(smoothstep(0.1, 1.8, pavedDistance).mul(0.85).add(0.15)) as unknown as F
+  const fade = reliefFades()
+  const field = regolithField(worldXZ, openness, fade)
+
   const macro = noise(worldXZ, 1 / 74)
   const patch = noise(worldXZ, 1 / 19, 11.3)
   const grain = noise(worldXZ, 1 / 6.5, 47.1)
@@ -171,9 +328,14 @@ export function createRegolithMaterial(): MeshStandardNodeMaterial {
 
   // Wind-aligned fields, stretched 6–8:1 along the bearing: pale dust drifts
   // and the darker deflation tails behind every obstacle. The single
-  // strongest "this is Mars, not a beach" cue.
-  const windU = worldXZ.x.mul(WIND.x).add(worldXZ.y.mul(WIND.z))
-  const windV = worldXZ.x.mul(-WIND.z).add(worldXZ.y.mul(WIND.x))
+  // strongest "this is Mars, not a beach" cue. Their across-flow coordinate
+  // reuses the ripple field's own wander at a quarter weight, so the macro
+  // streaks meander with the same flow that bent the crests rather than ruling
+  // parallel lines across the whole floor — free, and coherent by
+  // construction. A quarter weight also keeps the coordinate's slope well
+  // under 1, so the streak frame bends and never folds.
+  const windU = field.along
+  const windV = field.across.add(field.wander.mul(0.25)) as unknown as F
   const drift = smoothstep(
     0.52,
     0.76,
@@ -209,22 +371,40 @@ export function createRegolithMaterial(): MeshStandardNodeMaterial {
   let color = mix(fines, gravel, gravelZone) as unknown as V3
   color = mix(color, driftColor, drift.mul(0.62)) as unknown as V3
   color = mix(color, color.mul(0.68), tail.mul(0.7)) as unknown as V3
+  // Coarse drift banks: paler, better-sorted sand piled into long transverse
+  // waves. This is the octave that survives at every distance, so it is what
+  // keeps the far floor from going featureless once the ripples have retired.
+  color = mix(color, driftColor, field.bank.mul(0.3)) as unknown as V3
   // Mid mottling, then the near-field tooth: without a real 1–2 m break-up
   // the ground under your feet reads as poured mud however good the macro
-  // fields are, because at eye level the near field IS the whole frame.
+  // fields are, because at eye level the near field IS the whole frame. The
+  // 0.34 m tooth is the finest albedo band the floor carries and the first to
+  // alias, so it fades to its own MEAN (a ×1 multiplier), not to a value.
   const grit = noise(worldXZ, 1 / 0.34, 133.1)
   color = color
     .mul(grain.mul(0.32).add(0.84))
     .mul(fine.mul(0.3).add(0.85))
-    .mul(grit.mul(0.16).add(0.92)) as unknown as V3
+    .mul(mix(float(1), grit.mul(0.16).add(0.92), fade.micro)) as unknown as V3
 
-  const clasts = regolithClasts(worldXZ)
+  // Aeolian sorting across each ripple: coarse dark grains roll down into the
+  // troughs and the palest fines cap the crest. This is what makes a ripple
+  // field read as sediment rather than as an embossed pattern.
+  color = color.mul(mix(float(0.89), float(1.1), field.sort)) as unknown as V3
+  color = mix(color, clastColor, float(1).sub(field.sort).mul(0.12)) as unknown as V3
+
+  const clasts = field.clasts
   const clastTone = noise(worldXZ, 3.1, 5.5)
-  color = mix(color, clastColor.mul(clastTone.mul(0.5).add(0.8)), clasts.mul(0.85)) as unknown as V3
+  // Clast albedo keeps a floor of 0.22 past its fade band: dropping it to zero
+  // would lift the mid-ground's mean tone as the stones vanished.
+  const clastKeep = fade.micro.mul(0.78).add(0.22) as unknown as F
+  color = mix(
+    color,
+    clastColor.mul(clastTone.mul(0.5).add(0.8)),
+    clasts.mul(0.85).mul(clastKeep),
+  ) as unknown as V3
 
   // Compacted desire lines (also the 'track' service routes, which are
   // regolith wear states rather than a separate slab).
-  const compaction = smoothstep(0.22, 0.92, wear)
   color = mix(color, compacted, compaction.mul(0.9)) as unknown as V3
 
   // Dust berm against the curbs: wind-blown fines pile up where the ground
@@ -238,22 +418,16 @@ export function createRegolithMaterial(): MeshStandardNodeMaterial {
   const rakeInfluence = garden.mul(float(1).sub(compaction))
   color = mix(color, color.mul(mix(0.86, 1.1, rake)), rakeInfluence.mul(0.7)) as unknown as V3
 
-  const openness = float(1)
-    .sub(compaction.mul(0.75))
-    .mul(smoothstep(0.1, 1.8, pavedDistance).mul(0.85).add(0.15)) as unknown as F
-  const footprint = pixelFootprint()
-  const rippleFade = float(1).sub(smoothstep(0.16, 0.52, footprint)) as unknown as F
-  const microFade = float(1).sub(smoothstep(0.03, 0.13, footprint)) as unknown as F
-  const relief = regolithRelief(worldXZ, openness, rippleFade, microFade)
-
   material.colorNode = color
-  material.normalNode = groundNormal(relief, 1)
+  material.normalNode = groundNormal(field.height, 1)
   // Roughness carries the deposit story too: lag gravel and clasts glance
-  // light, loose fines and the curb-side dust berm swallow it.
+  // light, loose fines and the curb-side dust berm swallow it, and the coarse
+  // grains gathered in a ripple trough glance a little more than its crest.
   material.roughnessNode = float(0.965)
     .sub(compaction.mul(0.1))
     .sub(clasts.mul(0.14))
     .sub(gravelZone.mul(0.07))
+    .sub(float(1).sub(field.sort).mul(0.03))
     .add(drift.mul(0.02))
     .add(berm.mul(0.02))
     .clamp(0.55, 1)
@@ -476,18 +650,36 @@ export function createLensMaterial(): MeshStandardNodeMaterial {
   return material
 }
 
-/** Loose clasts scattered over open regolith (instanced rocks). */
+/**
+ * Loose clasts scattered over open regolith (instanced rocks).
+ *
+ * `positionLocal.y` is the only frame that survives instancing as "height up
+ * THIS stone": the geometry is authored in a unit frame whose grade line sits
+ * near y ≈ −0.45 (see `groundScatter.clastGeometry`), so a band from there up
+ * to the waist is the contact line whatever the instance is scaled to.
+ */
 export function createClastMaterial(): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial()
   const grain = noise(worldXZ, 5.5, 13.7)
   const face = noise(worldXZ, 1.6, 88.2)
+  // Per-stone identity: without it every clast in a drift is the same rock in
+  // the same light, and the field reads as one repeated prop.
+  const stone = hash(instanceIndex) as unknown as F
   const dusted = normalWorld.y.clamp(0, 1)
   let color = mix(vec3(0.196, 0.158, 0.134), vec3(0.268, 0.198, 0.152), face) as unknown as V3
-  color = color.mul(grain.mul(0.24).add(0.86)) as unknown as V3
+  const mottle = noise(worldXZ, 0.62, 41.9)
+  color = color
+    .mul(grain.mul(0.34).add(0.82))
+    .mul(mottle.mul(0.22).add(0.89))
+    .mul(stone.mul(0.34).add(0.82)) as unknown as V3
   // Upward faces collect dust; undercuts stay dark basalt.
   color = mix(color, vec3(0.372, 0.253, 0.167), dusted.mul(0.42)) as unknown as V3
+  // Dust collar: wind-blown fines bank against the foot of every stone, so the
+  // contact line is a soft wash into the regolith rather than a cut edge.
+  const collar = keepBelow(-0.52, 0.16, positionLocal.y as unknown as F)
+  color = mix(color, vec3(0.335, 0.222, 0.138), collar.mul(0.62)) as unknown as V3
   material.colorNode = color
-  material.roughnessNode = float(0.9).sub(grain.mul(0.1))
+  material.roughnessNode = float(0.9).sub(grain.mul(0.1)).add(collar.mul(0.06)).clamp(0.5, 1)
   material.metalness = 0
   applySpecularAA(material)
   return material

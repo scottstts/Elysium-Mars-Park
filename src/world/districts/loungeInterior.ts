@@ -668,10 +668,14 @@ export function buildLoungeInterior(services: DistrictServices): void {
   const inx = -(start.nx + end.nx)
   const inz = -(start.nz + end.nz)
   const inl = Math.hypot(inx, inz) || 1
+  // 0.50 inboard, not 0.42: the door head casting (leisure.ts, `head`) runs
+  // from 0.16 to 0.46 inboard, so at 0.42 this plate was ENTIRELY INSIDE the
+  // lintel — invisible from the room it is hung for. 0.50 stands it 40 mm
+  // proud of the casting's soffit face.
   sign.position.set(
-    (start.x + end.x) / 2 + (inx / inl) * 0.42,
+    (start.x + end.x) / 2 + (inx / inl) * 0.5,
     shell.apron + 2.72,
-    (start.z + end.z) / 2 + (inz / inl) * 0.42,
+    (start.z + end.z) / 2 + (inz / inl) * 0.5,
   )
   sign.rotation.y = Math.atan2(inx / inl, inz / inl)
   services.group.add(sign)
@@ -686,6 +690,7 @@ export function loungeInteriorSign(): Mesh {
     signageMaterial(['THE PLANET IS OPEN ALL DAY'], {
       background: '#2b2723',
       widthPx: 640,
+      aspect: 1.5 / 0.34,
     }),
   )
 }

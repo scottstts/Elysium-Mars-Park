@@ -303,6 +303,14 @@ interface SignArt {
   lines: string[]
   aspect: number
   accent?: string
+  /**
+   * `finger` only: draw the chevron at the LEFT of the tile. A finger board is
+   * read from both broad faces, and the two faces' right-vectors are opposite,
+   * so one of them needs the arrow on the other side to keep pointing at the
+   * board's tip. The TEXT must still read left-to-right on both, which is why
+   * this is a separate tile and not the `mirror` flag.
+   */
+  arrowLeft?: boolean
 }
 
 interface SignFace {
@@ -461,11 +469,13 @@ function drawSign(g: CanvasRenderingContext2D, art: SignArt, x: number, y: numbe
     const size = fitFont(g, art.lines[0], w * 0.68, h * 0.5)
     g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
     g.fillStyle = '#f0e7d6'
-    g.fillText(art.lines[0], w * 0.08, h * 0.52)
+    g.fillText(art.lines[0], w * (art.arrowLeft ? 0.24 : 0.08), h * 0.52)
+    const tip = art.arrowLeft ? 0.05 : 0.95
+    const base = art.arrowLeft ? 0.2 : 0.8
     g.beginPath()
-    g.moveTo(w * 0.8, h * 0.24)
-    g.lineTo(w * 0.95, h * 0.5)
-    g.lineTo(w * 0.8, h * 0.76)
+    g.moveTo(w * base, h * 0.24)
+    g.lineTo(w * tip, h * 0.5)
+    g.lineTo(w * base, h * 0.76)
     g.closePath()
     g.fillStyle = accent
     g.fill()
@@ -2386,19 +2396,31 @@ function writeFingerLegend(
   root: Vector3,
   bearing: number,
 ): void {
-  const artId = `finger-${label.replace(/[^A-Z]/g, '')}`
-  art(d, { id: artId, style: 'finger', lines: [label], aspect: 4.6 })
+  const key = label.replace(/[^A-Z]/g, '')
+  // Two tiles per label. The `side = +1` face's right-vector is -along, so it
+  // gets the left-pointing chevron; both faces then point at the board's tip.
+  // Aspect is the plate's own 0.5 / 0.126 — the old 4.6 squashed it 16 %.
+  const artFor = (arrowLeft: boolean): SignArt =>
+    art(d, {
+      id: `finger-${key}${arrowLeft ? '-l' : '-r'}`,
+      style: 'finger',
+      lines: [label],
+      aspect: 0.5 / 0.126,
+      arrowLeft,
+    })
   void id
   const along = new Vector3(Math.sin(bearing), 0, Math.cos(bearing))
   const normal = new Vector3(Math.cos(bearing), 0, -Math.sin(bearing))
   for (const side of [1, -1]) {
     addFace(d, {
-      art: d.arts.get(artId)!,
-      // 0.36 along the board, so the legend clears the post it radiates from
-      // (a legend centred at 0.3 with a 0.58 width reaches back INTO the post).
+      art: artFor(side === 1),
+      // 0.33 along the board: the legend's 0.5 m span then runs 0.08 -> 0.58,
+      // clear of the 0.043 post behind it and stopping exactly where the
+      // board starts tapering (past 0.58 the plate is shorter than the tile,
+      // and the tile's dark ground showed past the silhouette).
       center: root
         .clone()
-        .addScaledVector(along, 0.36)
+        .addScaledVector(along, 0.33)
         .addScaledVector(normal, side * 0.0205),
       // No `mirror` here: the quad's own right-vector already flips with the
       // yaw, so both faces read forwards. (The banner cloth DOES need the u
@@ -2633,7 +2655,11 @@ function dressServiceLayer(d: Dressing, rng: Rng): void {
     const forward = new Vector3(Math.sin(yaw), 0, Math.cos(yaw))
     addFace(d, {
       art: d.arts.get('fire-point')!,
-      center: spot.clone().addScaledVector(forward, 0.406).setY(spot.y + 1.19),
+      // 0.376 / 1.09, not 0.406 / 1.19: the cabinet rim is at 0.39 and the
+      // shell tops out at 1.26, so the legend used to stand 16 mm proud of the
+      // mouth with its top 50 mm hanging in open air above the cabinet. This
+      // is the notice board's proven 14 mm reveal inside the rim.
+      center: spot.clone().addScaledVector(forward, 0.376).setY(spot.y + 1.09),
       yaw,
       pitch: 0,
       width: 0.62,

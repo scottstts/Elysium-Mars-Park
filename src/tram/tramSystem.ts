@@ -11,8 +11,9 @@ import { interiorHeight } from '../world/interiorHeight'
 import { LOOP } from '../world/parkPlan'
 import { buildGuideway, buildStations, buildTrackData, buildTube, carFloorY } from './track'
 import type { TrackData } from './track'
-import { buildTramCar, CAR_LENGTH } from './vehicle'
+import { buildTramCar, CAR_LENGTH, CAR_WIDTH } from './vehicle'
 import type { TramCar } from './vehicle'
+import type RAPIER from '@dimforge/rapier3d-compat'
 
 /**
  * The Loop (plan §11): arrival spur through the tube, then the closed
@@ -45,7 +46,16 @@ export class TramSystem implements GameSystem {
   private nextStationIndex = 0
   private doorOpen = 0
   private riding = false
-  private alightQueued = false
+  /**
+   * While true, car placement runs in one continuous arc-length domain that
+   * crosses from the arrival spur onto the loop at the portal handoff. The
+   * old code swapped curves at the dock instant: the front car had already
+   * pinned (degenerate atan2(0,0) heading), then teleported ~3.9 m onto the
+   * loop — the reported "camera cut when the tram stops". Cleared once the
+   * train fully clears the seam; every later lap samples the loop directly.
+   */
+  private spurActive = true
+  private readonly carBodies: RAPIER.RigidBody[] = []
 
   private readonly physics: PhysicsSystem
   private readonly player: PlayerSystem | null
@@ -109,16 +119,33 @@ export class TramSystem implements GameSystem {
     markDynamic(this.movingGroup)
     ctx.scene.add(this.movingGroup)
 
-    // Tram colliders: one kinematic box per car (keeps walkers off the beam).
-    // The cars only touch the player during boarding, which the seat pose
-    // handles — so plain fixed colliders updated per dwell are enough; skip
-    // continuous kinematic sync entirely (cars never collide with anything).
+    // Cabin colliders: one box per car, teleported along with the car every
+    // fixed step. Boarding is strictly the E interaction (the seat rig) —
+    // walking through an open door must be impossible, or the tram departs
+    // around a stowaway standing in the aisle (owner report). A moving car
+    // additionally shoves standing players clear (nudgeOutOfBox): the
+    // kinematic character controller never resolves collisions on its own.
+    const world = this.physics.world
+    const api = this.physics.api
+    if (world && api) {
+      for (let i = 0; i < this.cars.length; i++) {
+        const body = world.createRigidBody(api.RigidBodyDesc.fixed())
+        world.createCollider(
+          api.ColliderDesc.cuboid(CAR_WIDTH / 2 + 0.05, 1.5, CAR_LENGTH / 2 + 0.05),
+          body,
+        )
+        this.carBodies.push(body)
+      }
+    }
 
     if (this.player) {
       // The player begins the day already seated in the front car (canon):
-      // no boarding blend at boot — the day BEGINS in the seat.
+      // no boarding blend at boot — the day BEGINS in the seat. Start half a
+      // train-length in: at arrivalS 0 the REAR car's arc offset clamps to
+      // the spur start and the two cars boot overlapped by ~4 m (geometry
+      // auditor finding) until the train has rolled clear.
       this.phase = 'arrival'
-      this.arrivalS = 0
+      this.arrivalS = (CAR_LENGTH + CAR_GAP) / 2 + 0.4
       this.speed = TUBE_SPEED
       this.riding = true
       // Place the cars FIRST: seatPose reads the car's world matrix, and
@@ -129,20 +156,22 @@ export class TramSystem implements GameSystem {
     } else {
       // Validation views: the tram circulates the loop.
       this.phase = 'run'
+      this.spurActive = false
       this.loopS = track.stationS.get('farmside') ?? 0
       this.speed = CRUISE
       this.nextStationIndex = this.stationOrder().indexOf('overlook')
     }
 
     if (this.interaction && this.player) {
-      const player = this.player
       this.interaction.register({
         position: this.boardPosition,
-        label: () => (this.riding ? '' : 'Board the Loop'),
+        // Content-aware: the caption exists only when boarding is actually
+        // possible — a docked tram with open doors.
+        label: () =>
+          !this.riding && this.phase === 'dwell' && this.doorOpen > 0.3 ? 'Board' : '',
         range: 3.2,
         onUse: () => {
-          if (!this.riding && this.phase === 'dwell') this.board()
-          void player
+          if (!this.riding && this.phase === 'dwell' && this.doorOpen > 0.3) this.board()
         },
       })
     }
@@ -176,7 +205,6 @@ export class TramSystem implements GameSystem {
 
   private board(): void {
     this.seatPlayer()
-    this.alightQueued = false
   }
 
   private alight(): void {
@@ -238,18 +266,21 @@ export class TramSystem implements GameSystem {
       while (distance < 0) distance += track.loopLength
       const target = Math.min(CRUISE, Math.sqrt(2 * ACCEL * Math.max(0.01, distance)) + 0.12)
       this.speed += Math.max(-ACCEL * dt * 1.7, Math.min(ACCEL * dt, target - this.speed))
-      this.loopS = (this.loopS + this.speed * dt) % track.loopLength
-      if (distance < 0.25 && this.speed < 0.3) {
+      // Capture the stop when THIS frame's travel would cross it. An absolute
+      // window is unreachable here: the +0.12 creep floor keeps speed ≥ 0.12,
+      // so one 60 Hz step advances ≥ 3.3 mm — wider than any sub-centimetre
+      // gate — and the tram orbited forever without ever docking
+      // (experience-audit finding). Snap magnitude ≤ one frame of creep.
+      const step = this.speed * dt
+      if (distance <= step + 0.005) {
         this.loopS = stopS
         this.speed = 0
         this.phase = 'dwell'
         this.dwellRemaining = DWELL_SECONDS
         this.nextStationIndex++
         ctx.events.emit('tram/docked', { station: stationId })
-        if (this.riding && this.alightQueued) {
-          this.alightQueued = false
-          this.alight()
-        }
+      } else {
+        this.loopS = (this.loopS + step) % track.loopLength
       }
     }
 
@@ -274,35 +305,104 @@ export class TramSystem implements GameSystem {
       }
     }
 
-    // Riding controls: E queues alighting (consumed here, not by captions).
+    // Riding controls: E alights at an open door; otherwise the press is
+    // swallowed so it can't leak to a platform interactable through the
+    // window. Exiting is only ever possible at a stop (owner spec).
     const player = this.player
     if (this.riding && player) {
       const input = (player as unknown as { input: { useQueued: boolean } | null }).input
       if (input?.useQueued) {
         input.useQueued = false
         if (this.phase === 'dwell' && this.doorOpen > 0.5) this.alight()
-        else this.alightQueued = !this.alightQueued
       }
     }
+
+    this.syncCarColliders()
+  }
+
+  update(): void {
+    // Seated hint (bypasses the view-cone pick): tell the rider how to leave
+    // the moment the doors are open, and nothing otherwise.
+    if (!this.interaction || !this.player) return
+    this.interaction.setOverride(
+      this.riding && this.phase === 'dwell' && this.doorOpen > 0.5 ? 'Exit' : null,
+    )
+  }
+
+  /** Keep each car's cabin collider glued to the car; shove bystanders. */
+  private syncCarColliders(): void {
+    const player = this.player
+    for (let i = 0; i < this.carBodies.length && i < this.cars.length; i++) {
+      const car = this.cars[i].group
+      const yaw = car.rotation.y
+      const cy = car.position.y + 1.5
+      this.carBodies[i].setTranslation(
+        { x: car.position.x, y: cy, z: car.position.z },
+        false,
+      )
+      this.carBodies[i].setRotation(
+        { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) },
+        false,
+      )
+      if (player && !this.riding && this.speed > 0.02) {
+        player.nudgeOutOfBox(
+          new Vector3(car.position.x, cy, car.position.z),
+          yaw,
+          CAR_WIDTH / 2 + 0.05,
+          1.5,
+          CAR_LENGTH / 2 + 0.05,
+        )
+      }
+    }
+  }
+
+  /**
+   * Sample the train path at arc length `s` in the boot-continuous domain:
+   * the arrival spur for s ≤ arrivalLength, continuing seamlessly onto the
+   * loop past it (the spur's endpoint IS the portal stop). Once `spurActive`
+   * clears, `s` is a plain loop arc length. Every consumer of a car pose
+   * goes through here — the dock instant must never re-place a car.
+   */
+  private carPoint(s: number): Vector3 {
+    const track = this.track
+    if (!track) return new Vector3()
+    if (!this.spurActive) {
+      return track.loop.getPointAt(mod(s, track.loopLength) / track.loopLength)
+    }
+    if (s <= track.arrivalLength) {
+      return track.arrival.getPointAt(clamp(s, 0, track.arrivalLength) / track.arrivalLength)
+    }
+    return track.loop.getPointAt(
+      mod(track.handoffS + (s - track.arrivalLength), track.loopLength) / track.loopLength,
+    )
   }
 
   private placeCars(): void {
     const track = this.track
     if (!track) return
     const spacing = CAR_LENGTH + CAR_GAP
+    // One scalar for the whole train. After the portal dock the domain keeps
+    // extending onto the loop (arrivalLength + distance-past-handoff) until
+    // the rear car clears the seam; then both domains agree exactly and the
+    // spur mapping switches off with zero displacement.
+    let trainS: number
+    if (!this.spurActive) {
+      trainS = this.loopS
+    } else if (this.phase === 'arrival') {
+      trainS = this.arrivalS
+    } else {
+      let past = this.loopS - track.handoffS
+      if (past < -track.loopLength / 2) past += track.loopLength
+      trainS = track.arrivalLength + past
+      if (past > spacing + 4) {
+        this.spurActive = false
+        trainS = this.loopS
+      }
+    }
     for (let i = 0; i < this.cars.length; i++) {
       const offset = (i === 0 ? 0.5 : -0.5) * spacing
-      let point: Vector3
-      let ahead: Vector3
-      if (this.phase === 'arrival') {
-        const s = clamp(this.arrivalS + offset, 0, track.arrivalLength)
-        point = track.arrival.getPointAt(s / track.arrivalLength)
-        ahead = track.arrival.getPointAt(clamp(s + 1.5, 0, track.arrivalLength) / track.arrivalLength)
-      } else {
-        const s = mod(this.loopS + offset, track.loopLength)
-        point = track.loop.getPointAt(s / track.loopLength)
-        ahead = track.loop.getPointAt(mod(s + 1.5, track.loopLength) / track.loopLength)
-      }
+      const point = this.carPoint(trainS + offset)
+      const ahead = this.carPoint(trainS + offset + 1.5)
       const car = this.cars[i].group
       car.position.copy(point).add(new Vector3(0, 0.62, 0))
       car.rotation.set(0, Math.atan2(ahead.x - point.x, ahead.z - point.z), 0)

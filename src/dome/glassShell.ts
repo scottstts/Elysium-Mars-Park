@@ -62,10 +62,14 @@ import {
  *   dust film    exterior soiling, heavy at the foot, minus the Panewalker's
  *                trailing clean swath. It is LIT (regolith albedo × sun),
  *                which is what makes a dirty pane glow rather than grey out.
- *   pane seams   the structural silicone joint — the only line family the
- *                glass draws, because the ribs/rings/bars are real geometry
- *                (domeGeometry) and drawing them here too would double every
- *                member with up to a metre of parallax.
+ *   pane seams   the structural silicone joints: the gasket line under every
+ *                member, plus the pane grid inside each structural bay (4
+ *                columns × 2 rows, constant everywhere — latticeField owns
+ *                the counts). This is the ONLY place that subdivision
+ *                exists: it is a joint in the glass plane, never a bar. The
+ *                members themselves are real geometry (domeGeometry), so
+ *                drawing them here as members too would double every one of
+ *                them with up to a metre of parallax.
  *
  * Unlit on purpose (MeshBasicNodeMaterial): a lit material would apply its
  * own Fresnel-weighted env specular UNDER our Fresnel alpha and the pane

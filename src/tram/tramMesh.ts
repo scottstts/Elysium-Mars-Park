@@ -402,6 +402,8 @@ export interface LoftOptions {
   closeSection?: boolean
   capStart?: boolean
   capEnd?: boolean
+  /** Wrap the last station back to the first (a torus — piping cords, rings). */
+  closeStations?: boolean
   smooth?: number
   /** Reverse every winding (use for inner/lining surfaces). */
   flip?: boolean
@@ -417,9 +419,10 @@ export function loft(rings: Vec3[][], options: LoftOptions = {}): MeshData {
   const n = rings[0].length
   const stationCount = rings.length
   for (const ring of rings) for (const p of ring) m.verts.push([p[0], p[1], p[2]])
-  const at = (i: number, j: number): number => i * n + j
+  const at = (i: number, j: number): number => (i % stationCount) * n + j
   const last = options.closeSection ? n : n - 1
-  for (let i = 0; i < stationCount - 1; i++) {
+  const spans = options.closeStations ? stationCount : stationCount - 1
+  for (let i = 0; i < spans; i++) {
     for (let j = 0; j < last; j++) {
       const j2 = (j + 1) % n
       pushFace(m, [at(i, j), at(i, j2), at(i + 1, j2), at(i + 1, j)])
@@ -428,6 +431,42 @@ export function loft(rings: Vec3[][], options: LoftOptions = {}): MeshData {
   if (options.capStart) pushFace(m, reversedRange(0, n))
   if (options.capEnd) pushFace(m, range((stationCount - 1) * n, n))
   if (options.flip) flipFaces(m)
+  return m
+}
+
+/**
+ * Close a lofted tube's two ends by ZIPPING the ring onto itself instead of
+ * fanning an n-gon across it.
+ *
+ * A moulded seat's cross-section is a banana: an n-gon cap fanned from vertex
+ * 0 emits triangles that fold OUT of the loop and overlap each other — the
+ * defect family notes.md S15 calls "fan triangulation is only safe for convex
+ * caps", and the reason the previous benches had garbage at their ends. The
+ * zip pairs `k` with `count − k`, which is a clean quad strip for any loop
+ * authored with its two extremities at index 0 and `count / 2`. Every capped
+ * loop in `tramSeat.ts` is built to that contract.
+ */
+export function zipCaps(
+  m: MeshData,
+  ringSize: number,
+  stationCount: number,
+  options: { start?: boolean; end?: boolean } = {},
+): MeshData {
+  if (ringSize % 2 !== 0) throw new Error('zipCaps: ring size must be even')
+  const half = ringSize / 2
+  const emit = (base: number, flip: boolean): void => {
+    const faces: number[][] = [[base, base + 1, base + ringSize - 1]]
+    for (let k = 1; k <= half - 2; k++) {
+      faces.push([base + k, base + k + 1, base + ringSize - k - 1, base + ringSize - k])
+    }
+    faces.push([base + half - 1, base + half, base + half + 1])
+    for (const f of faces) {
+      if (flip) f.reverse()
+      pushFace(m, f)
+    }
+  }
+  if (options.start !== false) emit(0, true)
+  if (options.end !== false) emit((stationCount - 1) * ringSize, false)
   return m
 }
 
@@ -720,8 +759,8 @@ export class SlotMesh {
       const poly = m.faces[f]
       const slot = this.buffer(m.faceSlot[f] ?? defaultSlot)
       const uvs = m.faceUV[f] ?? planarUV(m, poly, faceN[f])
-      for (let i = 1; i < poly.length - 1; i++) {
-        for (const k of [0, i, i + 1]) {
+      for (const tri of triangulateFace(m, poly, faceN[f])) {
+        for (const k of tri) {
           const vi = poly[k]
           const p = m.verts[vi]
           const nrm = cornerNormal(vi, f)
@@ -752,6 +791,88 @@ export class SlotMesh {
     }
     return group
   }
+}
+
+/**
+ * Ear-clip an n-gon on its own plane, returning index triples INTO `poly`.
+ *
+ * A fan from vertex 0 is only valid for a CONVEX face. Every channel section
+ * on this vehicle — the ceiling light cove, the crown raft, the seat track's
+ * T-slot — is a U, and fanning one emits triangles that fold outside the
+ * outline and overlap each other: coplanar same-facing pairs, i.e. a z-fight
+ * inside a single part (notes.md S15, "fan triangulation is only safe for
+ * convex caps"). The dominant axis is dropped and the remaining pair swapped
+ * when the projection would flip the winding.
+ */
+function triangulateFace(m: MeshData, poly: number[], n: Vec3): number[][] {
+  const count = poly.length
+  if (count < 3) return []
+  if (count === 3) return [[0, 1, 2]]
+
+  const ax = Math.abs(n[0])
+  const ay = Math.abs(n[1])
+  const az = Math.abs(n[2])
+  let iu = 0
+  let iv = 1
+  if (ax >= ay && ax >= az) {
+    iu = 1
+    iv = 2
+  } else if (ay >= az) {
+    iu = 2
+    iv = 0
+  }
+  const pts: Vec2[] = poly.map((vi) => [m.verts[vi][iu], m.verts[vi][iv]])
+  let area = 0
+  for (let i = 0; i < count; i++) {
+    const a = pts[i]
+    const b = pts[(i + 1) % count]
+    area += a[0] * b[1] - b[0] * a[1]
+  }
+  const flipped = area < 0
+  const order: number[] = []
+  for (let i = 0; i < count; i++) order.push(flipped ? count - 1 - i : i)
+
+  const cross2 = (o: Vec2, a: Vec2, b: Vec2): number =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+  const inside = (a: Vec2, b: Vec2, c: Vec2, p: Vec2): boolean =>
+    cross2(a, b, p) >= 0 && cross2(b, c, p) >= 0 && cross2(c, a, p) >= 0
+
+  const live = order.slice()
+  const out: number[][] = []
+  let guard = live.length * live.length + 8
+  while (live.length > 3 && guard-- > 0) {
+    let clipped = false
+    for (let i = 0; i < live.length; i++) {
+      const ia = live[(i - 1 + live.length) % live.length]
+      const ib = live[i]
+      const ic = live[(i + 1) % live.length]
+      const a = pts[ia]
+      const b = pts[ib]
+      const c = pts[ic]
+      if (cross2(a, b, c) <= 1e-12) continue
+      let clean = true
+      for (const other of live) {
+        if (other === ia || other === ib || other === ic) continue
+        if (inside(a, b, c, pts[other])) {
+          clean = false
+          break
+        }
+      }
+      if (!clean) continue
+      out.push(flipped ? [ic, ib, ia] : [ia, ib, ic])
+      live.splice(i, 1)
+      clipped = true
+      break
+    }
+    // Degenerate outline (collinear run, self-touching weld): fall back to a
+    // fan of what is left rather than dropping the face.
+    if (!clipped) break
+  }
+  for (let i = 1; i < live.length - 1; i++) {
+    const tri = [live[0], live[i], live[i + 1]]
+    out.push(flipped ? [tri[2], tri[1], tri[0]] : tri)
+  }
+  return out
 }
 
 function faceNormal(m: MeshData, f: number): Vec3 {

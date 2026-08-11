@@ -47,7 +47,16 @@ const LOWER_OUTER_TUNNEL: Vec2[] = [
   [1.03, -0.418],
   [1.128, -0.374],
   [1.208, -0.268],
-  [1.262, 0.0], // 10 — door sill / floor line
+  // 10 — door sill. It stands 6 mm ABOVE the cabin floor line (y = 0) and that
+  // 6 mm is load-bearing, not styling: the door aperture's threshold reveal is
+  // the quad from inner[10] to outer[10], and the door-bay recess pulls
+  // inner[10] (1.207 - 0.052 = 1.155) INBOARD of the floor points at j = 8, 9
+  // (1.175, 1.196). With both ends at y = 0 that reveal doubles back across the
+  // cabin floor in the floor's own plane — 20 mm x 1.76 m of same-facing
+  // overlap, 349 cm² per car. Lifting the outer point tilts the reveal 6.2 deg,
+  // clear of the coplanar test's ~4 deg normal-dot tolerance, and a threshold
+  // proud of the floor is the correct detail anyway.
+  [1.262, 0.006],
   [1.288, 0.23],
   [1.3, 0.52], // 12 — maximum width
   [1.298, 0.8],
@@ -66,7 +75,7 @@ const LOWER_OUTER_SOLID: Vec2[] = [
   [1.03, -0.418],
   [1.128, -0.374],
   [1.208, -0.268],
-  [1.262, 0.0],
+  [1.262, 0.006], // 10 — matches the tunnel section's sill lift above
   [1.288, 0.23],
   [1.3, 0.52],
   [1.298, 0.8],
@@ -444,7 +453,13 @@ export const APERTURES: Aperture[] = [
   { z0: 1.98, z1: QUARTER, j0: IDX.CANT_L, j1: IDX.BELT_L - 1, kind: 'window' },
 ]
 
-/** Cabin furniture datums, all traceable back to the section tables. */
+/**
+ * Cabin furniture datums, all traceable back to the section tables.
+ *
+ * `seatY` is NOT the seat contract any more — `tramSeat.seatSurfaceY()`
+ * measures the finished cushion so the pose cannot drift from the geometry.
+ * The number below is the nominal it is designed to land on (0.451 as built).
+ */
 export const CABIN = {
   floorY: 0.006,
   seatY: 0.456,

@@ -668,8 +668,11 @@ function signage(emit: Emit, services: DistrictServices, y0: number, ground: Gro
   // "62": the supergraphic, in a recessed tray on the parapet band facing the
   // park centre — the reference's numeral, at the reference's height.
   // Panel proportion is a CONTRACT with the canvas: face width = arc × radius,
-  // face height = 2·(halfZ − rail − 0.03). 17° × r 7.2 = 2.14 m wide and
-  // 1.12 m tall, i.e. aspect 0.52 — which is what signFaceMaterial is told.
+  // face height = 2·(halfZ − rail − 0.03). The arc is NOT the 17° passed in —
+  // `signBox` eats 0.015 rad of jamb at each end and hands back the face it
+  // actually made: 0.266706 rad × r 7.2 = 1.9203 m wide, 1.12 m tall, so the
+  // aspect is 0.5832. The old 0.52 came from multiplying the full 17° by 7.2
+  // and squashed the numeral 12 %.
   const half = (8.5 * Math.PI) / 180
   const zc = Z_ROOF + 0.77
   const numeral = signBox(emit, {
@@ -685,7 +688,12 @@ function signage(emit: Emit, services: DistrictServices, y0: number, ground: Gro
       centerX: HYDRO_TOWER.x,
       centerZ: HYDRO_TOWER.z,
       baseY: y0,
-      material: signFaceMaterial(['62'], { aspect: 0.52, tracking: 0.1, weight: 700, widthPx: 1024 }),
+      material: signFaceMaterial(['62'], {
+        aspect: (numeral.z1 - numeral.z0) / ((numeral.a1 - numeral.a0) * numeral.radius),
+        tracking: 0.1,
+        weight: 700,
+        widthPx: 1024,
+      }),
       name: 'hydro-supergraphic',
     }),
   )
@@ -707,7 +715,8 @@ function signage(emit: Emit, services: DistrictServices, y0: number, ground: Gro
       centerZ: HYDRO_TOWER.z,
       baseY: y0,
       material: signFaceMaterial(['SEED FARMING · BLOCK 4'], {
-        aspect: 0.061,
+        // Face is 2.8816 x 0.1896 -> 0.0658, not the 0.061 assumed here.
+        aspect: (caption.z1 - caption.z0) / ((caption.a1 - caption.a0) * caption.radius),
         tracking: 0.28,
         weight: 600,
         widthPx: 1024,
@@ -757,6 +766,9 @@ function signage(emit: Emit, services: DistrictServices, y0: number, ground: Gro
       ink: '#dfe7d8',
       accent: '#7fc26a',
       widthPx: 768,
+      // Portrait blade: 0.92 × 2.0 m — the canvas must match or the type
+      // rasterizes landscape and squashes flat on the plate.
+      aspect: 0.92 / 2.0,
     }),
   )
   bladeFace.position.set(

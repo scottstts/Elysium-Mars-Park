@@ -1,7 +1,6 @@
 import { Group } from 'three'
 import {
   apertureShell,
-  bridge,
   emptyMesh,
   fanRings,
   flipFaces,
@@ -91,7 +90,10 @@ function hullSlotOuter(j: number): string {
   return j <= SKIRT_CELL_MAX || j >= SKIRT_CELL_MIN_L ? 'dark' : 'body'
 }
 
-function hullSlotReveal(j: number): string {
+function hullSlotReveal(i: number, j: number): string {
+  // The grid's two end stations close the nose and the tail — that ribbon is
+  // the cab mask's leading edge, so it is bodyside white, not a reveal.
+  if (i <= 0 || i >= STATIONS.length - 2) return 'body'
   // Door jambs and the threshold are dark; every glazing reveal is anodized.
   return j >= IDX.SILL_R && j < IDX.BELT_R ? 'dark' : 'alloy'
 }
@@ -120,7 +122,7 @@ export function buildHull(slots: SlotMesh): void {
       solid: (i, j) => cellIsSolid((STATIONS[i] + STATIONS[i + 1]) * 0.5, j),
       outerSlot: (_i, j) => hullSlotOuter(j),
       innerSlot: () => 'lining',
-      revealSlot: (_i, j) => hullSlotReveal(j),
+      revealSlot: (i, j) => hullSlotReveal(i, j),
     },
   )
   slots.add(shell, 'body')
@@ -198,21 +200,17 @@ function doorLeaf(zCentre: number): MeshData {
       solid,
       outerSlot: () => 'body',
       innerSlot: () => 'lining',
-      revealSlot: () => 'alloy',
+      // `apertureShell` ALREADY closes every grid boundary with a reveal ribbon
+      // of the real wall thickness (its `solid()` returns false off the grid),
+      // so the leaf's four edges must NOT be bridged again here. Building them
+      // twice shipped 0.26 m² of z-fighting per leaf — the same trap as the
+      // nose/tail mask edge, documented in `buildEnd` §1.
+      // The two STATION-end ribbons are the vertical seals you see meeting at
+      // the centre, so they are rubber; the section ends and the window jambs
+      // are anodized.
+      revealSlot: (i) => (i === 0 || i === zs.length - 2 ? 'rubber' : 'alloy'),
     },
   )
-  // Close the leaf's four edges with the wall thickness, and make the two
-  // vertical edges rubber — those are the seals you see meeting at the centre.
-  const zLast = zs.length - 1
-  const sLast = ss.length - 1
-  const rowOuter = (index: number): Vec3[] => outer.map((r) => r[index])
-  const rowInner = (index: number): Vec3[] => inner.map((r) => r[index])
-  const edges = [
-    setSlot(flipFaces(bridge(outer[0], inner[0])), 'rubber'),
-    setSlot(bridge(outer[zLast], inner[zLast]), 'rubber'),
-    setSlot(bridge(rowOuter(0), rowInner(0)), 'alloy'),
-    setSlot(flipFaces(bridge(rowOuter(sLast), rowInner(sLast))), 'alloy'),
-  ]
   // Glass in the leaf window, plus its own gasket band.
   const glassZ = [winZ0 - 0.01, winZ0 + 0.008, ...linspace(winZ0 + 0.1, winZ1 - 0.1, 2), winZ1 - 0.008, winZ1 + 0.01]
   const glassS = [winS0 - 0.12, winS0 + 0.06, ...linspace(winS0 + 0.5, winS1 - 0.5, 2), winS1 - 0.06, winS1 + 0.12]
@@ -244,7 +242,7 @@ function doorLeaf(zCentre: number): MeshData {
     'orange',
     { withRecess: false },
   )
-  return join([leaf, ...edges, pane, strip], 30)
+  return join([leaf, pane, strip], 30)
 }
 
 /** The doorsLeft contract: a Group with exactly two children, child 0 at
@@ -344,13 +342,13 @@ export function buildDoorSurround(slots: SlotMesh): void {
 export function buildEnd(slots: SlotMesh, end: -1 | 1): void {
   const zTip = end * HALF_LENGTH
   const pair = sectionAt(zTip)
-  const tipOuter = pair.outer.map((p) => taperApply(p, zTip))
   const tipInner = pair.inner.map((p) => taperApply(p, zTip))
 
-  // 1. Mask edge: the wall thickness turned forward at the tip.
-  const ribbon = bridge(tipOuter, tipInner, { close: true, smooth: 30 })
-  if (end < 0) flipFaces(ribbon)
-  slots.add(setSlot(ribbon, 'body'), 'body')
+  // 1. Mask edge: the wall thickness turned forward at the tip. It is NOT
+  //    emitted here — `apertureShell` already closes the grid's last station
+  //    with exactly this ribbon (its `solid()` returns false past the end), and
+  //    building it twice put 0.54 m² of z-fighting across the nose AND the
+  //    tail. `hullSlotReveal` routes the end stations to 'body' instead.
 
   // 2. Split the opening at the beltline: glass above, moulded fascia below.
   //    Both halves close on the SAME chord samples (one reversed), so the
@@ -489,8 +487,15 @@ function decalPatch(
   flipU: boolean,
   flipV: boolean,
 ): MeshData {
-  const zs = linspace(z0, z1, 6)
-  const ss = linspace(s0, s1, 3)
+  // The patch stands 3 mm off the skin, so it may never be sampled COARSER
+  // than the skin it lies on: a chord across the bodyside's curvature sags
+  // inward, and at 2 section intervals across the tumblehome's widest point
+  // that sag ate the whole standoff and the wordmark z-fought the body over
+  // 86 cm². Sag falls with the square of the step, so 5x3 -> 9x5 intervals
+  // buys ~9x margin for 90 extra triangles. (Same lesson as the seat pads:
+  // never compare two discretisations of one analytic surface.)
+  const zs = linspace(z0, z1, 10)
+  const ss = linspace(s0, s1, 6)
   const m = emptyMesh(24)
   const rows: number[][] = []
   for (const z of zs) {
@@ -527,11 +532,22 @@ const MIRROR_S = (s: number): number => IDX.COUNT - s
 export function buildLivery(slots: SlotMesh): void {
   // Orange waist band: 86 mm tall, 7 mm proud, faired into the skin at both
   // ends so it terminates instead of stopping.
-  const bandZ = linspace(-3.62, 3.62, 30)
+  // 44 stations, not 30: past NOSE_START the taper pulls the bodyside in by
+  // ~50 mm per 0.24 m of z, and a band station spacing that coarse chords
+  // straight through its own 7 mm standoff near the cab.
+  const bandZ = linspace(-3.62, 3.62, 44)
+  // The band's outer face is 7 mm proud. Fading it by the full 30 mm drove that
+  // face THROUGH the bodyside, and a moulding crossing its host's plane is a
+  // z-fight: the coplanar test's ANG = 0.0025 is a normal-dot, i.e. ~4 deg of
+  // tilt, so a 3 deg taper stays "coplanar" for the whole 50 mm either side of
+  // the crossing (52 / 33.6 / 26.2 cm² at the four band ends). The shift is now
+  // clamped so the band never comes closer than 3 mm to the skin — double the
+  // 1.5 mm plane tolerance — and it tapers continuously all the way to its cap
+  // instead of stepping down and running on flat.
   const fade = (z: number): number => {
     const a = Math.abs(z)
     if (a < 3.05) return 0
-    return Math.min(0.03, (a - 3.05) * 0.055)
+    return Math.min(0.002, (a - 3.05) * (0.002 / 0.57))
   }
   for (const [a, b] of [
     [13.5, 13.98],

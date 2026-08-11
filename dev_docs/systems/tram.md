@@ -1,30 +1,36 @@
-# The Loop & arrival (S9)
+# The Loop & arrival (S9, P-wave revised)
 
-- Track: closed 48-point circle r 206 (clockwise from above so the portal
-  station departs eastward: portal → farmside → overlook) + the open arrival
-  spur from z 640 in the tube through the portal onto the portal stop.
-  `beamTopY()` is the guideway datum — pad-aware (see notes.md).
-- Guideway: cast beam segments + twin wear strips + auto pylons where the
-  grade drops; the tube gets interior lining (double-sided), structural
-  rings, warm running-light strips, and walkway decks.
-- Vehicle: panel-built shell with REAL window apertures (no glass stickers
-  on solid boxes — the ride view is the product). Front seat pair faces
-  forward at the front; cabin light strip; pocket doors slide per side.
-  Doors: with +Z travel, +X local = LEFT = platform side at all three stops.
-- Motion: arc-length kinematics, comfort profile (a 1.05, cruise 8, tube
-  11.5, sqrt-braking into stops), 22 s dwells, door state machine inside
-  dwell. Cars follow at ±(length+gap)/2 with per-car pitch.
-- Arrival: the player boots ALREADY SEATED (enterVehicle pose closure →
-  PlayerSystem generalized seat), ~50 s unbroken: dark tube → running
-  lights → iris petals slide open → the reveal → sweep → dock → doors.
-  Wide-pose sneak renders behind the entry screen precompile the park so
-  the reveal cannot hitch on first-sight pipelines.
-- Riding: E during dwell alights (left door, onto the platform); E while
-  moving queues alighting at the next stop. Board prompt anchors to the
-  front car's left door via a live-updated interactable position.
-- Iris: six sliding petals in a collar at z 250.4, opened by tram
+- Track: closed 48-point circle r 97, street-running in the boulevard
+  channel (clockwise from above: portal → farmside → overlook) + the open
+  arrival spur from z 420 in the tube, dead straight on x=0 for z ≥ 121,
+  hooking west onto the portal stop. `beamTopY()` is the guideway datum.
+- Car placement runs in ONE continuous arc-length domain that crosses the
+  spur→loop seam (`carPoint` + a `spurActive` window that self-clears once
+  the train passes the seam). Never re-place a car at a phase flip — the
+  dock cut this killed is documented in notes.md. `nearestS` refines to
+  1 cm (it is a pose-continuity datum). Boot starts at arrivalS =
+  half a train length so the rear car never clamps onto the front one.
+- Station capture: a stop docks when THIS frame's travel would cross it
+  (`distance ≤ speed·dt + 5 mm`) — never an absolute window; the braking
+  profile's +0.12 m/s creep floor makes any sub-centimetre absolute gate
+  unreachable (the tram orbited forever — experience-audit find).
+- Motion: comfort profile (a 1.05, cruise 8, tube 11.5, sqrt-braking),
+  22 s dwells, door state machine inside dwell.
+- Boarding is E-ONLY, enforced by physics: per-car cabin colliders are
+  teleported along every fixed step, and `PlayerSystem.nudgeOutOfBox`
+  shoves bystanders clear of a moving car (the KCC never resolves unless
+  the player moves). Captions are content-aware: "Board" only when docked
+  with doors open; a sticky "Exit" override (InteractionSystem.setOverride)
+  while riding at an open door; E is swallowed otherwise so it cannot leak
+  to platform interactables through the window. No mid-ride exit queue.
+- Seated view: the pose yaw's frame delta is carried into the player yaw
+  every frame (head rides a TURNING vehicle); boarding eases yaw/pitch
+  toward the seat facing while the 1.2 s blend runs.
+- Arrival: the player boots ALREADY SEATED, ~50 s unbroken to the dock.
+  Wide-pose sneak renders behind the entry screen precompile the park.
+- Iris: six sliding petals in a collar at z 128.4, opened by tram
   proximity on the spur; stays open once on the loop.
-- ?view modes: no player — the tram simply circulates for postcards.
+- ?view modes: no player — the tram circulates (spurActive off).
 
 ---
 
@@ -98,10 +104,48 @@ Consequences worth knowing before editing anything:
   ribbon (wall thickness turned forward), then two `fanRings` fills — glass
   above the split, moulded fascia below — closing on *the same* chord samples
   so the two surfaces weld rather than abut. A transom bar covers the joint.
-- **Seats.** The seated contact polyline is authored once; the shell, the
-  back cushion and the pan cushion are all offsets of it, so a cushion cannot
-  float off its shell. Shell is much darker than the moquette on purpose —
-  at similar values the whole bench reads as one blob.
+- **Seats live in `tramSeat.ts` and are the cabin's hero object.** The method,
+  and the traps it exists to avoid:
+  - ONE analytic contact surface. `contactAt(x, s)` is a (z, y) polyline
+    (12 deg recline, lumbar prominence, 4.5 deg pan) SCULPTED ACROSS the bench
+    by `dish(x)` — a raised cosine hollowing a bucket behind each place and
+    leaving a proud bolster at the divider and both outboard ends. That lateral
+    term is what makes the shell compound-curved rather than an extrusion; the
+    previous benches were a constant section swept across and read as slabs.
+  - The contact curve is the BOLSTER line, not the seating reference point:
+    `dish` carves ~21 mm down from it at a seat centre, so the pan is authored
+    high. Do not "fix" the pan height by moving `PAN_LINE` without re-checking
+    `seatSurfaceY()`, which is what the seat contract now reports.
+  - The shell carries real POCKETS (`recessAt`): a 12 mm bezel everywhere, the
+    full pad depth inside each pad footprint. Pads sit IN the recess with a
+    reveal, which is the single detail that separates a seat from a cushion on
+    a board.
+  - **A pad's underside is sampled from the SHELL'S OWN discretised surface**
+    (`shellFrontAt`, bilinear over the shell's station/profile grid), not from
+    the analytic surface. Comparing two different discretisations of one
+    surface put 117 triangle crossings into the back cushion; a 36 mm pocket
+    ramp cannot be resolved by 50 mm station spacing, and the linear chord
+    across it sits well above the true pocket floor. The shell also carries
+    explicit stations on both edges of every pocket ramp for the same reason.
+  - **A pad's rolled edge bulges past its own footprint** by `PAD_ROLL`, so the
+    pad finishes `PAD_MARGIN` (> PAD_ROLL) inside the pocket's flat floor. The
+    roll is an ELLIPSE, not a half-round: a half-round of a 55 mm pad bulges
+    28 mm and punches the bezel.
+  - Piping is a real swept cord around each pad's boundary (same slot, so the
+    nesting is free). Pad faces are domed and fall 3 mm BELOW the contact line
+    at the seam — a face that stays flat to its roll folds at ~70 deg and reads
+    as a slab however good the piping is.
+  - Armrests are moulded in one piece with the shell (same slot, they weld);
+    their outer face lands 3 mm inside `x = ±BENCH_HALF`, because two flush
+    faces there are a coplanar same-facing pair — a z-fight even inside one
+    material slot.
+  - Mounts: bolted floor track with countersunk bolts, a tapered cast leg and
+    a saddle whose top clears the shell by 3 mm (measured against the LOWEST
+    point under the plate, since the underside is curved). Everything bolted
+    down starts 3 mm above the floor covering; an exact butt between two
+    material slots is what makes the audit's clash test ambiguous.
+  - Shell is much darker than the moquette on purpose — at similar values the
+    whole bench reads as one blob.
 - **Cabin lamps (READ THIS).** Two `PointLight`s per car, intensity 3, range
   6.5, no shadows, parented to the car group. Emissive coves read as fixtures
   but illuminate nothing, and the ceiling was a black void from every seated
@@ -134,6 +178,12 @@ the two cars get "01" and "02" stencils with no caller change.
   `seats[0]` = front-LEFT window seat, the arrival seat. If a more open
   forward view is wanted for the arrival, `seats[2]` is the front-left aisle
   seat and clears the A-pillar.
+  Positions: x = ±0.955 (window) / ±0.485 (aisle), z = ±2.42, **y = 0.451**
+  (was 0.456 — `tramSeat.seatSurfaceY()` now MEASURES the finished cushion so
+  the pose cannot drift from the geometry; `CABIN.seatY` is only the nominal
+  it is designed to hit).
+- `triangles` ≈ 84.7 k per car (37.2 k exterior + 47.4 k cabin), inside the
+  90 k hero budget. Four benches are 36 k of that.
 
 ---
 

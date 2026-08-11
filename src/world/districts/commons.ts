@@ -1,4 +1,4 @@
-import { CanvasTexture, DoubleSide, InstancedMesh, Matrix4, Mesh, PlaneGeometry, Quaternion, SRGBColorSpace, Vector3 } from 'three'
+import { CanvasTexture, DoubleSide, Group, InstancedMesh, Matrix4, Mesh, PlaneGeometry, Quaternion, SRGBColorSpace, Vector3 } from 'three'
 import { MeshPhysicalNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu'
 import { texture } from 'three/tsl'
 import { bench } from '../../archkit/kit'
@@ -9,6 +9,8 @@ import {
   annularPrism,
   arcPts,
   bevel,
+  buildGroup,
+  chamferRect,
   circle,
   loft,
   prism,
@@ -25,15 +27,17 @@ import {
   writeInto,
 } from '../../archkit/meshdata'
 import type { Vec2, Vec3 } from '../../archkit/meshdata'
-import { signageMaterial } from '../../materials/library'
+import { kitMaterials } from '../../materials/library'
 import { broadLeafTexture } from '../../vegetation/leafTextures'
 import { interiorHeight } from '../interiorHeight'
 import { COMMONS } from '../parkPlan'
+import { COMMONS_WELL, buildCommonsInterior } from './commonsInterior'
 import type { DistrictServices } from './types'
 
 /**
- * THE COMMONS — the reference image's centrepiece: a sealed two-storey glazed
- * drum on the plaza's north edge, built for a city that has not arrived yet.
+ * THE COMMONS — the reference image's centrepiece: a two-storey glazed drum on
+ * the plaza's north edge, and the park's one genuinely civic room. The fit-out
+ * lives in `commonsInterior.ts`; this file is the building that contains it.
  *
  * **Authoring frame.** Everything below is drawn Z-UP in the drum's own local
  * frame: plan `(x, y)` are offsets east/south from `COMMONS`, `z` is height
@@ -55,6 +59,15 @@ import type { DistrictServices } from './types'
  * glazing, `signageGlow` reveal strips at the sign box, `utilityLight` only
  * on lenses under ~0.1 m². The 'commons-entry' real light already exists in
  * `world/lightFixtures.ts` — nothing here registers another.
+ *
+ * **The entrance.** Two bays of the ground-storey glazing are left out and a
+ * flat aluminium portal is applied across them, carrying a bi-parting pair of
+ * sliding leaves registered as `DoorSpec`s. The leaves are FLAT and slide on a
+ * tangent, because a curved leaf cannot slide along a linear `openOffset`; the
+ * portal plane stands 220 mm proud of the glazing so a leaf's travel clears
+ * every mullion cap (which reach r 9.092) by at least 90 mm. Two radial glazed
+ * returns close the wedge between the portal and the drum, so the only way in
+ * is through the doors.
  */
 
 // ------------------------------------------------------------------ layout
@@ -83,7 +96,15 @@ const R_ROTUNDA = 4.45 // the stacked lantern drum on the roof
 
 /** Heights above the apron. */
 const Z_SILL = 0.3 // top of the glazing base rail
-const Z_FLOOR = 0.18 // interior finished floor
+const Z_FLOOR = 0.18 // interior structural datum (the finish is laid ON this)
+/**
+ * Top of the structural slab. The finish above it is 76 mm, not 16: a 16 mm
+ * screed has nowhere to put a recessed divider channel or a matting well, and
+ * the first version of the fit-out drove its dust grate straight through the
+ * slab — 3.65 m² of coplanar same-facing floor, the largest defect in the
+ * building. Finish thickness is a structural decision, so it lives here.
+ */
+const Z_SCREED = Z_FLOOR - 0.06
 const Z_SOFFIT = 4.4 // arcade + hall ceiling (underside of the level-2 plate)
 const Z_L2 = 5.05 // level-2 finished floor (top of the same plate)
 const Z_HEAD_U = 9.5 // upper glazing head / underside of the roof plate
@@ -108,6 +129,56 @@ const PHI_FRONT = Math.PI / 2
 const DOOR_BAY = SEG_BAY / 4 - 1
 const CANOPY_HALF = (16 * Math.PI) / 180
 const R_CANOPY = 14.3
+
+/**
+ * The drum's own opening: mullions `DOOR_BAY` and `DOOR_BAY + 2` are its jambs
+ * and stay full height, the one between them starts at the head. 2.32 m of
+ * chord at the glazing radius.
+ */
+const DOOR_A0 = (DOOR_BAY * Math.PI * 2) / SEG_BAY
+const DOOR_A1 = ((DOOR_BAY + 2) * Math.PI * 2) / SEG_BAY
+/** Head of the drum's opening: a beam between the two jamb mullions. */
+const Z_OPEN_HEAD = 2.62
+const Z_OPEN_HEAD_TOP = 2.86
+
+/**
+ * The applied entrance portal, all measured on the tangent plane at
+ * `PHI_FRONT` (local +y). `Y_LEAF` is the leaf's INNER face; everything else
+ * is derived from it, so moving the portal in or out moves one number.
+ */
+const Y_LEAF = 9.16
+const LEAF_T = 0.075
+const LEAF_W = 1.19
+/** Meeting-stile overlap: each leaf runs 30 mm past the centre line. */
+const LEAF_LAP = 0.03
+/**
+ * Clear structural opening, half-width: 2.26 m between the jamb reveals, which
+ * is what the leaves uncover when both are parked. Well over the 1.8 m brief.
+ */
+const CLEAR_HALF = 1.13
+const X_JAMB = 2.5
+const JAMB_W = 0.12
+const Y_PORTAL0 = 9.1
+const Y_PORTAL1 = 9.4
+const Z_LEAF0 = 0.03
+const Z_LEAF1 = 2.45
+const Z_TRACK = 2.47
+const Z_PORTAL_HEAD = 2.62
+const Z_PORTAL_TOP = 3.06
+/** Radial glazed returns, springing off the two jamb mullions. */
+const PHI_RETURN = (15 * Math.PI) / 180
+const R_RETURN0 = 9.1
+/**
+ * Outer end of the returns. 9.40 is the last radius whose point on the 75 deg
+ * radial (2.4295, 9.0806) still clears the jamb post's inner corner
+ * (2.44, 9.10) — by 22 mm, which reads as the reveal it is. Pushing the return
+ * INTO the jamb welded two members that then shared three faces.
+ */
+const R_RETURN1 = 9.4
+/** Porch slab: inner arc clear of the base rail (9.12), front edge, side flare. */
+const R_PORCH = 9.14
+const Y_PORCH = 9.44
+const PHI_PORCH = (15.7 * Math.PI) / 180
 
 const ORIGIN_Y = (): number => interiorHeight(COMMONS.x, COMMONS.z)
 
@@ -516,9 +587,31 @@ export function buildCommons(services: DistrictServices): void {
   shell(emit, ground)
   curtainWall(emit, glassParts)
   arcadeAndCanopy(emit, ground)
-  entrance(emit, services, world, ground)
+  entrance(emit, services, world, ground, glassParts)
   roof(emit, glassParts, leaves, services)
-  interior(emit, leaves)
+  buildCommonsInterior(
+    {
+      x: COMMONS.x,
+      z: COMMONS.z,
+      baseY: y0,
+      emit,
+      world,
+      leaves,
+      rGlass: R_GLASS_G,
+      rDrum: R_DRUM,
+      rVoid: R_VOID,
+      zSlab: Z_SCREED,
+      zFloor: Z_FLOOR + 0.016,
+      zSoffit: Z_SOFFIT,
+      zL2: Z_L2,
+      zL2Top: Z_L2 + 0.014,
+      zHeadU: Z_HEAD_U,
+      zLantern: Z_LANTERN,
+      doorA0: DOOR_A0,
+      doorA1: DOOR_A1,
+    },
+    services,
+  )
   surroundings(writer, services, world, y0)
   colliders(services, world)
 
@@ -573,24 +666,23 @@ function shell(emit: Emit, ground: Ground): void {
   // standing 180 mm over the apron — the sealed hall is up a step. Its
   // underside follows the apron too; the middle is flat because the apron
   // varies by under a millimetre inside r 0.5.
-  emit('cast', groundedBand(R_GLASS_G - 0.22 - BUTT, 0.5, Z_FLOOR, ground))
-  emit('cast', prism(circle(0.5 - BUTT, 24), ground(0, 0) - 0.002, Z_FLOOR))
-  const finish = prism(circle(R_GLASS_G - 0.26, SEG_SMOOTH), Z_FLOOR, Z_FLOOR + 0.016)
-  bevel(finish, 0.008, 2)
-  emit('deck', finish)
+  emit('cast', groundedBand(R_GLASS_G - 0.22 - BUTT, 0.5, Z_SCREED, ground))
+  emit('cast', prism(circle(0.5 - BUTT, 24), ground(0, 0) - 0.002, Z_SCREED))
+  // The finish laid ON this slab belongs to the fit-out (`commonsInterior.ts`):
+  // terrazzo fields, recessed dividers, a raised medallion and the dust grate
+  // are one set-out, and splitting it across two files would guarantee drift.
 
-  // Level-2 plate: ONE 650 mm annular slab carrying the arcade soffit, the
-  // level-2 floor and the drum's overhang. Void over the hall at R_VOID.
-  emit('steel', ringBand(R_DRUM - BUTT, R_VOID, Z_SOFFIT, Z_L2, 0.025))
-  const l2Deck = annularPrism(
-    circle(R_DRUM - 0.02, SEG_SMOOTH),
-    circle(R_VOID + 0.02, SEG_SMOOTH),
-    Z_L2,
-    Z_L2 + 0.014,
-    0.006,
-    1,
-  )
-  emit('deck', l2Deck)
+  // Level-2 plate: a 650 mm annular slab carrying the arcade soffit, the
+  // level-2 floor and the drum's overhang. Void over the hall at R_VOID, and a
+  // stairwell where the flight climbs through it. Two sectors with a 7 mm
+  // movement joint at each radial butt rather than one exact butt: coincident
+  // planes between two solids are a defect even when the slot is the same, and
+  // the gallery's downstand fascia covers the joint from below either way.
+  const w0 = COMMONS_WELL.a0
+  const w1 = COMMONS_WELL.a1
+  const wg = COMMONS_WELL.gap
+  emit('steel', sectorBand(R_DRUM - BUTT, R_VOID, w1 + wg, w0 + Math.PI * 2 - wg, Z_SOFFIT, Z_L2, 0.025))
+  emit('steel', sectorBand(R_DRUM - BUTT, COMMONS_WELL.rIn, w0 + wg, w1 - wg, Z_SOFFIT, Z_L2, 0.025))
 
   // The applied fascia band: 120 mm proud of the plate edge, running 100 mm
   // below the soffit (a drip) and 370 mm above the floor (an upstand). This
@@ -617,13 +709,17 @@ function curtainWall(emit: Emit, glassParts: MeshData[]): void {
     const rIn = storey.r + MULL_GAP
     const mz0 = storey.z0 + REVEAL
     const mz1 = storey.z1 - HEAD - REVEAL
+    const door = storey.r === R_GLASS_G
     for (let j = 0; j < SEG_BAY; j++) {
-      emit('aluminum', mullion(bayAngle(j, SEG_BAY), rIn, mz0, mz1))
+      // The middle mullion of the entrance stands only ABOVE the opening's
+      // head — it divides the two overpanels and would otherwise be a post
+      // through the middle of a 2.3 m doorway.
+      const from = door && j === DOOR_BAY + 1 ? Z_OPEN_HEAD_TOP + REVEAL : mz0
+      emit('aluminum', mullion(bayAngle(j, SEG_BAY), rIn, from, mz1))
     }
     // Two transoms per bay: the pane divides in three, which is what a 4.2 m
     // storey height wants structurally and what the reference shows. The two
-    // entrance bays are skipped — the door leaves are the wall there.
-    const door = storey.r === R_GLASS_G
+    // entrance bays are skipped — they are a doorway with a glazed overpanel.
     for (let k = 1; k <= 2; k++) {
       const zc = mz0 + ((mz1 - mz0) * k) / 3
       for (let j = 0; j < SEG_BAY; j++) {
@@ -631,10 +727,32 @@ function curtainWall(emit: Emit, glassParts: MeshData[]): void {
         emit('aluminum', transom(bayAngle(j, SEG_BAY), bayAngle(j + 1, SEG_BAY), rIn, zc, 0.036))
       }
     }
-    if (storey.r === R_GLASS_G) {
-      // Ground storey: the run stops either side of the two entrance bays.
+    if (door) {
+      // Ground storey: the run stops either side of the two entrance bays and
+      // resumes as an overpanel above the opening's head, so the wall is a
+      // wall again above 2.88 m instead of a 1.5 m hole.
       glassParts.push(
         glassBand(storey.r, storey.z0 + 0.02, storey.z1 - 0.02, SEG_BAY, DOOR_BAY + 2, SEG_BAY - 2),
+      )
+      glassParts.push(glassBand(storey.r, Z_OPEN_HEAD_TOP + 0.02, storey.z1 - 0.02, SEG_BAY, DOOR_BAY, 2))
+      const overMid = (Z_OPEN_HEAD_TOP + 0.02 + storey.z1 - 0.02) * 0.5
+      for (const j of [DOOR_BAY, DOOR_BAY + 1]) {
+        emit('aluminum', transom(bayAngle(j, SEG_BAY), bayAngle(j + 1, SEG_BAY), rIn, overMid, 0.036))
+      }
+      // Head beam over the opening, stopping clear of both jamb mullions (the
+      // gridshell rule: mullions continuous, beams butt between them).
+      const jambClear = (CAP_W / 2 + REVEAL) / storey.r
+      emit(
+        'steel',
+        sectorBand(
+          storey.r + 0.21,
+          storey.r - 0.19,
+          DOOR_A0 + jambClear,
+          DOOR_A1 - jambClear,
+          Z_OPEN_HEAD,
+          Z_OPEN_HEAD_TOP,
+          0.02,
+        ),
       )
     } else {
       glassParts.push(glassBand(storey.r, storey.z0 + 0.02, storey.z1 - 0.02, SEG_BAY))
@@ -755,96 +873,13 @@ function entrance(
   services: DistrictServices,
   world: (x: number, y: number, z: number) => Vector3,
   ground: Ground,
+  glassParts: MeshData[],
 ): void {
-  const bay = (Math.PI * 2) / SEG_BAY
-  // Two closed leaves either side of the centre mullion at PHI_FRONT, filling
-  // the gap left in the glazing run. No DoorSpec: the Commons is sealed, and
-  // the story is on the plate below, not in an interaction.
-  const rOut = R_GLASS_G + 0.025
-  const rInn = R_GLASS_G - 0.025
-  for (const k of [DOOR_BAY, DOOR_BAY + 1]) {
-    const a0 = (k * Math.PI * 2) / SEG_BAY + 0.011
-    const a1 = ((k + 1) * Math.PI * 2) / SEG_BAY - 0.011
-    // Leaf as a real picture frame: two stiles, two rails, glass in the gap.
-    emit('dark', sectorBand(rOut, rInn, a0, a1, 0.02, 0.17, 0.008))
-    emit('dark', sectorBand(rOut, rInn, a0, a1, 2.43, 2.6, 0.008))
-    for (const e of [0, 1]) {
-      const b0 = e === 0 ? a0 : a1 - 0.0125
-      emit('dark', sectorBand(rOut, rInn, b0, b0 + 0.0125, 0.17, 2.43, 0.006))
-    }
-    emit('darkGlass', sectorBand(rOut - 0.006, rInn + 0.006, a0 + 0.014, a1 - 0.014, 0.176, 2.424, 0.004))
-    // Pull handle: a vertical tube on two standoffs, outboard of the leaf.
-    const phiH = k === DOOR_BAY ? a1 - 0.028 : a0 + 0.028
-    const handle = tubeAlong(
-      [
-        [Math.cos(phiH) * (rOut + 0.09), Math.sin(phiH) * (rOut + 0.09), 0.86],
-        [Math.cos(phiH) * (rOut + 0.09), Math.sin(phiH) * (rOut + 0.09), 1.42],
-      ],
-      circle(0.019, 10),
-      { cap: true },
-    )
-    emit('aluminum', smoothShade(handle, SMOOTH.turned))
-    for (const zh of [0.9, 1.38]) {
-      const stand = revolve(
-        [
-          [0, 0],
-          [0.02, 0],
-          [0.02, 0.07],
-          [0, 0.07],
-        ],
-        10,
-        { capStart: true, capEnd: true, axis: 'y' },
-      )
-      rotateZ(stand, phiH - Math.PI / 2)
-      translate(stand, [Math.cos(phiH) * rOut, Math.sin(phiH) * rOut, zh])
-      emit('aluminum', stand)
-    }
-  }
-  // Threshold plate on the apron, clear of the glazing base rail's footprint
-  // and following the apron's fall like everything else that touches it.
-  emit(
-    'steelEdge',
-    groundedBand(
-      R_GLASS_G + 0.94,
-      R_GLASS_G + 0.26,
-      ground(0, R_GLASS_G + 0.6) + 0.02,
-      ground,
-      PHI_FRONT - bay,
-      PHI_FRONT + bay,
-    ),
-  )
-
-  // "OPENING WHEN YOU ARRIVE": the whole building's story on a 0.5 m plate,
-  // on a stand beside the doors. Environmental storytelling, not a HUD.
-  const phiPlate = PHI_FRONT - 0.185
-  const px = Math.cos(phiPlate) * 12.25
-  const py = Math.sin(phiPlate) * 12.25
-  const plateFoot = ground(px, py)
-  const post = tubeAlong(
-    [
-      [px, py, plateFoot],
-      [px, py, plateFoot + 0.92],
-    ],
-    circle(0.032, 10),
-    { cap: true },
-  )
-  emit('dark', smoothShade(post, SMOOTH.turned))
-  const backing = roundedBoxMesh([-0.3, -0.03, -0.2, 0.3, 0.03, 0.2], 0.02, 2)
-  rotateZ(backing, phiPlate - Math.PI / 2)
-  translate(backing, [px, py, plateFoot + 1.12])
-  emit('dark', backing)
-  const plate = new Mesh(
-    new PlaneGeometry(0.54, 0.34),
-    signageMaterial(['OPENING', 'WHEN YOU ARRIVE'], {
-      background: '#171514',
-      ink: '#d9d2c4',
-      widthPx: 512,
-    }),
-  )
-  plate.position.copy(world(Math.cos(phiPlate) * 12.285, Math.sin(phiPlate) * 12.285, plateFoot + 1.12))
-  plate.rotation.y = Math.atan2(Math.cos(phiPlate), Math.sin(phiPlate))
-  plate.castShadow = false
-  services.group.add(plate)
+  const zFoot = Z_FLOOR + 0.016
+  porch(emit, ground, zFoot)
+  portal(emit, glassParts, zFoot)
+  slidingLeaves(services, world)
+  portalColliders(services, world, zFoot)
 
   // THE COMMONS: a sign box applied to the fascia band.
   const face = signBox(emit, {
@@ -860,10 +895,308 @@ function entrance(
       centerX: COMMONS.x,
       centerZ: COMMONS.z,
       baseY: ORIGIN_Y(),
-      material: signFaceMaterial(['THE COMMONS'], { aspect: 0.13, tracking: 0.42 }),
+      // Derive the aspect from the face `signBox` actually returned (4.2714 x
+      // 0.600 -> 0.1405). The hard-coded 0.13 squashed the type 8 %.
+      material: signFaceMaterial(['THE COMMONS'], {
+        aspect: (face.z1 - face.z0) / ((face.a1 - face.a0) * face.radius),
+        tracking: 0.42,
+      }),
       name: 'commons-sign',
     }),
   )
+}
+
+/**
+ * The walked surface between the apron and the hall: a threshold band across
+ * the drum's opening (from the interior slab's edge out to the porch) and a
+ * crescent of paving under the portal. The crescent is deeper at its flanks
+ * than at its centre because its back edge is the drum, which is the honest
+ * shape and also the one that never fouls the glazing base rail.
+ */
+function porch(emit: Emit, ground: Ground, zTop: number): void {
+  // 0.6 mrad short of the base rail's end caps at each jamb: two solids may
+  // never share a plane, so the joint is a 5 mm reveal behind the mullion.
+  const d = 0.0006
+  emit('cast', groundedBand(R_PORCH - 0.004, R_GLASS_G - 0.22, zTop, ground, DOOR_A0 + d, DOOR_A1 - d))
+
+  const aR = PHI_FRONT - PHI_PORCH
+  const aL = PHI_FRONT + PHI_PORCH
+  const corner = (a: number): Vec2 => [(Y_PORCH / Math.sin(a)) * Math.cos(a), Y_PORCH]
+  const poly: Vec2[] = [corner(aR), corner(aL), ...arcPts(0, 0, R_PORCH, aL, aR, 26)]
+  // A flat underside set below the lowest apron sample in the footprint: the
+  // slab is buried everywhere rather than floating anywhere, which is the same
+  // rule `groundedBand` exists to enforce for the rings.
+  let low = Infinity
+  for (const [x, y] of poly) low = Math.min(low, ground(x, y))
+  // Poured, like the hall floor it continues — `deck` here made the porch read
+  // as a steel grating in full sun.
+  emit('cast', bevel(prism(poly, low - 0.006, zTop), 0.008, 1))
+}
+
+/**
+ * The portal frame. Jambs continuous, head butting between them, an applied
+ * nose band, a track fascia of two blades with the luminous slot in the reveal
+ * between them, and two radial glazed returns springing off the drum's jamb
+ * mullions to close the wedge at each side.
+ */
+function portal(emit: Emit, glassParts: MeshData[], zFoot: number): void {
+  const yMid = (Y_PORTAL0 + Y_PORTAL1) / 2
+  const yDepth = Y_PORTAL1 - Y_PORTAL0
+  const hx = X_JAMB - JAMB_W / 2 - REVEAL
+
+  for (const s of [-1, 1]) {
+    emit(
+      'aluminum',
+      bevel(
+        prism(
+          roundedRect(JAMB_W, yDepth, 0.014, 2).map(([x, y]) => [s * X_JAMB + x, yMid + y] as Vec2),
+          zFoot,
+          Z_PORTAL_TOP,
+        ),
+        0.006,
+        1,
+      ),
+    )
+  }
+  emit(
+    'aluminum',
+    bevel(
+      prism(
+        roundedRect(2 * hx, yDepth, 0.018, 2).map(([x, y]) => [x, yMid + y] as Vec2),
+        Z_PORTAL_HEAD,
+        Z_PORTAL_TOP,
+      ),
+      0.007,
+      1,
+    ),
+  )
+  // Applied nose band, standing 2 mm clear of the head's front face: a proud
+  // trim that shares its host's plane is exactly what the clash gate catches.
+  emit(
+    'steelEdge',
+    bevel(
+      prism(
+        roundedRect(2 * hx, 0.036, 0.009, 1).map(([x, y]) => [x, Y_PORTAL1 + 0.02 + y] as Vec2),
+        Z_PORTAL_HEAD + 0.05,
+        Z_PORTAL_TOP - 0.05,
+      ),
+      0.004,
+      1,
+    ),
+  )
+  for (const yc of [Y_PORTAL0 + 0.045, Y_PORTAL1 - 0.045]) {
+    emit(
+      'dark',
+      bevel(
+        prism(
+          roundedRect(2 * hx - 0.02, 0.05, 0.008, 1).map(([x, y]) => [x, yc + y] as Vec2),
+          Z_TRACK,
+          Z_PORTAL_HEAD - 0.003,
+        ),
+        0.004,
+        1,
+      ),
+    )
+  }
+  emit(
+    'interiorGlow',
+    bevel(
+      prism(
+        roundedRect(2 * hx - 0.09, 0.12, 0.01, 1).map(([x, y]) => [x, yMid + y] as Vec2),
+        Z_TRACK + 0.004,
+        Z_TRACK + 0.034,
+      ),
+      0.004,
+      1,
+    ),
+  )
+
+  for (const s of [-1, 1]) {
+    const phi = PHI_FRONT + s * PHI_RETURN
+    // phi − π/2 puts the extrusion axis on the TANGENT, so the section's own
+    // y axis is radial. (phi lays the blade flat across the opening.)
+    const spin = phi - Math.PI / 2
+    const blade = (r0: number, r1: number, z0: number, z1: number, half = 0.05): MeshData => {
+      const md = prismYZ(
+        chamferRect(r1 - r0, z1 - z0, 0.01).map(([r, z]) => [(r0 + r1) / 2 + r, (z0 + z1) / 2 + z] as Vec2),
+        -half,
+        half,
+      )
+      rotateZ(md, spin)
+      return md
+    }
+    // Inner post lands 8 mm off the jamb mullion's cap face (r 9.092), so the
+    // return is CARRIED by the curtain wall without touching it.
+    emit('aluminum', blade(R_RETURN0, R_RETURN0 + 0.09, zFoot, Z_PORTAL_TOP))
+    emit('aluminum', blade(R_RETURN0 + 0.093, R_RETURN1, zFoot, zFoot + 0.14))
+    emit('aluminum', blade(R_RETURN0 + 0.093, R_RETURN1, 2.6, Z_PORTAL_TOP))
+    // Closing post between the sill's top and the spandrel's soffit, narrower
+    // than both so no two members share a face. Running it full height instead
+    // put its sides and its top on the same planes as the sill and spandrel —
+    // same material, still four coplanar same-facing patches per return.
+    emit('aluminum', blade(R_RETURN1 - 0.06, R_RETURN1, zFoot + 0.14, 2.6, 0.04))
+    const p0 = polar(phi, R_RETURN0 + 0.1, 0)
+    const p1 = polar(phi, R_RETURN1 - 0.064, 0)
+    for (const [z0, z1] of [[zFoot + 0.142, 2.598]] as const) {
+      glassParts.push(
+        loft(
+          [
+            [
+              [p0[0], p0[1], z0],
+              [p1[0], p1[1], z0],
+            ],
+            [
+              [p0[0], p0[1], z1],
+              [p1[0], p1[1], z1],
+            ],
+          ],
+          {},
+        ),
+      )
+    }
+  }
+}
+
+/**
+ * One sliding leaf: stiles continuous, rails butting between them, glass in the
+ * gap with a 6 mm gasket line all round, and a pull bar on two standoffs each
+ * side. Authored around its own origin (x = width, y = thickness, z = height)
+ * because `DoorsSystem` drives `panel.position` from `closedPosition`.
+ */
+function doorLeaf(mirror: number): Group {
+  const halfW = LEAF_W / 2
+  const halfT = LEAF_T / 2
+  const height = Z_LEAF1 - Z_LEAF0
+  const frame: MeshData[] = []
+  const glass: MeshData[] = []
+  const pull: MeshData[] = []
+
+  for (const s of [-1, 1]) {
+    frame.push(
+      bevel(
+        prism(
+          roundedRect(0.09, LEAF_T, 0.01, 2).map(([x, y]) => [s * (halfW - 0.045) + x, y] as Vec2),
+          0,
+          height,
+        ),
+        0.005,
+        1,
+      ),
+    )
+  }
+  for (const [zc, depth] of [
+    [0.1, 0.2],
+    [height - 0.09, 0.18],
+  ] as const) {
+    frame.push(prismYZ(chamferRect(LEAF_T, depth, 0.008).map(([y, z]) => [y, zc + z] as Vec2), -0.5, 0.5))
+  }
+  // `cabinGlass`, not `darkGlass`: darkGlass is opaque, and the whole point of
+  // this door is that the lit hall reads through it from the plaza.
+  glass.push(prismYZ(chamferRect(0.052, 2.028, 0.006).map(([y, z]) => [y, 1.22 + z] as Vec2), -0.498, 0.498))
+
+  // Pull bars on the meeting stile, both faces.
+  const hx = -mirror * 0.47
+  for (const side of [-1, 1]) {
+    const hy = side * (halfT + 0.082)
+    pull.push(
+      smoothShade(
+        tubeAlong(
+          [
+            [hx, hy, 0.92],
+            [hx, hy, 1.5],
+          ],
+          circle(0.018, 12),
+          { cap: true },
+        ),
+        SMOOTH.turned,
+      ),
+    )
+    for (const z of [0.96, 1.46]) {
+      frame.push(
+        smoothShade(
+          tubeAlong(
+            [
+              [hx, side * (halfT - 0.002), z],
+              [hx, hy - side * 0.02, z],
+            ],
+            circle(0.021, 10),
+            { cap: true, up: [0, 0, 1] },
+          ),
+          SMOOTH.turned,
+        ),
+      )
+    }
+  }
+  return buildGroup({ aluminum: frame, cabinGlass: glass, orangeTop: pull }, kitMaterials(), {
+    castShadow: false,
+    name: 'commons-leaf',
+  })
+}
+
+/**
+ * The two leaves, as `DoorSpec`s so `world/doors.ts` gives them the E prompt,
+ * the eased slide and the collider gating. They bi-part on a tangent, which is
+ * why the portal is flat: `openOffset` is a linear translation, so a leaf
+ * authored on the drum's curve could not slide along its own wall.
+ */
+function slidingLeaves(
+  services: DistrictServices,
+  world: (x: number, y: number, z: number) => Vector3,
+): void {
+  for (const s of [1, -1]) {
+    const panel = doorLeaf(s)
+    panel.name = s > 0 ? 'commons-door-east' : 'commons-door-west'
+    services.group.add(panel)
+    services.doors.push({
+      panel,
+      closedPosition: world(s * (LEAF_W / 2 - LEAF_LAP), Y_LEAF + LEAF_T / 2, Z_LEAF0),
+      openOffset: new Vector3(s * LEAF_W, 0, 0),
+      // Anchor on the approach side at handle height, far enough apart that the
+      // view-cone pick reads which leaf the guest is actually looking at.
+      anchor: world(s * 0.75, Y_PORTAL1 + 0.06, 1.06),
+      label: 'Open',
+      collider: {
+        center: world(s * 0.58, Y_LEAF + LEAF_T / 2, (Z_LEAF0 + Z_LEAF1) / 2),
+        size: new Vector3(LEAF_W + 0.05, Z_LEAF1 - Z_LEAF0 + 0.02, 0.3),
+      },
+    })
+  }
+}
+
+function portalColliders(
+  services: DistrictServices,
+  world: (x: number, y: number, z: number) => Vector3,
+  zFoot: number,
+): void {
+  // Two slabs rather than one: the crescent under the portal, and the deeper
+  // tongue through the drum's opening. A single box would put an invisible
+  // 196 mm ledge in the arcade at the flanks.
+  services.colliders.push({
+    kind: 'box',
+    center: world(0, 9.22, zFoot - 0.22),
+    size: new Vector3(4.9, 0.44, 0.44),
+  })
+  services.colliders.push({
+    kind: 'box',
+    center: world(0, 8.85, zFoot - 0.22),
+    size: new Vector3(2.4, 0.44, 0.62),
+  })
+  for (const s of [-1, 1]) {
+    services.colliders.push({
+      kind: 'box',
+      center: world(s * X_JAMB, (Y_PORTAL0 + Y_PORTAL1) / 2, (zFoot + Z_PORTAL_HEAD) / 2),
+      size: new Vector3(JAMB_W, Z_PORTAL_HEAD - zFoot, Y_PORTAL1 - Y_PORTAL0),
+    })
+    // Return screens: local +X must lie on the RADIAL, so the yaw is −phi.
+    const phi = PHI_FRONT + s * PHI_RETURN
+    const rMid = (R_RETURN0 + R_RETURN1) / 2
+    services.colliders.push({
+      kind: 'box',
+      center: world(Math.cos(phi) * rMid, Math.sin(phi) * rMid, (zFoot + Z_PORTAL_HEAD) / 2),
+      size: new Vector3(R_RETURN1 - R_RETURN0, Z_PORTAL_HEAD - zFoot, 0.12),
+      yaw: -phi,
+    })
+  }
 }
 
 // ----------------------------------------------------------------- 5. roof
@@ -1079,254 +1412,6 @@ function roof(emit: Emit, glassParts: MeshData[], leaves: Matrix4[], services: D
   }
 }
 
-// ------------------------------------------------------------- 6. interior
-
-function interior(emit: Emit, leaves: Matrix4[]): void {
-  // Hall columns: eight, from the finished floor to the soffit.
-  const hallShaft: Vec2[] = [
-    [0, 0],
-    [0.24, 0],
-    [0.24, 0.045],
-    [0.16, 0.1],
-    [0.15, Z_SOFFIT - Z_FLOOR - 0.55],
-    [0.185, Z_SOFFIT - Z_FLOOR - 0.2],
-    [0.2, Z_SOFFIT - Z_FLOOR - 0.016],
-    [0, Z_SOFFIT - Z_FLOOR - 0.016],
-  ]
-  for (let i = 0; i < 8; i++) {
-    const phi = (i * Math.PI) / 4 + Math.PI / 8
-    const column = revolve(hallShaft, 24, { capStart: true, capEnd: false, smooth: SMOOTH.turned })
-    translate(column, [Math.cos(phi) * 6.05, Math.sin(phi) * 6.05, Z_FLOOR + 0.016])
-    emit('steel', column)
-  }
-
-  // Mezzanine edge: an upstand, a glass balustrade band and a capping rail.
-  emit('cast', ringBand(R_VOID + 0.22, R_VOID, Z_L2 + 0.014, Z_L2 + 0.3, 0.018))
-  for (let i = 0; i < 32; i++) {
-    const phi = (i / 32) * Math.PI * 2
-    const post = tubeAlong(
-      [
-        [Math.cos(phi) * (R_VOID + 0.11), Math.sin(phi) * (R_VOID + 0.11), Z_L2 + 0.3],
-        [Math.cos(phi) * (R_VOID + 0.11), Math.sin(phi) * (R_VOID + 0.11), Z_L2 + 1.061],
-      ],
-      circle(0.021, 8),
-      { cap: true },
-    )
-    emit('aluminum', smoothShade(post, SMOOTH.turned))
-  }
-  const mezzRail = tubeAlong(
-    circle(R_VOID + 0.11, 64).map(([x, y]) => [x, y, Z_L2 + 1.08] as Vec3),
-    roundedRect(0.052, 0.038, 0.014, 3),
-    { closePath: true, cap: false },
-  )
-  emit('aluminum', smoothShade(mezzRail, SMOOTH.moulded))
-
-  // Cove lighting: a recessed luminous ring at each ceiling, framed by its own
-  // trim so the emissive face sits in a 55 mm reveal, never flush.
-  const cove = (rOuter: number, rInner: number, zTop: number): void => {
-    emit('dark', ringBand(rOuter + 0.16, rOuter, zTop - 0.1, zTop, 0.012))
-    emit('dark', ringBand(rInner, rInner - 0.16, zTop - 0.1, zTop, 0.012))
-    emit('interiorGlow', ringBand(rOuter - BUTT, rInner + BUTT, zTop - 0.045, zTop, 0.008))
-  }
-  // Cove radii keep clear of the r 6.05 column ring (columns flare to 0.27).
-  cove(8.0, 6.9, Z_SOFFIT)
-  cove(5.3, 4.0, Z_SOFFIT)
-  cove(9.0, 7.4, Z_HEAD_U)
-
-  // Pendant luminaires. The inner ring hangs the full height of the lantern,
-  // from the rotunda's dome soffit down into the hall — that shaft of hanging
-  // light through the mezzanine void is the whole point of the void.
-  for (const [ring, count, drop] of [
-    [3.05, 6, 6.3],
-    [6.55, 10, 1.5],
-  ] as const) {
-    for (let i = 0; i < count; i++) {
-      const phi = (i / count) * Math.PI * 2 + 0.2
-      const px = Math.cos(phi) * ring
-      const py = Math.sin(phi) * ring
-      const top = ring < 5 ? Z_LANTERN : Z_SOFFIT - 0.02
-      const cord = tubeAlong(
-        [
-          [px, py, top - drop],
-          [px, py, top],
-        ],
-        circle(0.008, 6),
-        { cap: false },
-      )
-      emit('dark', smoothShade(cord, SMOOTH.turned))
-      const shade = revolve(
-        [
-          [0, 0.34],
-          [0.07, 0.33],
-          [0.26, 0.06],
-          [0.27, 0.02],
-          [0.24, 0.02],
-          [0.06, 0.29],
-          [0, 0.3],
-        ],
-        18,
-        { capStart: false, capEnd: false, smooth: SMOOTH.turned },
-      )
-      translate(shade, [px, py, top - drop - 0.34])
-      emit('aluminum', shade)
-      const bulb = revolve(
-        [
-          [0, 0],
-          [0.09, 0.012],
-          [0.09, 0.05],
-          [0, 0.062],
-        ],
-        14,
-        { capStart: true, capEnd: false },
-      )
-      translate(bulb, [px, py, top - drop - 0.36])
-      emit('interiorGlow', bulb)
-    }
-  }
-
-  // Furniture groupings: five tables with three chairs each, plus a counter
-  // run. Simplified but real forms — a lathe-turned pedestal, a moulded top, a
-  // turned-leg chair — because they are read at 1 m through clear glass.
-  // Groups keep clear of the counter arc (205°–250°) and stand 0.85 m off the
-  // column ring, so no chair is ever inside a column.
-  const groups: Array<[number, number]> = [
-    [7.6, 25],
-    [7.7, 88],
-    [7.6, 152],
-    [7.7, 288],
-    [7.6, 332],
-  ]
-  for (const [r, deg] of groups) {
-    const phi = (deg * Math.PI) / 180
-    const cx = Math.cos(phi) * r
-    const cy = Math.sin(phi) * r
-    table(emit, cx, cy, Z_FLOOR + 0.016)
-    for (let k = 0; k < 3; k++) {
-      const a = phi + Math.PI + (k - 1) * 1.15
-      chair(emit, cx + Math.cos(a) * 0.85, cy + Math.sin(a) * 0.85, Z_FLOOR + 0.016, a + Math.PI)
-    }
-  }
-  // Service counter: an arc of casework with a proud worktop.
-  const cA = (Math.PI * 205) / 180
-  const cB = (Math.PI * 250) / 180
-  emit('dark', sectorBand(7.3, 6.5, cA, cB, Z_FLOOR + 0.016, Z_FLOOR + 0.9, 0.016))
-  emit('deck', sectorBand(7.42, 6.42, cA - 0.012, cB + 0.012, Z_FLOOR + 0.9, Z_FLOOR + 0.945, 0.018))
-  emit(
-    'signageGlow',
-    sectorBand(7.318, 7.304, cA + 0.02, cB - 0.02, Z_FLOOR + 0.06, Z_FLOOR + 0.1, 0.004),
-  )
-
-  // Two potted trees flanking the entrance, seen straight through the doors.
-  for (const s of [-1, 1]) {
-    const phi = PHI_FRONT + s * 0.24
-    const px = Math.cos(phi) * 7.4
-    const py = Math.sin(phi) * 7.4
-    const pot = revolve(
-      [
-        [0, 0],
-        [0.36, 0],
-        [0.4, 0.08],
-        [0.42, 0.5],
-        [0.44, 0.56],
-        [0.4, 0.6],
-        [0.36, 0.56],
-        [0, 0.54],
-      ],
-      24,
-      { capStart: true, capEnd: false, smooth: SMOOTH.turned },
-    )
-    translate(pot, [px, py, Z_FLOOR + 0.016])
-    emit('cast', pot)
-    for (let i = 0; i < 14; i++) {
-      const a = (i / 14) * Math.PI * 2
-      const rr = 0.12 + (i % 3) * 0.1
-      const matrix = new Matrix4()
-      matrix.compose(
-        new Vector3(
-          COMMONS.x + px + Math.cos(a) * rr,
-          ORIGIN_Y() + Z_FLOOR + 0.57 + (i % 4) * 0.22,
-          COMMONS.z + py + Math.sin(a) * rr,
-        ),
-        new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), a),
-        new Vector3().setScalar(0.85 + (i % 5) * 0.12),
-      )
-      leaves.push(matrix)
-    }
-  }
-
-  // Mezzanine seating: a lighter ring of tables against the upper glazing.
-  for (let i = 0; i < 6; i++) {
-    const phi = (i / 6) * Math.PI * 2 + 0.5
-    table(emit, Math.cos(phi) * 8.3, Math.sin(phi) * 8.3, Z_L2 + 0.014)
-    chair(emit, Math.cos(phi) * 7.5, Math.sin(phi) * 7.5, Z_L2 + 0.014, phi)
-  }
-}
-
-function table(emit: Emit, x: number, y: number, z: number): void {
-  const foot = revolve(
-    [
-      [0, 0],
-      [0.27, 0],
-      [0.27, 0.024],
-      [0.08, 0.062],
-      [0.07, 0.09],
-      [0, 0.09],
-    ],
-    20,
-    { capStart: true, capEnd: true, smooth: SMOOTH.turned },
-  )
-  translate(foot, [x, y, z])
-  emit('dark', foot)
-  const stem = revolve(
-    [
-      [0, 0.09],
-      [0.055, 0.09],
-      [0.048, 0.42],
-      [0.05, 0.68],
-      [0, 0.68],
-    ],
-    16,
-    { capStart: true, capEnd: true, smooth: SMOOTH.turned },
-  )
-  translate(stem, [x, y, z])
-  emit('aluminum', stem)
-  const top = prism(circle(0.43, 32, x, y), z + 0.68, z + 0.715)
-  bevel(top, 0.014, 2)
-  emit('deck', top)
-}
-
-function chair(emit: Emit, x: number, y: number, z: number, yaw: number): void {
-  const leg: Vec2[] = [
-    [0, 0],
-    [0.026, 0],
-    [0.021, 0.2],
-    [0.016, 0.42],
-    [0, 0.42],
-  ]
-  for (const [lx, ly] of [
-    [0.17, 0.17],
-    [-0.17, 0.17],
-    [0.17, -0.17],
-    [-0.17, -0.17],
-  ] as const) {
-    const l = revolve(leg, 10, { capStart: true, capEnd: true, smooth: SMOOTH.turned })
-    translate(l, [lx, ly, 0])
-    rotateZ(l, yaw)
-    translate(l, [x, y, z])
-    emit('dark', l)
-  }
-  const pan = prism(roundedRect(0.44, 0.42, 0.055, 3), 0.42, 0.465)
-  bevel(pan, 0.01, 2)
-  rotateZ(pan, yaw)
-  translate(pan, [x, y, z])
-  emit('fabricRust', pan)
-  const back = roundedBoxMesh([-0.2, -0.216, 0.465, 0.2, -0.164, 0.83], 0.018, 2)
-  rotX(back, 0.13, [0, -0.19, 0.465])
-  rotateZ(back, yaw)
-  translate(back, [x, y, z])
-  emit('fabricRust', back)
-}
-
 // -------------------------------------------------------- 7. the surrounds
 
 function surroundings(
@@ -1474,15 +1559,48 @@ function surroundings(
 
 // ------------------------------------------------------------ 8. colliders
 
+/**
+ * A run of chord boxes along an arc: local +X on the tangent, local +Z on the
+ * outward radial. Rapier has no annulus and no hollow cylinder, so a curtain
+ * wall the guest can stand either side of is an n-gon of cuboids.
+ */
+function wallRingColliders(
+  services: DistrictServices,
+  world: (x: number, y: number, z: number) => Vector3,
+  rMid: number,
+  thickness: number,
+  z0: number,
+  z1: number,
+  a0: number,
+  a1: number,
+  maxChord: number,
+): void {
+  const count = Math.max(1, Math.ceil((Math.abs(a1 - a0) * rMid) / maxChord))
+  const step = (a1 - a0) / count
+  for (let i = 0; i < count; i++) {
+    const a = a0 + step * (i + 0.5)
+    services.colliders.push({
+      kind: 'box',
+      center: world(Math.cos(a) * rMid, Math.sin(a) * rMid, (z0 + z1) / 2),
+      // The chord is padded so consecutive boxes overlap and the wall has no
+      // needle-thin seams for the capsule to squeeze through.
+      size: new Vector3(2 * rMid * Math.sin(step / 2) + 0.1, z1 - z0, thickness),
+      yaw: Math.atan2(-Math.cos(a), -Math.sin(a)),
+    })
+  }
+}
+
 function colliders(services: DistrictServices, world: (x: number, y: number, z: number) => Vector3): void {
-  // The sealed drum. The arcade OUTSIDE the glazing stays walkable — that is
-  // the point of the setback ground floor.
-  services.colliders.push({
-    kind: 'cylinder',
-    center: world(0, 0, (Z_ROOF + 0.2) / 2),
-    halfHeight: (Z_ROOF + 0.2) / 2,
-    radius: R_GLASS_G + 0.3,
-  })
+  // The drum is a WALL, not a solid: the hall inside is walkable and the only
+  // way through is the portal. The ground-storey ring therefore breaks over the
+  // two entrance bays, and the doors' own DoorSpec colliders gate that gap.
+  // (This replaced a single r 9.18 cylinder that made the building a rock.)
+  wallRingColliders(services, world, R_GLASS_G + 0.22, 0.24, 0, Z_SOFFIT, DOOR_A1, DOOR_A0 + Math.PI * 2, 2.2)
+  // Upper storey: the gallery's guard AND the roof parapet in one ring, since
+  // the glazing (10.8), the parapet (11.3) and the roof rail all stand within
+  // 0.3 m of each other in plan.
+  wallRingColliders(services, world, R_GLASS_U + 0.22, 0.28, Z_L2, Z_RAIL, 0, Math.PI * 2, 2.6)
+
   for (let i = 0; i < 12; i++) {
     const phi = (15 * Math.PI) / 180 + (i * Math.PI) / 6
     services.colliders.push({
@@ -1507,4 +1625,19 @@ export const COMMONS_METRICS = {
   bandRadius: R_BAND,
   levels: { sill: Z_SILL, soffit: Z_SOFFIT, level2: Z_L2, head: Z_HEAD_U, roof: Z_ROOF },
   bays: SEG_BAY,
+  /**
+   * The entrance contract, in the drum's local frame. `clearWidth` is what the
+   * two leaves uncover; `leafPlane` is their inner face's distance from the
+   * drum centre along `PHI_FRONT`. Anything approaching the Commons (paving,
+   * signage, a robot path) should read these rather than re-deriving them.
+   */
+  door: {
+    frontAngle: PHI_FRONT,
+    openingAngles: [DOOR_A0, DOOR_A1] as const,
+    clearWidth: 2 * CLEAR_HALF,
+    clearHeight: Z_LEAF1 - Z_LEAF0,
+    leafPlane: Y_LEAF,
+    porchFront: Y_PORCH,
+    floor: Z_FLOOR + 0.016,
+  },
 } as const

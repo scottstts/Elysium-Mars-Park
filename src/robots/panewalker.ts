@@ -18,6 +18,7 @@ import { robotMaterials } from './robotMaterials'
 import {
   DOME_CENTER_Y,
   DOME_SPHERE_RADIUS,
+  domeCraneRailLift,
   PANEWALKER_THETA_MAX,
   PANEWALKER_THETA_MIN,
 } from '../dome/latticeField'
@@ -38,7 +39,11 @@ import {
  * truss must be modelled on the φ = 0 meridian.
  */
 
-const LIFT_LOWER = 0.5 // truss lower chord stand-off from the glass, metres
+// Truss lower chord stand-off from the glass: the sparse-gridshell crane rail
+// now FLIES over the deep rib/collar line (`domeCraneRailLift`), so the chord
+// clears the higher of the two rail heads plus a 0.22 m running margin.
+const LIFT_LOWER =
+  Math.max(domeCraneRailLift(PANEWALKER_THETA_MIN), domeCraneRailLift(PANEWALKER_THETA_MAX)) + 0.22
 const TRUSS_DEPTH = 1.35 // lower chord -> upper chord
 const TRUSS_HALF_WIDTH = 0.8 // half the truss width in the φ direction
 const BAYS = 16
@@ -240,16 +245,19 @@ function buildRailShoe(forge: Forge, theta: number, outward: number): void {
   // seed leaves the box standing vertical on a 35 deg slope and the whole
   // shoe reads as a girder dropped on the dome rather than fitted to it.
   const normal: V3 = [Math.sin(theta), Math.cos(theta), 0]
+  // Everything in the shoe re-bases on the flying crane rail at this ring:
+  // wheel treads run AT the rail head, shoe beams hang 0.22 m under it.
+  const railLift = domeCraneRailLift(theta)
   for (const acrossRib of [-0.46, 0.46]) {
     const path = Array.from({ length: 9 }, (_, k) =>
-      point(acrossRib, 0.3, (k / 8 - 0.5) * halfSpan * 2),
+      point(acrossRib, railLift - 0.22, (k / 8 - 0.5) * halfSpan * 2),
     )
     forge.add('paint', tube(path, roundedRect(0.4, 0.3, 0.06, 2), { smooth: 32, up: normal }))
   }
   // Cross ties bind the two rails into one shoe, on the same section frame.
   for (const end of [-1, 1] as const) {
     const tie = Array.from({ length: 5 }, (_, k) =>
-      point(-0.46 + (k / 4) * 0.92, 0.3, end * halfSpan * 0.86),
+      point(-0.46 + (k / 4) * 0.92, railLift - 0.22, end * halfSpan * 0.86),
     )
     forge.add('alloy', tube(tie, roundedRect(0.26, 0.24, 0.05, 2), { smooth: 32, up: normal }))
   }
@@ -258,12 +266,12 @@ function buildRailShoe(forge: Forge, theta: number, outward: number): void {
   for (const across of [-TRUSS_HALF_WIDTH, TRUSS_HALF_WIDTH]) {
     const phi = across / ringRadius
     forge.add('paint', pipe(
-      [point(0, 0.4, phi), point(0, LIFT_LOWER + 0.04, phi)],
+      [point(0, railLift - 0.12, phi), point(0, LIFT_LOWER + 0.04, phi)],
       0.085,
       { seg: 8, smooth: 40 },
     ))
     forge.add('alloy', pipe(
-      [point(outward * 0.42, 0.4, phi), point(outward * 0.06, LIFT_LOWER + 0.9, phi * 0.6)],
+      [point(outward * 0.42, railLift - 0.12, phi), point(outward * 0.06, LIFT_LOWER + 0.9, phi * 0.6)],
       0.05,
       { seg: 6, smooth: 40 },
     ))
@@ -273,7 +281,7 @@ function buildRailShoe(forge: Forge, theta: number, outward: number): void {
   for (const bogie of [-1, 1] as const) {
     const phi = bogie * halfSpan * 0.55
     for (const acrossRib of [-0.46, 0.46]) {
-      const at = point(acrossRib, 0.3, phi)
+      const at = point(acrossRib, railLift - 0.22, phi)
       const frame = filletBox([0, 0, 0], [0.3, 0.26, 1.0], 0.05, { seg: 2, smooth: 30 })
       rotateZ(frame, -theta)
       rotateY(frame, -phi)
@@ -296,7 +304,11 @@ function buildRailShoe(forge: Forge, theta: number, outward: number): void {
         rotateZ(wheel, Math.PI / 2)
         rotateZ(wheel, -theta)
         rotateY(wheel, -phi)
-        translate(wheel, point(acrossRib - Math.sign(acrossRib) * 0.12, 0.11, phi + along / ringRadius))
+        // Captive rollers hugging the single flying crane rail (r 0.08 on
+        // the ring centreline): faces graze the rail sides with a 10 mm
+        // lap. The old ±0.34 stance flanked a rail that no longer exists
+        // there — a 0.2 m air gap each side (experience-audit finding).
+        translate(wheel, point(Math.sign(acrossRib) * 0.125, railLift, phi + along / ringRadius))
         forge.add('dark', wheel)
       }
       if (bogie > 0) {
@@ -314,17 +326,17 @@ function buildRailShoe(forge: Forge, theta: number, outward: number): void {
         rotateZ(can, Math.PI / 2)
         rotateZ(can, -theta)
         rotateY(can, -phi)
-        translate(can, point(acrossRib + Math.sign(acrossRib) * 0.22, 0.18, phi))
+        translate(can, point(acrossRib + Math.sign(acrossRib) * 0.22, railLift + 0.07, phi))
         forge.add('dark', can)
       }
     }
   }
 
-  // Warning beacon at each shoe end, clear of the truss.
+  // Warning beacon at each shoe end, clear of the truss, riding the shoe.
   for (const end of [-1, 1] as const) {
     const phi = end * halfSpan * 0.8
-    const foot = point(0, 0.5, phi)
-    const head = point(0, 0.95, phi)
+    const foot = point(0, railLift + 0.2, phi)
+    const head = point(0, railLift + 0.65, phi)
     forge.add('dark', pipe([foot, head], 0.05, { seg: 8 }))
     forge.add('beacon', revolveY(
       [

@@ -6,6 +6,7 @@ import {
   BEVEL,
   MeshData,
   SMOOTH,
+  annularPrism,
   aperturedPrism,
   bevel,
   ccw,
@@ -16,6 +17,7 @@ import {
   prism,
   prismXZ,
   revolve,
+  rotX,
   rotateZ,
   roundedRect,
   smoothShade,
@@ -703,7 +705,7 @@ function buildAmphitheater(services: DistrictServices): void {
     const fz = Math.cos(angle) * sign
     const plate = new Mesh(
       new PlaneGeometry(2.1, 0.42),
-      signageMaterial(['ROWS A–F · 620'], { background: '#2c2823', widthPx: 640 }),
+      signageMaterial(['ROWS A–F · 620'], { background: '#2c2823', widthPx: 640, aspect: 2.1 / 0.42 }),
     )
     plate.position.set(
       BOWL.x + Math.cos(angle) * stencilRadius + fx * 0.4,
@@ -942,14 +944,30 @@ function buildStage(services: DistrictServices): void {
         ),
       ])
     }
-    const [sx, sz] = local((front - 0.4 + back + 1.1) / 2, side * (halfWidth + 1.2))
-    alignedBox(services, new Vector3(sx, STAGE.y + 0.5, sz), new Vector3(6.3, 1, 2.4), facing)
+    // The flight must COLLIDE as steps: the old single 1 m box was an
+    // unclimbable wall and the stage was unreachable on foot
+    // (traversal-audit find). Seven riser boxes — 0.15 each, trivially
+    // inside the 0.42 autostep — climb with the visual slabs.
+    for (let k = 0; k < 7; k++) {
+      const lat = side * (halfWidth + 2.35 - k * 0.3 - 0.15)
+      const [kx, kz] = local((front - 0.4 + back + 1.1) / 2, lat)
+      const top = STAGE.y + (k + 1) * 0.15
+      alignedBox(
+        services,
+        new Vector3(kx, (top + STAGE.y - 0.1) / 2, kz),
+        new Vector3(6.3, top - (STAGE.y - 0.1), 0.3),
+        facing,
+      )
+    }
   }
 
+  // Height 1.1, centred 0.55 under deckTop → collider TOP lands exactly on
+  // the deck plane. The old 1.6 overshot by 0.25 and the player floated a
+  // hand's width above the boards.
   alignedBox(
     services,
     new Vector3(STAGE.x, deckTop - 0.55, STAGE.z),
-    new Vector3(7.9, 1.6, 13),
+    new Vector3(7.9, 1.1, 13),
     facing,
   )
   alignedBox(
@@ -979,6 +997,7 @@ function buildStage(services: DistrictServices): void {
       background: '#25231f',
       accent: '#c94f1d',
       widthPx: 768,
+      aspect: 1.62 / 0.62,
     }),
   )
   totem.position.set(tx + fx * 0.142, ty + 1.68, tz + fz * 0.142)
@@ -1320,11 +1339,28 @@ function buildOverlook(services: DistrictServices): void {
 
   const sign = new Mesh(
     new PlaneGeometry(2.3, 0.48),
-    signageMaterial(['OVERLOOK LOUNGE'], { background: '#25231f', accent: '#c94f1d', widthPx: 640 }),
+    signageMaterial(['OVERLOOK LOUNGE'], { background: '#25231f', accent: '#c94f1d', widthPx: 640, aspect: 2.3 / 0.48 }),
   )
   sign.position.set(doorMidX + doorFx * 0.2, shell.apron + 2.82, doorMidZ + doorFz * 0.2)
   sign.rotation.y = plateYaw(doorFx, doorFz)
   services.group.add(sign)
+  // Two brackets back to the lintel. The plate projects 0.2 m OUTSIDE the
+  // glazing line while the head casting stops at -0.16, so it hung 0.36 m off
+  // the building on nothing at all.
+  for (const s of [-1, 1]) {
+    const stay = bevel(
+      prism(roundedRect(0.05, 0.37, 0.012, 1), shell.apron + 2.795, shell.apron + 2.845),
+      BEVEL.carcass,
+      1,
+    )
+    rotateZ(stay, doorYaw)
+    translate(stay, [
+      doorMidX + doorUx * s * 0.6 + doorFx * 0.025,
+      doorMidZ + doorUz * s * 0.6 + doorFz * 0.025,
+      0,
+    ])
+    parts.push(['steelEdge', stay])
+  }
   lensBar(
     services,
     [doorMidX + doorFx * 0.19, doorMidZ + doorFz * 0.19, shell.apron + 3.1],
@@ -1772,7 +1808,7 @@ function buildPlayground(services: DistrictServices): void {
   parts.push(['cast', stone])
   const plaque = new Mesh(
     new PlaneGeometry(0.86, 0.34),
-    signageMaterial(['DONATED BY THE CREW OF ARES VII'], { background: '#2b2723', widthPx: 512 }),
+    signageMaterial(['DONATED BY THE CREW OF ARES VII'], { background: '#2b2723', widthPx: 512, aspect: 0.86 / 0.34 }),
   )
   plaque.position.set(plinth.x + pfx * 0.192, plinth.y + 0.68, plinth.z + pfz * 0.192)
   plaque.rotation.y = plateYaw(pfx, pfz)
@@ -1943,37 +1979,250 @@ function buildFirstTreePlaza(services: DistrictServices): void {
     })
   }
 
-  // ---- founding plaque on a canted cast desk.
+  // ---- founding plaque — a cast dedication lectern, designed in the round.
+  //
+  // It used to be one rounded-rect prism with the plaque laid flat on its top,
+  // and from the north half of the plaza — which only ever sees its BACK — it
+  // read as a blank slab. It is a real profiled casting now: a set-back toe
+  // course, a cyma-moulded base, a battered die carrying a sunk fielded panel
+  // on all four faces, a corniced cap with a drip groove under its oversail,
+  // and a canted desk. The north approach gets its own inscription, bedded in
+  // the back panel behind a cast bezel on four fixing bosses.
+  //
+  // Authored in a LOCAL frame — origin on the plan centre at grade, +X across
+  // the face, +Y toward the BACK, +Z up — and moved onto the plaza once, at
+  // the end. EVERY solid is slot 'cast': the desk, both bezels and the eight
+  // bosses deliberately bury themselves in their host, and a same-slot bury
+  // welds where a cross-slot one is a clash.
   const plaqueAngle = 0.62
   const px = center.x + Math.cos(plaqueAngle) * (ring + 1.05)
   const pz = center.z + Math.sin(plaqueAngle) * (ring + 1.05)
   const pfx = -Math.cos(plaqueAngle)
   const pfz = -Math.sin(plaqueAngle)
-  const desk = bevel(
-    prism(roundedRect(1.15, 0.5, 0.04, 3), plaza - 0.3, plaza + 0.74),
-    BEVEL.carcass,
-    2,
-  )
-  rotateZ(desk, crossYaw(pfx, pfz))
-  translate(desk, [px, pz, 0])
-  parts.push(['cast', desk])
-  const plaque = new Mesh(
-    new PlaneGeometry(0.9, 0.42),
-    signageMaterial(['THE FIRST TREE', 'GINKGO BILOBA · PLANTED SOL 1', 'FOR THE CITY TO COME'], {
-      background: '#2b2723',
+  const plinthYaw = crossYaw(pfx, pfz)
+  // Its own grade, sampled where it stands: this is 6.5 m off the point the
+  // ring is levelled from, and `interiorHeight` is not flat across a pad.
+  const grade = interiorHeight(px, pz)
+  /** Local (across, back, up) -> world: `rotateZ(plinthYaw)` sends local +X to
+   *  (−pfz, pfx) and local +Y to (−pfx, −pfz). Seats the two applied plates. */
+  const localPoint = (lx: number, ly: number, lz: number): Vector3 =>
+    new Vector3(px - lx * pfz - ly * pfx, grade + lz, pz + lx * pfx - ly * pfz)
+  const settle = (md: MeshData): MeshData =>
+    translate(rotateZ(md, plinthYaw), [px, pz, grade])
+
+  // The plan is AUTHORED, never offset: `polyOffset` on a rounded corner by
+  // anything near its radius collapses the arc, and every level has to carry
+  // the same vertex count so one loft can hold a battered face and a sunk
+  // field at once. `o` pushes the four faces out from nominal (corner centres
+  // stay put, so the radius follows); `panel` swaps the face's 2 mm hollow for
+  // the 22 mm sunk field. Neither depth is ever zero — four collinear points
+  // on a capped ring ear-clip into zero-area triangles.
+  const PW = 1.24
+  const PD = 0.56
+  const PR = 0.085
+  const PANEL_D = 0.022
+  const HX = PW / 2 - PR
+  const HY = PD / 2 - PR
+  const plan = (o: number, panel: boolean): Vec2[] => {
+    const r = PR + o
+    const fx = PW / 2 + o
+    const fy = PD / 2 + o
+    const sh = panel ? 0 : 0.001
+    const d = panel ? PANEL_D : 0.002
+    const out: Vec2[] = []
+    const arc = (cx: number, cy: number, a0: number): void => {
+      for (let k = 0; k <= 6; k++) {
+        const a = a0 + (Math.PI / 2) * (k / 6)
+        out.push([cx + r * Math.cos(a), cy + r * Math.sin(a)])
+      }
+    }
+    // Six stations per run: arc end, shoulder, field, field, shoulder, arc end.
+    // The 18 mm shoulder-to-field return is deliberate — a 30 mm one splays at
+    // 36 deg, which smooths straight into the face at SMOOTH.cast and turns the
+    // panel into a dish. 18 mm returns at 51 deg and creases.
+    arc(HX, HY, 0)
+    out.push([0.47, fy - sh], [0.452, fy - d], [-0.452, fy - d], [-0.47, fy - sh])
+    arc(-HX, HY, Math.PI / 2)
+    out.push([-fx + sh, 0.165], [-fx + d, 0.147], [-fx + d, -0.147], [-fx + sh, -0.165])
+    arc(-HX, -HY, Math.PI)
+    out.push([-0.47, -fy + sh], [-0.452, -fy + d], [0.452, -fy + d], [0.47, -fy + sh])
+    arc(HX, -HY, Math.PI * 1.5)
+    out.push([fx - sh, -0.165], [fx - d, -0.147], [fx - d, 0.147], [fx - sh, 0.165])
+    return out
+  }
+
+  // The die is battered 18 mm over its 554 mm, so the panel floor — a constant
+  // depth in from its own face — leans with it, and the plate that beds on it
+  // has to lean by the same angle rather than stand plumb in a wedge of air.
+  const DIE0 = 0.168
+  const DIE1 = 0.722
+  const dieO = (z: number): number => -0.004 - (0.018 * (z - DIE0)) / (DIE1 - DIE0)
+  const batter = Math.atan2(0.018, DIE1 - DIE0)
+  const shaftLevels: Array<[number, number, boolean]> = [
+    [-0.3, -0.055, false], // buried shank; capStart closes the pour's foot
+    [-0.06, -0.055, false],
+    [-0.03, -0.026, false], // toe splay, still 30 mm under the paving
+    [0.04, -0.026, false], //  toe course set back 26 mm -> shadow line at grade
+    [0.052, -0.008, false], // base cyma springs
+    [0.064, 0.008, false],
+    [0.08, 0.018, false], //   base crown, 18 mm proud of the die's foot
+    [0.128, 0.018, false], //  base course upright
+    [0.144, 0.012, false], //  base weathering
+    [DIE0, dieO(DIE0), false], //  the die springs
+    [0.184, dieO(0.184), false], // plain die skirt below the panel
+    [0.206, dieO(0.206), true], //  panel sill: 22 mm of stop for 24 mm of sink
+    [0.684, dieO(0.684), true], //  panel head
+    [0.706, dieO(0.706), false], // stop back out to the face
+    [DIE1, dieO(DIE1), false], //   die top
+    [0.7255, -0.002, false], // cornice soffit runs out over the die
+    [0.7315, -0.002, false], // drip groove: inner wall, 6 mm
+    [0.7315, 0.006, false], //  drip groove: roof, 8 mm
+    [0.7255, 0.006, false], //  drip groove: outer wall
+    [0.7285, 0.026, false], // soffit out to the corona's arris
+    [0.748, 0.03, false], //   corona swells 4 mm
+    [0.766, 0.026, false], //  ... and returns
+    [0.78, 0.012, false], //   top bed; capEnd closes it
+  ]
+  parts.push([
+    'cast',
+    settle(
+      smoothShade(
+        loft(
+          shaftLevels.map(([z, o, panel]) =>
+            plan(o, panel).map(([x, y]) => [x, y, z] as Vec3),
+          ),
+          { closeV: true, capStart: true, capEnd: true },
+        ),
+        SMOOTH.cast,
+      ),
+    ),
+  ])
+
+  // The canted desk. Its bottom ring sits 24 mm INSIDE the cornice and its
+  // splayed foot climbs out 12 mm above the top bed, so the two never share a
+  // plane; the top two rings ride one tilted plane, which keeps `capEnd` a
+  // real planar n-gon.
+  const CANT = (20 * Math.PI) / 180
+  const tanCant = Math.tan(CANT)
+  const DESK_O = -0.02
+  // Front lip 838 mm, back edge 1.027 m: a reading angle, not a table.
+  const deskZ0 = 0.838 + (PD / 2 + DESK_O) * tanCant
+  const deskTop = (y: number): number => deskZ0 + y * tanCant
+  parts.push([
+    'cast',
+    settle(
+      smoothShade(
+        loft(
+          [
+            plan(-0.044, false).map(([x, y]) => [x, y, 0.756] as Vec3),
+            plan(DESK_O, false).map(([x, y]) => [x, y, 0.792] as Vec3),
+            plan(DESK_O, false).map(([x, y]) => [x, y, deskTop(y)] as Vec3),
+            plan(-0.032, false).map(([x, y]) => [x, y, deskTop(y) + 0.011] as Vec3),
+          ],
+          { closeV: true, capStart: true, capEnd: true },
+        ),
+        SMOOTH.cast,
+      ),
+    ),
+  ])
+
+  // Applied-plate hardware. A bezel beds 4 mm into its host and stands proud,
+  // so the plate lands in a real sinking instead of on a face; the bosses bed
+  // into the bezel and their heads stay inside the panel mouth.
+  const bezel = (w: number, h: number, frame: number, z1: number): MeshData =>
+    smoothShade(
+      annularPrism(
+        roundedRect(w, h, 0.02, 3),
+        roundedRect(w - 2 * frame, h - 2 * frame, 0.014, 3),
+        -0.004,
+        z1,
+        0.003,
+        2,
+      ),
+      SMOOTH.cast,
+    )
+  const fixingBoss = (): MeshData =>
+    revolve(
+      [
+        [0, 0.001],
+        [0.0115, 0.001],
+        [0.0115, 0.011],
+        [0.0092, 0.0152],
+        [0.005, 0.0178],
+        [0, 0.0184],
+      ],
+      12,
+      { smooth: SMOOTH.tight },
+    )
+
+  // Back inscription: the field floor at mid-panel, and the rotation that
+  // stands a part authored in the (across, up, out) face frame onto it —
+  // `rotX(batter − π/2)` sends face +Z to the battered outward normal.
+  const backZ = 0.5
+  const backY = PD / 2 + dieO(backZ) - PANEL_D
+  const ontoBack = (md: MeshData): MeshData =>
+    translate(rotX(md, batter - Math.PI / 2), [0, backY, backZ])
+  parts.push(['cast', settle(ontoBack(bezel(0.8, 0.28, 0.035, 0.013)))])
+  for (const bx of [-1, 1]) {
+    for (const by of [-1, 1]) {
+      parts.push([
+        'cast',
+        // Head tops out 2.6 mm inside the panel mouth, never proud of the die.
+        settle(ontoBack(translate(fixingBoss(), [bx * 0.3825, by * 0.1225, 0.001]))),
+      ])
+    }
+  }
+  const backPlate = new Mesh(
+    new PlaneGeometry(0.71, 0.2),
+    signageMaterial(['GINKGO BILOBA', 'PLANTED SOL 1'], {
+      background: '#26231f',
       widthPx: 512,
+      aspect: 0.71 / 0.2,
     }),
   )
-  // Laid FLAT on the desk, 2 mm proud. Canted on a horizontal top, its lower
-  // half simply disappears into the casting.
-  plaque.position.set(px, plaza + 0.746, pz)
-  plaque.rotation.set(-Math.PI / 2, 0, plateYaw(pfx, pfz))
+  // 3 mm proud of the field floor along ITS normal, and leaning with the die.
+  backPlate.position.copy(
+    localPoint(0, backY + 0.003 * Math.cos(batter), backZ + 0.003 * Math.sin(batter)),
+  )
+  backPlate.rotation.order = 'YXZ'
+  backPlate.rotation.set(-batter, plateYaw(-pfx, -pfz), 0)
+  services.group.add(backPlate)
+
+  // The founding plaque, on the canted top. `rotX(CANT)` maps the same face
+  // frame onto the tilted plane; the plate's own YXZ euler reduces to this
+  // file's flat-plate convention at CANT = 0.
+  const deskSurface = deskTop(0) + 0.011
+  const ontoDesk = (md: MeshData): MeshData => translate(rotX(md, CANT), [0, 0, deskSurface])
+  parts.push(['cast', settle(ontoDesk(bezel(1.06, 0.46, 0.03, 0.012)))])
+  for (const bx of [-1, 1]) {
+    for (const by of [-1, 1]) {
+      parts.push([
+        'cast',
+        settle(ontoDesk(translate(fixingBoss(), [bx * 0.515, by * 0.215, 0.003]))),
+      ])
+    }
+  }
+  const plaque = new Mesh(
+    new PlaneGeometry(0.96, 0.36),
+    signageMaterial(['THE FIRST TREE', 'GINKGO BILOBA · PLANTED SOL 1', 'FOR THE CITY TO COME'], {
+      background: '#2b2723',
+      widthPx: 768,
+      aspect: 0.96 / 0.36,
+    }),
+  )
+  plaque.position.copy(
+    localPoint(0, -0.003 * Math.sin(CANT), deskSurface + 0.003 * Math.cos(CANT)),
+  )
+  plaque.rotation.order = 'YXZ'
+  plaque.rotation.set(CANT - Math.PI / 2, plateYaw(pfx, pfz), 0)
   services.group.add(plaque)
+  // Footprint is the cornice's oversail (1.30 x 0.62), height the desk's back
+  // edge at 1.038 m.
   alignedBox(
     services,
-    new Vector3(px, plaza + 0.4, pz),
-    new Vector3(1.2, 1.1, 0.6),
-    crossYaw(pfx, pfz),
+    new Vector3(px, grade + 0.52, pz),
+    new Vector3(1.34, 1.1, 0.66),
+    plinthYaw,
   )
 
   // ---- the name stone.
@@ -2015,7 +2264,7 @@ function buildFirstTreePlaza(services: DistrictServices): void {
   parts.push(['dark', field])
   const name = new Mesh(
     new PlaneGeometry(2.0, 0.44),
-    signageMaterial(['ELYSIUM COMMONS · EST. SOL 190'], { background: '#26231f', widthPx: 900 }),
+    signageMaterial(['ELYSIUM COMMONS · EST. SOL 190'], { background: '#26231f', widthPx: 900, aspect: 2.0 / 0.44 }),
   )
   name.position.set(sx + sfx * 0.288, plaza + 0.67, sz + sfz * 0.288)
   name.rotation.y = plateYaw(sfx, sfz)

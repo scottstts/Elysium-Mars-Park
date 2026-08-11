@@ -182,7 +182,7 @@ function emitInfoStake(
   // Plate body, tilted back toward the reader.
   const tilt = -0.62
   const plateCenter = new Vector3(x, groundY + height, z)
-  const plate = new Mesh(new PlaneGeometry(0.3, 0.19), signageMaterial(lines, { widthPx: 512 }))
+  const plate = new Mesh(new PlaneGeometry(0.3, 0.19), signageMaterial(lines, { widthPx: 512, aspect: 0.3 / 0.19 }))
   plate.position.copy(plateCenter)
   plate.rotation.set(tilt, yaw, 0, 'YXZ')
   plate.name = 'garden-stake-face'

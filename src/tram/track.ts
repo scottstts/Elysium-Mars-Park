@@ -230,6 +230,19 @@ function nearestS(curve: CatmullRomCurve3, length: number, target: Vector3): num
       best = s
     }
   }
+  // Refine to 1 cm: the coarse pass quantizes to ~1 m here, and the portal
+  // handoff S is a POSE-CONTINUITY datum — a metre of error teleports the
+  // docking train (and the seated camera) by that much.
+  const span = length / 600
+  for (let s = best - span; s <= best + span; s += 0.01) {
+    const sm = ((s % length) + length) % length
+    const p = curve.getPointAt(sm / length)
+    const d = Math.hypot(p.x - target.x, p.z - target.z)
+    if (d < bestDistance) {
+      bestDistance = d
+      best = sm
+    }
+  }
   return best
 }
 
@@ -1413,9 +1426,16 @@ function buildSidePlatform(
     const bottom = platformGroundY(spec, u) - 0.4
     const centre = platformPoint(spec, u, spec.depth / 2, (deck + bottom) / 2)
     world.createCollider(
+      // `yawAlong(d)` puts local +Z on `d`. The three boxes' CENTRES march
+      // along the arc, so the arc half-chunk (`arcLength / 6`) is the local +Z
+      // extent and the depth is local +X — i.e. the frame is the TANGENT, not
+      // the outward radial. Under `platformOutward` the deck came out 90 deg
+      // round: `arcLength / 3` deep, `depth` long, which left a hole in the
+      // deck at each of the two seams (measured 0.6 m at Overlook, 1.0 m at
+      // Farmside) that a player drops straight through.
       api.ColliderDesc.cuboid(spec.depth / 2, (deck - bottom) / 2, spec.arcLength / 6)
         .setTranslation(centre.x, centre.y, centre.z)
-        .setRotation(pitchYaw(0, yawAlong(platformOutward(spec, u)))),
+        .setRotation(pitchYaw(0, yawAlong(platformTangent(spec, u)))),
       body,
     )
   }
@@ -1436,12 +1456,16 @@ function buildSidePlatform(
     const sign = Math.sign(end.u) || 1
     const stairMid = platformPoint(spec, end.u, spec.depth / 2, deckAt(end.u) - end.drop / 2)
     world.createCollider(
+      // The flight CLIMBS along the tangent (see `emitPlatformStair`'s
+      // `climb`) and is 3.0 m wide across it, so local +Z is the tangent —
+      // same frame as the access ramp below. It also puts the pitch on the
+      // outward axis, which is the only axis a flight can tilt about.
       api.ColliderDesc.cuboid(1.5, 0.1, (end.steps * run) / 2 + 0.1)
         .setTranslation(stairMid.x, stairMid.y + 0.08, stairMid.z)
         .setRotation(
           pitchYaw(
             -sign * Math.atan2(end.drop, end.steps * run),
-            yawAlong(platformOutward(spec, end.u)),
+            yawAlong(platformTangent(spec, end.u)),
           ),
         ),
       body,
@@ -1631,6 +1655,7 @@ export function stationSign(
       background: '#211f1c',
       accent: '#c94f1d',
       widthPx: 768,
+      aspect: (width - 0.24) / (height - 0.06),
     }),
   )
   plate.position.copy(anchor.clone().addScaledVector(outward, 0.056))

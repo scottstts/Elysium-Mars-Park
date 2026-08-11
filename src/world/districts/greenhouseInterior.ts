@@ -26,9 +26,6 @@ import type { PartWriter } from '../../archkit/writer'
 import { signageMaterial } from '../../materials/library'
 import {
   AISLE_ACROSS,
-  DOOR_ACROSS,
-  DOOR_CLEAR_WIDTH,
-  DOOR_HEAD_Z,
   HOUSE_HALF_LENGTH,
   RACK_ACROSS,
   blockZ,
@@ -41,7 +38,6 @@ import {
   place,
   type HouseFrame,
 } from './farmside'
-import { slidingDoor } from './interiorShared'
 import type { DistrictServices } from './types'
 
 /**
@@ -190,8 +186,9 @@ function buildRackRun(writer: PartWriter, frame: HouseFrame, across: number, opt
       if (s < 0) rotateZ(post, Math.PI)
       translate(post, [across + s * POST_ACROSS, along, 0.008])
       place(writer, 'aluminum', post, frame)
-      // Foot plate, set 6 mm proud of the floor so the post has a reveal.
-      const foot = prism(roundedRect(0.14, 0.14, 0.012, 2), 0, 0.008)
+      // Foot plate, set 6 mm proud of the floor so the post has a reveal —
+      // and 1.5 mm OFF the slab, never resting exactly in its top plane.
+      const foot = prism(roundedRect(0.14, 0.14, 0.012, 2), 0.0015, 0.0095)
       translate(foot, [across + s * POST_ACROSS, along, 0])
       place(writer, 'dark', foot, frame)
       const cap = blockZ(
@@ -313,14 +310,23 @@ function buildRackRun(writer: PartWriter, frame: HouseFrame, across: number, opt
       )
       smoothShade(tray, SMOOTH.moulded)
       place(writer, 'aluminum', tray, frame)
-      // End dams, so a tray reads as a tray and not an extrusion.
+      // End dams, so a tray reads as a tray and not an extrusion. `box()`
+      // does not sort its bounds, so the -Y dam used to come back inside-out
+      // and shared a face plane with the tray it caps; author it ordered and
+      // let it bite 3 mm INTO the pan instead.
       for (const s of [-1, 1]) {
+        const y0 = s * (halfRun - 0.16) - 0.003
+        const y1 = s * (halfRun - 0.16) + 0.003
+        // The dam stands 0.8 mm PROUD of the planting surface — geometry-craft
+        // section 3's floor for an applied part. Bedding it inside the 3 mm
+        // pan sheet instead put its underside within the audit's 1.5 mm of
+        // the pan's own underside, same-facing: 37 cm² per dam, 24 dams.
         const dam = box(
           across - 0.62,
-          s * (halfRun - 0.16),
-          z - 0.003,
+          Math.min(y0, y1),
+          z + 0.0008,
           across + 0.62,
-          s * (halfRun - 0.16) + s * 0.004,
+          Math.max(y0, y1),
           z + 0.03,
         )
         place(writer, 'aluminum', dam, frame)
@@ -435,12 +441,15 @@ export function buildGlasshouseRacks(services: DistrictServices): void {
  * The aisles are laid in 2.4 m deck modules with authored 8 mm joints and
  * countersunk fasteners at the corners — a floor that was installed, not
  * painted on. 45 mm proud of the slab, chamfered at the edge.
+ *
+ * Every range is walk-through, so every range is decked; only the hall's run
+ * stops short, where the dosing skid stands.
  */
 let fastenerProto: MeshData | null = null
 
 function buildAisleDecks(writer: PartWriter, frame: HouseFrame): void {
   const runStart = -RACK_LENGTH / 2 - 0.6
-  const runEnd = 14.55
+  const runEnd = frame.index === 1 ? 14.55 : RACK_LENGTH / 2 + 0.6
   const runLength = runEnd - runStart
   const modules = Math.round(runLength / 2.4)
   for (const across of AISLE_ACROSS) {
@@ -454,7 +463,7 @@ function buildAisleDecks(writer: PartWriter, frame: HouseFrame): void {
           [across + 0.75, l1],
           [across - 0.75, l1],
         ],
-        0,
+        0.002,
         0.045,
       )
       bevel(panel, BEVEL.panel, 2)
@@ -483,11 +492,21 @@ function buildAisleDecks(writer: PartWriter, frame: HouseFrame): void {
 
 // ─────────────────────────────────────────────────── nutrient dosing skid
 
+/**
+ * The skid stands over the west rack line, NOT on the centre line: the range
+ * now has an entrance at the +Y gable too, and a 3.3 m bund centred on the
+ * axis narrowed that doorway's aisle to 0.65 m.
+ */
+const SKID_ACROSS = -1.45
+
 /** A bunded dosing skid: tanks, pumps, manifold, valves, control cabinet. */
 function buildDosingSkid(services: DistrictServices, frame: HouseFrame): void {
   const { writer } = services
   const baseL = 15.55
-  const emit = (slot: string, md: MeshData): void => place(writer, slot, md, frame)
+  const emit = (slot: string, md: MeshData): void => {
+    translate(md, [SKID_ACROSS, 0, 0])
+    place(writer, slot, md, frame)
+  }
 
   // Bund: a shallow poured tray with a kerb — a real containment, not a slab.
   const bund = prism(roundedRect(3.3, 1.5, 0.06, 2).map(([a, l]) => [a, l + baseL] as Vec2), 0, 0.055)
@@ -644,9 +663,11 @@ function buildDosingSkid(services: DistrictServices, frame: HouseFrame): void {
   }
 
   // The distribution manifold, with four lever valves and a gauge.
+  // Starts 40 mm clear of the control cabinet's door leaf: its end cap used
+  // to land exactly in that leaf's face plane.
   const manifold = tubeAlong(
     [
-      [-1.4, baseL + 0.42, 0.78],
+      [-1.36, baseL + 0.42, 0.78],
       [1.5, baseL + 0.42, 0.78],
     ],
     circle(0.044, 12),
@@ -953,7 +974,7 @@ function buildServiceBay(services: DistrictServices, frame: HouseFrame): void {
     new PlaneGeometry(1.3, 0.9),
     signageMaterial(
       ['HARVEST LOG', 'SOL 214 · BASIL 4.2 KG', 'SOL 213 · WHEAT 11 KG', 'BAY C3 FLUSH DUE SOL 216'],
-      { background: '#232722', ink: '#cfd8c8', widthPx: 640 },
+      { background: '#232722', ink: '#cfd8c8', widthPx: 640, aspect: 1.3 / 0.9 },
     ),
   )
   const p = frame.point(boardA, boardZ, wallL - 0.02)
@@ -1008,13 +1029,15 @@ function buildMistManifolds(writer: PartWriter, frame: HouseFrame): void {
       const stanchion = box(postA - 0.018, along - 0.018, RACK_HEIGHT, postA + 0.018, along + 0.018, z + 0.03)
       bevel(stanchion, BEVEL.hardware, 2)
       place(writer, 'aluminum', stanchion, frame)
+      // The arm dies 4 mm UNDER the stanchion's cap. Ending both at z + 0.03
+      // put two same-facing aluminium faces in one plane at every stanchion.
       const arm = box(
         Math.min(postA, a) - 0.014,
         along - 0.014,
         z + 0.002,
         Math.max(postA, a) + 0.014,
         along + 0.014,
-        z + 0.03,
+        z + 0.026,
       )
       bevel(arm, BEVEL.hardware, 2)
       place(writer, 'aluminum', arm, frame)
@@ -1022,78 +1045,38 @@ function buildMistManifolds(writer: PartWriter, frame: HouseFrame): void {
   }
 }
 
-// ───────────────────────────────────────────────────────── door + assembly
+// ────────────────────────────────────────────────────────────── assembly
 
-function buildHallDoor(services: DistrictServices, frame: HouseFrame): void {
-  const { writer } = services
-  const panelWidth = DOOR_CLEAR_WIDTH + 0.045
-  const panelHeight = DOOR_HEAD_Z - 0.09
-  const faceL = -(HOUSE_HALF_LENGTH + 0.06)
-  const centre = frame.point(DOOR_ACROSS, 0.045 + panelHeight / 2, faceL)
-  slidingDoor(services, centre, frame.yaw, 'Enter the greenhouse', panelWidth, panelHeight)
-
-  // Head track the leaf actually hangs from, with end stops and two hangers.
-  const trackA0 = DOOR_ACROSS - panelWidth / 2 - 0.16
-  const trackA1 = DOOR_ACROSS + panelWidth * 1.5 + 0.16
-  const track = prismXZ(
-    [
-      [trackA0, DOOR_HEAD_Z + 0.03],
-      [trackA1, DOOR_HEAD_Z + 0.03],
-      [trackA1, DOOR_HEAD_Z + 0.14],
-      [trackA0, DOOR_HEAD_Z + 0.14],
-    ],
-    faceL - 0.07,
-    faceL + 0.03,
-  )
-  bevel(track, BEVEL.panel, 2)
-  place(writer, 'aluminum', track, frame)
-  for (const a of [trackA0 + 0.05, trackA1 - 0.05]) {
-    const stop = box(a - 0.03, faceL - 0.075, DOOR_HEAD_Z + 0.02, a + 0.03, faceL + 0.035, DOOR_HEAD_Z + 0.15)
-    bevel(stop, BEVEL.hardware, 2)
-    place(writer, 'dark', stop, frame)
-  }
-  for (const a of [DOOR_ACROSS - panelWidth / 2 + 0.14, DOOR_ACROSS + panelWidth / 2 - 0.14]) {
-    const hanger = box(a - 0.016, faceL - 0.045, DOOR_HEAD_Z - 0.05, a + 0.016, faceL - 0.015, DOOR_HEAD_Z + 0.05)
-    bevel(hanger, BEVEL.hardware, 2)
-    place(writer, 'dark', hanger, frame)
-  }
-  // A utility lamp over the threshold.
-  const lampBody = box(DOOR_ACROSS - 0.11, faceL - 0.13, DOOR_HEAD_Z + 0.2, DOOR_ACROSS + 0.11, faceL - 0.02, DOOR_HEAD_Z + 0.32)
-  bevel(lampBody, BEVEL.panel, 2)
-  place(writer, 'aluminum', lampBody, frame)
-  const lampLens = box(
-    DOOR_ACROSS - 0.08,
-    faceL - 0.115,
-    DOOR_HEAD_Z + 0.192,
-    DOOR_ACROSS + 0.08,
-    faceL - 0.035,
-    DOOR_HEAD_Z + 0.2,
-  )
-  place(writer, 'utilityLight', lampLens, frame)
-}
-
-/** Greenhouse Hall enterability + the fit-out of all three ranges. */
+/**
+ * Greenhouse fit-out. The ENTRANCES belong to `farmside.ts` — the doorway is
+ * an aperture cut from the gable's own welded grid, so its jambs, header,
+ * threshold and leaf are authored where that grid is, not bolted on here.
+ *
+ * All three ranges are walk-through now, so all three get aisle decks; the
+ * hall keeps the working hardware (skid, service bay, misting manifolds).
+ */
 export function buildGreenhouseInterior(services: DistrictServices): void {
   const frames = houseFrames()
   buildGlasshouseRacks(services)
+  for (const frame of frames) buildAisleDecks(services.writer, frame)
   const hall = frames[1]
-  buildAisleDecks(services.writer, hall)
   buildDosingSkid(services, hall)
   buildServiceBay(services, hall)
   buildMistManifolds(services.writer, hall)
-  buildHallDoor(services, hall)
-  // The dosing skid is a real obstacle in the hall.
+  // Collider yaw θ puts box local X on the ACROSS axis (see farmside.ts), so
+  // size is (across, up, along). Both of these carried the old +π/2 and were
+  // therefore turned 90° — the skid read as a 3.4 m bar down the aisle.
   services.colliders.push({
     kind: 'box',
-    center: hall.point(0, 0.75, 15.55),
+    center: hall.point(SKID_ACROSS, 0.75, 15.55),
     size: new Vector3(3.4, 1.5, 1.6),
-    yaw: hall.yaw + Math.PI / 2,
+    yaw: hall.yaw,
   })
   services.colliders.push({
     kind: 'box',
     center: hall.point(-2.75, 1.05, -15.7),
     size: new Vector3(2.5, 2.1, 0.9),
-    yaw: hall.yaw + Math.PI / 2,
+    yaw: hall.yaw,
   })
 }
 

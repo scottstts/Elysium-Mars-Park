@@ -186,8 +186,12 @@ crossings per bench park-wide. One-line fix: shorten the stretchers to
 ## The Commons + the Hydroponics tower (W2, commons agent)
 
 `world/districts/commons.ts` and `world/districts/hydroTower.ts` build the two
-reference-image hero buildings. Both are **sealed** — no `services.doors` entry,
-no interior access; their whole job is to be looked *into*.
+reference-image hero buildings. The **hydroponics tower is sealed** — no
+`services.doors` entry, no interior access; its whole job is to be looked
+*into*. **The Commons is enterable** (overhaul, commons agent): two real
+sliding leaves, a walkable hall, a helical stair and a gallery. Its fit-out
+lives in `world/districts/commonsInterior.ts`; see "The Commons interior"
+below.
 
 ### Authoring frame
 
@@ -275,18 +279,86 @@ floor level, the tangent `yaw` (`(sin yaw, cos yaw)` in world x/z), the arc
 cards over two species) is already built; this exists so a denser pass can be
 laid on top without re-deriving a dimension.
 
+### The Commons interior (`districts/commonsInterior.ts`)
+
+`commons.ts` owns the drum; `commonsInterior.ts` owns everything a guest can
+walk on, sit at or read. The interior file publishes `COMMONS_STAIR` and
+`COMMONS_WELL`, and the shell reads them to cut the level-2 plate — the stair
+and the hole it climbs through cannot drift apart. `commons.ts` hands over a
+`CommonsShell` (emit, world, every radius and level, the door angles, the
+foliage accumulator); nothing on either side re-derives a dimension.
+
+Programme, in plan angles (0 = +x, entrance at +90):
+
+| sector | what |
+|---|---|
+| 82.5–97.5 | entrance: portal, two sliding leaves, a 1.72 m dust grate |
+| 118–180.4 | helical stair, 29 risers × 168 mm on the r 7.45 walking line |
+| 196–252 | GALLEY — served counter + back-bar gantry |
+| 282–332 | CLINIC — nook behind a glazed screen with a 1.1 m doorway |
+| r < 4.28 | ASSEMBLY — two refectory tables + lectern on a raised medallion |
+
+**The entrance is a flat applied portal, and it has to be.** `DoorSpec`'s
+`openOffset` is a linear translation, so a leaf authored on the drum's curve
+cannot slide along its own wall. The portal plane stands 220 mm proud of the
+glazing (leaf inner face at r 9.16 measured on the tangent at `PHI_FRONT`),
+which is the smallest offset that clears every mullion cap — they reach
+r 9.092 — over the leaves' whole 1.19 m travel. Two radial glazed returns
+spring off the jamb mullions at ±15° and close the wedge, so the porch is not a
+way round the doors. Clear opening **2.26 m × 2.42 m**.
+
+**The drum is a wall, not a rock.** The old single r 9.18 cylinder collider is
+replaced by `wallRingColliders()`: chord cuboids (local +X on the tangent, yaw
+`atan2(−cos φ, −sin φ)`) with a gap over the two entrance bays. Door blocking is
+the `DoorSpec` collider's job — `DoorsSystem` disables it past `open01 = 0.4`.
+
+**Each stair step is one cast block**, not a tread on a stringer: a level tread
+and a raking stringer disagree by half a riser across one tread, so the tread
+either floats or drives in. Blocks overlap by 0.8 mrad (same slot, so it welds),
+the metal tread plate floats over each on a 4 mm shadow gap and stops short of
+the next block's nosing, and the balustrade is a `loft` of VERTICAL sections —
+`tubeAlong` frames its profile perpendicular to the path and on a 30° rake that
+leans the whole ribbon back half a metre.
+
+**The stair is dimensioned by the CHARACTER CONTROLLER, not by code minima**, and
+all three numbers were wrong on the first pass — the gallery was unreachable on
+foot while the geometry audited perfectly clean:
+
+1. **Headroom is `capsule + autostep` = 1.8 + 0.42 = 2.22 m**, because rapier
+   lifts the capsule by `maxHeight` before casting forward. `COMMONS_WELL.a0`
+   is set so every tread above it is open to the atrium (2.7 m at the edge).
+2. **`minWidth` (0.28 m) is checked against the going at `rIn`**, which on a
+   helix is the shortest: `dTheta` is 0.0428 so the inner going is 0.287 m.
+   Quoting the walking line (0.319 m) hides a failing stair.
+3. **A ring collider with a gap must be generated from explicit angles.** The
+   gallery deck was chord boxes culled by centre angle; each box's inner corners
+   swing `atan(halfWidth / r)` forward, so the deck roofed the flight 9° past
+   where the mesh ended. It is now two radial bands over explicit runs.
+
+Railing colliders match their blades (0.06 m, not 0.14) — collider thickness is
+walkable width, and the corridor must keep ≥0.6 m of lateral play for the
+capsule. Mechanical gates for headroom and corridor live alongside the geometry
+audit; both are cheap loops over `services.colliders`.
+
+**The floor is `cast`, not `deck`.** `deckPlate` is a ribbed treadplate; in
+raking sun through the curtain wall a civic hall floored in it reads as a
+gantry. Four terrazzo fields, three recessed `steelEdge` divider channels, a
+raised medallion and the grate. The finish is **76 mm** thick (`Z_SCREED`) —
+16 mm has nowhere to put a recess.
+
 ### Verification
 
 Isolated per-part audit (each `writer.raw()` call in its own slot, so the clash
 pass names individual parts):
 
 - hydroponics tower — 815 parts: **zfight 0, clash 0, defects 0**
-- the Commons — 1111 parts: **zfight 0, defects 0**, clash 28 — all 28 are the
-  pre-existing `kitBench.ts` cast × aluminium defect documented above (7
-  benches × 4 pairs), reproduced with the bench alone at a non-zero yaw.
+- the Commons — 1402 parts, 189 k triangles: **zfight 0, defects 0**, 9
+  cross-slot clashes, every one a deliberate 4 mm reveal (floor divider
+  channels, cove pockets, sign bezels) tripping the audit's 30 mm scaled
+  tolerance. `zfight` is the gate; clash at this granularity is noise.
 
-Together 334 k triangles / 17 slots. Note the bench defect is invisible at
-`yaw = 0` because the clash pre-filter is axis-aligned — audit rotated copies.
+Note the `kitBench.ts` cast × aluminium defect is invisible at `yaw = 0` because
+the clash pre-filter is axis-aligned — audit rotated copies.
 
 ---
 

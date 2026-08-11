@@ -4,7 +4,7 @@ import type { GameSystem } from '../runtime/system'
 import type { PlayerSystem } from '../player/playerSystem'
 import type { RobotsSystem } from '../robots/robotsSystem'
 import type { TramSystem } from '../tram/tramSystem'
-import { FARMSIDE, OVERLOOK_LOUNGE, PORTAL_STATION, WORKS } from '../world/parkPlan'
+import { COMMONS, FARMSIDE, OVERLOOK_LOUNGE, PORTAL_STATION, RESIDENTIAL, WORKS } from '../world/parkPlan'
 import { pavedSignedDistance } from '../world/pavingPlan'
 
 /**
@@ -54,6 +54,38 @@ export class AudioEngineSystem implements GameSystem {
   init(ctx: GameContext): void {
     // The context must begin on a user gesture: the BOARD click.
     ctx.events.on('park/entered', () => this.start(ctx))
+  }
+
+  /**
+   * Hard pause for the ESC menu: a 60 ms master fade, then the context
+   * suspends (a bare suspend() clicks). Resume restores the clock first so
+   * the fade-up actually renders.
+   */
+  private pauseWanted = false
+
+  setPaused(paused: boolean): void {
+    this.pauseWanted = paused
+    const context = this.context
+    const master = this.master
+    if (!context || !master) return
+    const now = context.currentTime
+    if (paused) {
+      master.gain.cancelScheduledValues(now)
+      master.gain.setValueAtTime(master.gain.value, now)
+      master.gain.linearRampToValueAtTime(0, now + 0.06)
+      window.setTimeout(() => {
+        if (this.pauseWanted && this.context && this.context.state === 'running') {
+          void this.context.suspend()
+        }
+      }, 90)
+    } else {
+      void context.resume().then(() => {
+        const t = context.currentTime
+        master.gain.cancelScheduledValues(t)
+        master.gain.setValueAtTime(0, t)
+        master.gain.linearRampToValueAtTime(0.72, t + 0.18)
+      })
+    }
   }
 
   private start(ctx: GameContext): void {
@@ -308,9 +340,39 @@ export class AudioEngineSystem implements GameSystem {
     ) {
       return 'interior'
     }
-    // Enterable greenhouse.
-    const house = FARMSIDE.glasshouses[1]
-    if (Math.abs(position.x - house.x) < house.length / 2 && Math.abs(position.z - house.z) < house.width / 2) {
+    // Every enterable interior counts, not an allow-list of two — the audit
+    // walked into glasshouse 0, the Commons, and a hab and heard the open
+    // park (gravel footsteps indoors). Glasshouse test is ORIENTED: the old
+    // axis-aligned compare only worked because the rotation happens to be
+    // exactly π/2.
+    for (const house of FARMSIDE.glasshouses) {
+      const cos = Math.cos(house.rotation)
+      const sin = Math.sin(house.rotation)
+      const dx = position.x - house.x
+      const dz = position.z - house.z
+      const across = dx * cos - dz * sin
+      const along = dx * sin + dz * cos
+      if (Math.abs(across) < house.width / 2 && Math.abs(along) < house.length / 2) {
+        return 'interior'
+      }
+    }
+    if (Math.hypot(position.x - COMMONS.x, position.z - COMMONS.z) < COMMONS.radius - 0.6) {
+      return 'interior'
+    }
+    for (const angle of RESIDENTIAL.angles) {
+      const hx = Math.cos(angle) * RESIDENTIAL.arcRadius
+      const hz = Math.sin(angle) * RESIDENTIAL.arcRadius
+      if (Math.hypot(position.x - hx, position.z - hz) < 4.2) return 'interior'
+    }
+    // Ops room lives inside the machine hall's envelope.
+    const hall = WORKS.machineHall
+    const cos = Math.cos(hall.rotation)
+    const sin = Math.sin(hall.rotation)
+    const dx = position.x - hall.x
+    const dz = position.z - hall.z
+    const along = dx * cos + dz * sin
+    const across = -dx * sin + dz * cos
+    if (Math.abs(along) < hall.width / 2 && Math.abs(across) < hall.depth / 2) {
       return 'interior'
     }
     return 'park'

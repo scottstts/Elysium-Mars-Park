@@ -176,10 +176,14 @@ function bogie(slots: SlotMesh, zc: number): void {
       slots.add(setSlot(gusset, 'dark'), 'dark')
     }
   }
-  // Transverse box beams tying the two side frames together.
+  // Transverse box beams tying the two side frames together. The beam is
+  // 0.17 deep, NOT 0.2: at 0.2 its end faces land at zc ± 0.6, which is exactly
+  // the side frame's own silhouette end — 18 mm of shared x times the beam's
+  // 110 mm flat gives a same-facing 19.7 cm² pair at each of the eight
+  // frame/beam corners. 0.17 leaves a 15 mm reveal inside the frame.
   for (const sz of [-1, 1]) {
     const beam = prism(
-      roundedRect(0.16, 0.2, 0.025, 2).map(([y, z]) => [y - 0.4, z + zc + sz * 0.5] as Vec2),
+      roundedRect(0.16, 0.17, 0.025, 2).map(([y, z]) => [y - 0.4, z + zc + sz * 0.5] as Vec2),
       'x',
       -FRAME_X + 0.02,
       FRAME_X - 0.02,
@@ -294,6 +298,10 @@ function bogie(slots: SlotMesh, zc: number): void {
       slots.add(setSlot(bolt, 'alloy'), 'alloy')
     }
     // Tie the plate up into the underframe (the joint is inside the skirt).
+    // The hanger BURIES 30 mm into the drop plate and stops; it must not reach
+    // PLATE_OUT, or its outer face lands in the plate's own outer plane and the
+    // two same-facing faces overlap over 0.06 x 0.8 m (480 cm² per corner,
+    // 4 corners per car). Both parts are 'dark', so the burial welds.
     const hanger = prism(
       [
         [-0.4, -0.42],
@@ -303,7 +311,7 @@ function bogie(slots: SlotMesh, zc: number): void {
       ].map(([y, z]) => [y, z + zc] as Vec2),
       'x',
       sx * 0.62,
-      sx * PLATE_OUT,
+      sx * (PLATE_IN + 0.03),
       0,
     )
     slots.add(setSlot(hanger, 'dark'), 'dark')

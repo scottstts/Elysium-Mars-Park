@@ -27,6 +27,7 @@ import { SystemRegistry } from './runtime/registry'
 import { TramSystem } from './tram/tramSystem'
 import { AudioEngineSystem } from './audio/engine'
 import { createEntryScreen } from './ui/entryScreen'
+import { PauseSystem } from './ui/pauseMenu'
 import { DevOrbitSystem } from './world/devOrbit'
 import { DoorsSystem } from './world/doors'
 import { GroundworksSystem } from './world/groundworks'
@@ -130,7 +131,8 @@ async function boot(): Promise<void> {
     const robots = registry.add(new RobotsSystem(player))
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
-    registry.add(new AudioEngineSystem(player, robots, tram))
+    const audio = registry.add(new AudioEngineSystem(player, robots, tram))
+    registry.add(new PauseSystem(player, audio))
   }
   // The pipeline registers last: every system's scene contribution exists
   // before the pass graph is built.

@@ -1,4 +1,4 @@
-import { BufferAttribute, BufferGeometry, DoubleSide, Mesh, Vector3 } from 'three'
+import { BufferAttribute, BufferGeometry, DoubleSide, Group, Mesh, Vector3 } from 'three'
 import { MeshStandardNodeMaterial } from 'three/webgpu'
 import {
   float,
@@ -19,18 +19,18 @@ import {
   annularPrism,
   bevel,
   box,
+  buildGroup,
   chamferRect,
   circle,
-  loft,
   panelWithHoles,
   placeYaw,
+  polyArea,
   prism,
   prismXZ,
   prismYZ,
   recalcNormals,
   revolve,
   rotX,
-
   roundedRect,
   runMolding,
   smoothShade,
@@ -44,7 +44,7 @@ import {
   type Vec3,
 } from '../../archkit/meshdata'
 import type { PartWriter } from '../../archkit/writer'
-import { signageMaterial } from '../../materials/library'
+import { kitMaterials, signageMaterial } from '../../materials/library'
 import { interiorHeight } from '../interiorHeight'
 import { FARMSIDE } from '../parkPlan'
 import type { DistrictServices } from './types'
@@ -148,12 +148,26 @@ export const RACK_TIER_0 = 0.46
 export const RACK_TIER_PITCH = 0.52
 export const AISLE_ACROSS = [-1.55, 1.55] as const
 
-/** Gable module: eight 1.125 m bays, the doorway occupying exactly one. */
+/**
+ * Gable module: eight 1.125 m bays. The doorway occupies exactly one bay, and
+ * that bay's two mullions ARE its jambs at their own (heavier) section — so
+ * the clear opening is the distance between two real reveal faces, not a
+ * number invented next to a grid line. Both gables of all three ranges carry
+ * the same assembly: these are walk-through ranges.
+ */
 const GABLE_MULLIONS = Array.from({ length: 9 }, (_, i) => -HALF_SPAN + i * (HOUSE_WIDTH / 8))
 const DOOR_BAY = 5
+/** Trimmer-post half section (the jambs) and ordinary mullion half section. */
+const JAMB_HALF = 0.055
+const MULLION_HALF = 0.032
 export const DOOR_ACROSS = (GABLE_MULLIONS[DOOR_BAY] + GABLE_MULLIONS[DOOR_BAY + 1]) / 2
-export const DOOR_CLEAR_WIDTH = HOUSE_WIDTH / 8 - 0.04
+/** Clear opening between the two jamb reveal faces — 1.015 m. */
+export const DOOR_CLEAR_WIDTH = HOUSE_WIDTH / 8 - 2 * JAMB_HALF
 export const DOOR_HEAD_Z = 2.3
+export const DOOR_LEFT = DOOR_ACROSS - DOOR_CLEAR_WIDTH / 2
+export const DOOR_RIGHT = DOOR_ACROSS + DOOR_CLEAR_WIDTH / 2
+/** The leaf slides toward +across on both gables; travel clears the reveal. */
+export const DOOR_SLIDE = DOOR_CLEAR_WIDTH + 0.175
 /** Interior clear half-width (inside the foundation upstand). */
 export const INTERIOR_HALF_SPAN = HALF_SPAN - FOUND_IN
 export const HOUSE_HALF_LENGTH = HALF_LENGTH
@@ -254,6 +268,12 @@ const RIB_NECK_HALF = 0.014
 const PANE_A = -0.005
 const PANE_GAP = 0.0015
 const TRANSOM_HALF_U = 0.016
+/**
+ * How far a vault member running ALONG the range must stop short of the end,
+ * so it clears the gable arch — a 105 mm deep member centred 99.5 mm inboard
+ * of the end rib, plus a 6 mm reveal.
+ */
+const GABLE_STOP = 0.158
 
 /**
  * Manufactured block: a chamfered plan profile extruded in Z.
@@ -493,6 +513,31 @@ class PaneSheet {
     this.indices.push(base, base + 1, base + 2, base, base + 2, base + 3)
   }
 
+  /**
+   * A pane cut to an arbitrary CONVEX outline — what a clipped gable cell is.
+   * The polygon's own winding decides the normal, and a convex outline fans
+   * from vertex 0 without ever emitting an inverted or overlapping triangle.
+   */
+  polygon(points: Vector3[]): void {
+    if (points.length < 3) return
+    const n = new Vector3()
+    const e1 = new Vector3()
+    const e2 = new Vector3()
+    for (let i = 1; i + 1 < points.length && n.lengthSq() < 1e-14; i++) {
+      e1.subVectors(points[i], points[0])
+      e2.subVectors(points[i + 1], points[0])
+      n.crossVectors(e1, e2)
+    }
+    if (n.lengthSq() < 1e-14) return
+    n.normalize()
+    const base = this.positions.length / 3
+    for (const p of points) {
+      this.positions.push(p.x, p.y, p.z)
+      this.normals.push(n.x, n.y, n.z)
+    }
+    for (let i = 1; i + 1 < points.length; i++) this.indices.push(base, base + i, base + i + 1)
+  }
+
   /** A pane on the vault surface; the corner order lands the normal outward. */
   vaultPane(frame: HouseFrame, u0: number, u1: number, l0: number, l1: number): void {
     const [a0, z0] = sectionOffset(u0, PANE_A)
@@ -565,54 +610,39 @@ function foundationProfile(bury: number): Vec2[] {
   ]
 }
 
-function buildFoundation(writer: PartWriter, frame: HouseFrame, doorway: boolean): void {
+/** The upstand is broken over exactly the clear opening, at BOTH gables. */
+const UPSTAND_GAP_L = DOOR_LEFT - 0.006
+const UPSTAND_GAP_R = DOOR_RIGHT + 0.006
+
+function buildFoundation(writer: PartWriter, frame: HouseFrame): void {
   const bury = frame.floorY - frame.groundMin + 0.3
   const profile = foundationProfile(bury)
   const hw = HALF_SPAN
   const hl = HALF_LENGTH
-  if (!doorway) {
-    const md = runMolding(
-      [
-        [-hw, -hl],
-        [hw, -hl],
-        [hw, hl],
-        [-hw, hl],
-      ],
-      profile,
-      false,
-      true,
-    )
-    smoothShade(md, SMOOTH.cast)
-    place(writer, 'cast', md, frame)
-    return
-  }
-  // ONE continuous casting that starts at one door jamb, mitres round all
-  // four corners and stops at the other — the run is split, never cut.
-  const jambL = DOOR_ACROSS - DOOR_CLEAR_WIDTH / 2 - 0.02
-  const jambR = DOOR_ACROSS + DOOR_CLEAR_WIDTH / 2 + 0.02
-  const md = runMolding(
+  // Two openings (one per gable) split the perimeter into exactly TWO
+  // continuous castings, each mitring round two corners and stopping at a
+  // jamb — the run is split at every opening, never cut. (A girt running
+  // across a doorway is the clearest "this was drawn, not framed" tell.)
+  // Both walk CCW, so `runMolding`'s right-of-travel stays the outside face.
+  const runs: Vec2[][] = [
     [
-      [jambR, -hl],
+      [UPSTAND_GAP_R, -hl],
       [hw, -hl],
       [hw, hl],
+      [UPSTAND_GAP_R, hl],
+    ],
+    [
+      [UPSTAND_GAP_L, hl],
       [-hw, hl],
       [-hw, -hl],
-      [jambL, -hl],
+      [UPSTAND_GAP_L, -hl],
     ],
-    profile,
-    true,
-    false,
-  )
-  smoothShade(md, SMOOTH.cast)
-  place(writer, 'cast', md, frame)
-  // Threshold: a shallow cast sill across the opening, 35 mm proud.
-  const sill = prism(
-    roundedRect(DOOR_CLEAR_WIDTH + 0.3, 0.5, 0.024, 2).map(([a, l]) => [a + DOOR_ACROSS, l - hl] as Vec2),
-    -0.2,
-    0.035,
-  )
-  bevel(sill, BEVEL.carcass, 2)
-  place(writer, 'cast', sill, frame)
+  ]
+  for (const path of runs) {
+    const md = runMolding(path, profile, true, false)
+    smoothShade(md, SMOOTH.cast)
+    place(writer, 'cast', md, frame)
+  }
 }
 
 function buildFloorSlab(writer: PartWriter, frame: HouseFrame): void {
@@ -745,26 +775,30 @@ function sectionMember(
 
 let shoeBoltProto: MeshData | null = null
 
-/** Cast shoe + two bolt heads where each rib lands on the foundation. */
-function buildRibShoes(writer: PartWriter, frame: HouseFrame, along: number): void {
+/**
+ * Cast shoe + two bolt heads where each rib lands on the foundation. The two
+ * END ribs get a shoe no deeper than the rib itself, so it stops 4 mm clear
+ * of the gable's own base channel instead of running through it.
+ */
+function buildRibShoes(writer: PartWriter, frame: HouseFrame, along: number, halfL = 0.1): void {
   for (const side of [-1, 1]) {
     const a0 = side < 0 ? -HALF_SPAN - 0.1 : HALF_SPAN - 0.24
     const a1 = side < 0 ? -HALF_SPAN + 0.24 : HALF_SPAN + 0.1
     const shoe = prismYZ(
       [
-        [along - 0.1, FOUND_TOP],
-        [along + 0.1, FOUND_TOP],
-        [along + 0.1, FOUND_TOP + 0.052],
-        [along + 0.07, FOUND_TOP + 0.08],
-        [along - 0.07, FOUND_TOP + 0.08],
-        [along - 0.1, FOUND_TOP + 0.052],
+        [along - halfL, FOUND_TOP],
+        [along + halfL, FOUND_TOP],
+        [along + halfL, FOUND_TOP + 0.052],
+        [along + halfL * 0.7, FOUND_TOP + 0.08],
+        [along - halfL * 0.7, FOUND_TOP + 0.08],
+        [along - halfL, FOUND_TOP + 0.052],
       ],
       Math.min(a0, a1),
       Math.max(a0, a1),
     )
     smoothShade(shoe, SMOOTH.cast)
     place(writer, 'dark', shoe, frame)
-    for (const d of [-0.062, 0.062]) {
+    for (const d of [-halfL * 0.62, halfL * 0.62]) {
       if (!shoeBoltProto) {
         shoeBoltProto = revolve(
           [
@@ -790,7 +824,7 @@ function buildVaultFrame(writer: PartWriter, frame: HouseFrame): void {
     const along = -HALF_LENGTH + s * BAR_PITCH
     if (s % BARS_PER_BAY === 0) {
       sectionMember(writer, frame, 'steel', RIB_FOOT_U, SECTION_LEN - RIB_FOOT_U, along, RIB_PROFILE)
-      buildRibShoes(writer, frame, along)
+      buildRibShoes(writer, frame, along, s === 0 || s === BAR_STATIONS ? 0.058 : 0.1)
       continue
     }
     // Intermediate bars are trimmed around any vent opening they cross.
@@ -824,8 +858,11 @@ function buildTransoms(writer: PartWriter, frame: HouseFrame): void {
       if (ventAt(bay, row) || ventAt(bay, row - 1)) continue
       const l0 = -HALF_LENGTH + bar * BAR_PITCH
       const l1 = l0 + BAR_PITCH
-      const leftHalf = bar % BARS_PER_BAY === 0 ? 0.039 : 0.027
-      const rightHalf = (bar + 1) % BARS_PER_BAY === 0 ? 0.039 : 0.027
+      // The first and last runs must also clear the GABLE ARCH, whose 105 mm
+      // depth reaches 47 mm inboard of the end rib's centre line.
+      const leftHalf = bar === 0 ? GABLE_STOP : bar % BARS_PER_BAY === 0 ? 0.039 : 0.027
+      const rightHalf =
+        bar === BAR_STATIONS - 1 ? GABLE_STOP : (bar + 1) % BARS_PER_BAY === 0 ? 0.039 : 0.027
       const md = tubeAlong(
         [
           [s.a, l0 + leftHalf, s.z],
@@ -1182,22 +1219,162 @@ function buildShadeRails(writer: PartWriter, frame: HouseFrame): void {
 
 // ────────────────────────────────────────────────────────────── gable ends
 
+/**
+ * A gable is not a wall with a picture of a door on it. It is the vault's own
+ * section closed by a frame whose grid is CUT by the opening: the bay's two
+ * mullions become the jambs, the door-head transom becomes the header, and
+ * every member and pane that would have crossed the clear opening is simply
+ * never emitted. Nothing is pasted over anything, and no boolean is used.
+ *
+ * The one number the whole gable is generated from is `ARCH_SOFFIT_A` — the
+ * perimeter arch's inner face, expressed as an offset on the vault section.
+ * Members stop 4 mm short of it, panes tuck 4 mm under its rebate, and the
+ * glazing bead follows the identical curve, so the three families cannot
+ * disagree about where the edge of the opening is.
+ */
+
 /** Outer face of the gable frame: 4 mm inboard of the end rib's foot. */
 const GABLE_FACE = 0.062
 const GABLE_DEPTH = 0.075
-const GABLE_ROWS = [0, EAVES_Z, DOOR_HEAD_Z, 3.3, 4.2, 4.8]
+/** Mid-plane of the gable frame band, as an unsigned `along` offset. */
+const GABLE_MID = HALF_LENGTH - GABLE_FACE - GABLE_DEPTH / 2
+/** The gable glazing plane, 7.5 mm outboard of that mid-plane. */
+const GABLE_PANE_Y = HALF_LENGTH - GABLE_FACE - 0.03
+/**
+ * The arch is a 110 mm deep member swept on the section's -0.055 offset, so
+ * its soffit — the true edge of the opening — lands exactly here.
+ */
+const ARCH_SOFFIT_A = -0.11
+/** How far the perimeter glazing bead reaches into the opening. */
+const BEAD_DEPTH = 0.042
+/**
+ * Mullions and transoms die into the BEAD, not into the arch — 6 mm short of
+ * its inner face. Stopping them at the arch instead ran their end caps into
+ * the bead's own curved face, and at the crown the centre mullion's cap
+ * landed 2 mm under it, same-facing.
+ */
+const MEMBER_CLEAR_A = ARCH_SOFFIT_A - BEAD_DEPTH - 0.006
+/** Panes run the whole way and tuck 4 mm under the arch's rebate. */
+const PANE_TUCK_A = ARCH_SOFFIT_A + 0.004
+/** Panes tuck 3 mm under every mullion and transom too — a real rebate. */
+const PANE_LAP = 0.003
+
+/** Gable base track: a U-channel the pane feet and the mullions bed into. */
+const GABLE_TRACK_TOP = 0.23
+const GABLE_TRACK_FLOOR = 0.156
+const GABLE_PANE_FOOT = 0.2
+
+/**
+ * Transom levels. Row 0 is the base track (not a member), and the door head
+ * IS a row — so the header belongs to the grid instead of being one more bar
+ * laid across it. Everything above the top row is one clipped crown cap.
+ */
+const GABLE_ROWS = [GABLE_PANE_FOOT, 1.16, DOOR_HEAD_Z, 3.24, 4.06, 4.7]
+const HEAD_ROW = 2
+const gableRowHalf = (row: number): number => (row === HEAD_ROW ? 0.06 : 0.03)
 /** The louvred vent fills exactly one bay/row cell of the gable grid. */
 const VENT_BAY = 4
 const VENT_ROW = 3
 
-/** Where a vertical gable member meets the perimeter arch soffit. */
-function gableSoffit(across: number): number {
-  const inner = ARC_R - 0.115
-  const x = Math.min(Math.abs(across), inner)
-  return ARC_C + Math.sqrt(Math.max(0, inner * inner - x * x))
+const mullionHalf = (i: number): number =>
+  i === 0 || i === GABLE_MULLIONS.length - 1
+    ? 0
+    : i === DOOR_BAY || i === DOOR_BAY + 1
+      ? JAMB_HALF
+      : MULLION_HALF
+
+/** Where a vertical member at `across` meets the arch soffit at offset `off`. */
+function gableSoffit(across: number, off: number): number {
+  const r = ARC_R + off
+  const x = Math.min(Math.abs(across), HALF_SPAN + off)
+  return ARC_C + Math.sqrt(Math.max(0, r * r - x * x))
 }
 
-/** One straight gable member, drawn between two points in the gable plane. */
+/** Half the clear width at height `z`, at offset `off`. */
+function gableHalfWidth(z: number, off: number): number {
+  const r = ARC_R + off
+  const dz = z - ARC_C
+  return Math.min(HALF_SPAN + off, Math.sqrt(Math.max(0, r * r - dz * dz)))
+}
+
+/** Arc stations for the clear outline — 0.3 mm max sagitta at 4.4 m radius. */
+const GABLE_ARC_SEGS = 128
+/** The bead is 44 mm wide, so its own chord dip may be an order coarser. */
+const GABLE_BEAD_SEGS = 72
+
+/**
+ * The clear opening as a CONVEX closed outline in (across, up): the vault
+ * section offset inboard by `off` and floored at `base`. Convex by
+ * construction — bottom edge, two haunch edges, one circular arc — which is
+ * exactly what lets `clipConvex` be a single Sutherland-Hodgman pass.
+ * Wound CCW, so a clipped cell's own winding lands the normal on +along.
+ */
+function gableOutline(off: number, base: number): Vec2[] {
+  const a = HALF_SPAN + off
+  const r = ARC_R + off
+  const pts: Vec2[] = [
+    [-a, base],
+    [a, base],
+  ]
+  for (let i = 0; i <= GABLE_ARC_SEGS; i++) {
+    const phi = SPRING_PHI + (i / GABLE_ARC_SEGS) * (Math.PI - 2 * SPRING_PHI)
+    pts.push([r * Math.cos(phi), ARC_C + r * Math.sin(phi)])
+  }
+  return pts
+}
+
+/**
+ * Sutherland-Hodgman against a CONVEX CCW window — the whole answer to "the
+ * triangular glass does not fit the curved frame". Every grid cell is CLIPPED
+ * to the arch instead of being drawn as a rectangle and hoped for, so a pane
+ * corner can never poke past the rib and a part-cell can never be dropped for
+ * failing a "both corners are under the arch" test.
+ */
+function clipConvex(subject: Vec2[], window: Vec2[]): Vec2[] {
+  let out = subject
+  for (let w = 0; w < window.length && out.length > 0; w++) {
+    const [ax, az] = window[w]
+    const [bx, bz] = window[(w + 1) % window.length]
+    const ex = bx - ax
+    const ez = bz - az
+    const side = (p: Vec2): number => ex * (p[1] - az) - ez * (p[0] - ax)
+    const next: Vec2[] = []
+    for (let i = 0; i < out.length; i++) {
+      const p = out[i]
+      const q = out[(i + 1) % out.length]
+      const sp = side(p)
+      const sq = side(q)
+      if (sp >= 0) next.push(p)
+      if (sp >= 0 !== sq >= 0) {
+        const t = sp / (sp - sq)
+        next.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t])
+      }
+    }
+    out = next
+  }
+  // Weld the near-duplicates a clip against 128 arc edges inevitably leaves,
+  // or the fan emits zero-area triangles (geometry-craft section 2.6).
+  const clean: Vec2[] = []
+  for (const p of out) {
+    const last = clean[clean.length - 1]
+    if (last && Math.hypot(last[0] - p[0], last[1] - p[1]) < 5e-4) continue
+    clean.push(p)
+  }
+  while (
+    clean.length > 1 &&
+    Math.hypot(clean[0][0] - clean[clean.length - 1][0], clean[0][1] - clean[clean.length - 1][1]) < 5e-4
+  ) {
+    clean.pop()
+  }
+  return clean
+}
+
+/**
+ * One straight gable member: a chamfered flat section swept between two
+ * points in the gable plane. The edge treatment lives in the PROFILE, which
+ * is both the right craft answer and 20 triangles instead of the 432 a
+ * three-axis fillet grid costs (geometry-craft section 0.3).
+ */
 function gableMember(
   writer: PartWriter,
   frame: HouseFrame,
@@ -1208,174 +1385,630 @@ function gableMember(
   z1: number,
   half: number,
   end: number,
+  depth = GABLE_DEPTH,
 ): void {
   const length = Math.hypot(a1 - a0, z1 - z0)
   if (length < 0.05) return
-  const y0 = end * (HALF_LENGTH - GABLE_FACE)
-  const y1 = end * (HALF_LENGTH - GABLE_FACE - GABLE_DEPTH)
-  const ua = (a1 - a0) / length
-  const uz = (z1 - z0) / length
-  const ring = (a: number, z: number, y: number): Vec3[] => [
-    [a - uz * half, y, z + ua * half],
-    [a + uz * half, y, z - ua * half],
-  ]
-  const md = loft(
+  const y = end * GABLE_MID
+  const md = tubeAlong(
     [
-      [...ring(a0, z0, y0), ...ring(a0, z0, y1).reverse()],
-      [...ring(a1, z1, y0), ...ring(a1, z1, y1).reverse()],
+      [a0, y, z0],
+      [a1, y, z1],
     ],
-    { closeV: true, capStart: true, capEnd: true },
+    chamferRect(half * 2, depth, Math.min(0.006, half * 0.6)),
+    { up: [0, 1, 0], cap: true },
   )
   smoothShade(md, SMOOTH.moulded)
   place(writer, slot, md, frame)
 }
 
-function buildGable(
-  writer: PartWriter,
-  sheet: PaneSheet,
-  frame: HouseFrame,
-  end: number,
-  doorway: boolean,
-): void {
-  const paneY = end * (HALF_LENGTH - GABLE_FACE - 0.03)
-  const doorL = DOOR_ACROSS - DOOR_CLEAR_WIDTH / 2
-  const doorR = DOOR_ACROSS + DOOR_CLEAR_WIDTH / 2
-
-  // Perimeter arch member, generated from the same section as the vault, so
-  // the corner between the gable and the shell closes with no sliver.
+/** Arch, base track, mullions/jambs and transoms/header — the welded grid. */
+function buildGableFrame(writer: PartWriter, frame: HouseFrame, end: number): void {
+  // Perimeter arch, generated from the same section as the vault, so the
+  // corner between the gable and the shell closes with no sliver.
   const archPath: Vec3[] = SECTION_STATIONS.map((u) => {
     const [a, z] = sectionOffset(u, -0.055)
-    return [a, end * (HALF_LENGTH - GABLE_FACE - GABLE_DEPTH / 2), z] as Vec3
+    return [a, end * GABLE_MID, z] as Vec3
   })
-  const arch = tubeAlong(archPath, roundedRect(0.11, GABLE_DEPTH + 0.03, 0.008, 2), { up: [0, 1, 0], cap: true })
+  const arch = tubeAlong(archPath, roundedRect(0.11, GABLE_DEPTH + 0.03, 0.008, 2), {
+    up: [0, 1, 0],
+    cap: true,
+  })
   smoothShade(arch, SMOOTH.moulded)
   place(writer, 'steel', arch, frame)
-  // Cill member closing the foot of the gable between the two haunches.
-  gableMember(writer, frame, 'aluminum', -HALF_SPAN + 0.34, FOUND_TOP + 0.03, HALF_SPAN - 0.34, FOUND_TOP + 0.03, 0.03, end)
 
-  // Mullions from the cill to the arch; the door jambs are heavier.
+  // Base track: a real U-channel bedded on the concrete upstand, SPLIT at the
+  // door jambs. The pane feet stand 44 mm down inside it.
+  // The channel is 2 mm WIDER than the mullions it receives on each face, so
+  // a bedded mullion is buried inside it rather than sharing its side planes.
+  const yc = end * GABLE_MID
+  const trackSection: Vec2[] = [
+    [yc - 0.0395, FOUND_TOP],
+    [yc + 0.0395, FOUND_TOP],
+    [yc + 0.0395, GABLE_TRACK_TOP],
+    [yc + 0.0215, GABLE_TRACK_TOP],
+    [yc + 0.0215, GABLE_TRACK_FLOOR],
+    [yc - 0.0215, GABLE_TRACK_FLOOR],
+    [yc - 0.0215, GABLE_TRACK_TOP],
+    [yc - 0.0395, GABLE_TRACK_TOP],
+  ]
+  const trackEnd = HALF_SPAN + MEMBER_CLEAR_A
+  for (const [a0, a1] of [
+    [-trackEnd, GABLE_MULLIONS[DOOR_BAY] - JAMB_HALF - 0.004],
+    [GABLE_MULLIONS[DOOR_BAY + 1] + JAMB_HALF + 0.004, trackEnd],
+  ] as const) {
+    const md = prismYZ(trackSection, a0, a1)
+    smoothShade(md, SMOOTH.moulded)
+    place(writer, 'aluminum', md, frame)
+  }
+
+  // Mullions run continuous from the track to the arch soffit; the door bay's
+  // two are the jambs, at a heavier section standing 6 mm proud of the band.
   for (let i = 1; i < GABLE_MULLIONS.length - 1; i++) {
     const a = GABLE_MULLIONS[i]
-    const isJamb = doorway && (i === DOOR_BAY || i === DOOR_BAY + 1)
+    const isJamb = i === DOOR_BAY || i === DOOR_BAY + 1
+    const half = mullionHalf(i)
     gableMember(
       writer,
       frame,
       isJamb ? 'steel' : 'aluminum',
       a,
-      FOUND_TOP + 0.06,
+      isJamb ? FOUND_TOP : GABLE_TRACK_FLOOR + 0.006,
       a,
-      gableSoffit(a),
-      isJamb ? 0.05 : 0.032,
+      gableSoffit(Math.abs(a) + half, MEMBER_CLEAR_A),
+      half,
       end,
+      isJamb ? GABLE_DEPTH + 0.012 : GABLE_DEPTH,
     )
   }
-  // Transoms: SEGMENTED between the mullions (mullions are continuous, the
-  // family that crosses them is split — the gridshell rule), each run also
-  // stopping where the arch soffit cuts it.
-  for (const z of GABLE_ROWS) {
-    if (z < 0.02) continue
-    const inner = ARC_R - 0.115
-    const reach = Math.sqrt(Math.max(0, inner * inner - (z - ARC_C) * (z - ARC_C)))
-    const limit = (z <= EAVES_Z ? HALF_SPAN : Math.min(HALF_SPAN, reach)) - 0.055
-    if (limit < 0.12) continue
-    const isHead = doorway && z === DOOR_HEAD_Z
+
+  // Transoms butt BETWEEN the mullions (verticals continuous, horizontals
+  // split — the gridshell rule), and each run also stops where the arch cuts
+  // it. Nothing crosses the doorway below the header: that bar at ~1.2 m is
+  // the obstruction the owner photographed.
+  for (let r = 1; r < GABLE_ROWS.length; r++) {
+    const z = GABLE_ROWS[r]
+    const half = gableRowHalf(r)
+    const limit = gableHalfWidth(z + half + 0.004, MEMBER_CLEAR_A)
     for (let i = 0; i < GABLE_MULLIONS.length - 1; i++) {
-      const jambBay = isHead && i === DOOR_BAY
-      const mullHalf = (k: number) =>
-        doorway && (k === DOOR_BAY || k === DOOR_BAY + 1) ? 0.05 : k === 0 || k === GABLE_MULLIONS.length - 1 ? 0 : 0.032
-      let a0 = GABLE_MULLIONS[i] + mullHalf(i) + 0.004
-      let a1 = GABLE_MULLIONS[i + 1] - mullHalf(i + 1) - 0.004
-      a0 = Math.max(a0, -limit)
-      a1 = Math.min(a1, limit)
+      if (i === DOOR_BAY && z < DOOR_HEAD_Z - 1e-6) continue
+      const isHeader = i === DOOR_BAY && r === HEAD_ROW
+      const a0 = Math.max(GABLE_MULLIONS[i] + mullionHalf(i) + 0.004, -limit)
+      const a1 = Math.min(GABLE_MULLIONS[i + 1] - mullionHalf(i + 1) - 0.004, limit)
       if (a1 - a0 < 0.06) continue
-      gableMember(writer, frame, jambBay ? 'steel' : 'aluminum', a0, z, a1, z, jambBay ? 0.06 : 0.03, end)
-    }
-  }
-
-  // Panes: one per (bay, row) cell, clipped under the arch and skipped inside
-  // the door opening — the welded-grid aperture idea, no boolean anywhere.
-  for (let i = 0; i < GABLE_MULLIONS.length - 1; i++) {
-    const a0 = GABLE_MULLIONS[i]
-    const a1 = GABLE_MULLIONS[i + 1]
-    const topL = gableSoffit(a0) - 0.03
-    const topR = gableSoffit(a1) - 0.03
-    for (let r = 0; r < GABLE_ROWS.length - 1; r++) {
-      const z0 = (r === 0 ? FOUND_TOP + 0.07 : GABLE_ROWS[r] + 0.04)
-      const z1 = GABLE_ROWS[r + 1] - 0.04
-      if (z1 <= z0 + 0.03) continue
-      if (doorway && a0 > doorL - 0.01 && a1 < doorR + 0.01 && GABLE_ROWS[r + 1] < DOOR_HEAD_Z + 0.01) continue
-      if (!doorway && i === VENT_BAY && r === VENT_ROW) continue
-      const zl = Math.min(z1, topL)
-      const zr = Math.min(z1, topR)
-      if (zl <= z0 + 0.05 && zr <= z0 + 0.05) continue
-      const m = 0.04
-      const bl = frame.point(a0 + m, z0, paneY)
-      const br = frame.point(a1 - m, z0, paneY)
-      const cr = frame.point(a1 - m, Math.max(z0 + 0.05, zr), paneY)
-      const cl = frame.point(a0 + m, Math.max(z0 + 0.05, zl), paneY)
-      if (end > 0) sheet.quad(cl, cr, br, bl)
-      else sheet.quad(bl, br, cr, cl)
-    }
-  }
-
-  // Louvred gable vent — it FILLS one grid cell (bay VENT_BAY, row VENT_ROW)
-  // whose pane is skipped, so it is an aperture in the frame, not a patch
-  // laid over it.
-  if (!doorway) {
-    const a0 = GABLE_MULLIONS[VENT_BAY] + 0.038
-    const a1 = GABLE_MULLIONS[VENT_BAY + 1] - 0.038
-    const z0 = GABLE_ROWS[VENT_ROW] + 0.036
-    const z1 = GABLE_ROWS[VENT_ROW + 1] - 0.036
-    const yIn = end * (HALF_LENGTH - GABLE_FACE - GABLE_DEPTH)
-    const yOut = end * (HALF_LENGTH - GABLE_FACE)
-    const yLo = Math.min(yIn, yOut)
-    const yHi = Math.max(yIn, yOut)
-    for (const b of [
-      [a0, z0, a0 + 0.05, z1],
-      [a1 - 0.05, z0, a1, z1],
-      [a0 + 0.05, z0, a1 - 0.05, z0 + 0.05],
-      [a0 + 0.05, z1 - 0.05, a1 - 0.05, z1],
-    ] as const) {
-      place(writer, 'aluminum', blockZ(b[0], yLo, b[1], b[2], yHi, b[3], 0.004), frame)
-    }
-    const blades = 6
-    for (let i = 0; i < blades; i++) {
-      const z = z0 + 0.06 + (i / blades) * (z1 - z0 - 0.1)
-      const blade = prismXZ(
-        [
-          [a0 + 0.052, z],
-          [a1 - 0.052, z],
-          [a1 - 0.052, z + 0.026],
-          [a0 + 0.052, z + 0.026],
-        ],
-        yLo + 0.014,
-        yHi - 0.014,
+      gableMember(
+        writer,
+        frame,
+        r === HEAD_ROW ? 'steel' : 'aluminum',
+        a0,
+        z,
+        a1,
+        z,
+        half,
+        end,
+        isHeader ? GABLE_DEPTH + 0.012 : GABLE_DEPTH,
       )
-      rotX(blade, end * -0.42, [0, (yIn + yOut) / 2, z + 0.013])
-      place(writer, 'dark', blade, frame)
     }
   }
+}
+
+/** Every gable pane, clipped to the arch. Zero pokes, zero holes, zero laps. */
+function buildGableGlazing(sheet: PaneSheet, frame: HouseFrame, end: number): void {
+  const clip = gableOutline(PANE_TUCK_A, GABLE_PANE_FOOT)
+  const paneY = end * GABLE_PANE_Y
+  for (let i = 0; i < GABLE_MULLIONS.length - 1; i++) {
+    const a0 = GABLE_MULLIONS[i] + mullionHalf(i) - PANE_LAP
+    const a1 = GABLE_MULLIONS[i + 1] - mullionHalf(i + 1) + PANE_LAP
+    for (let r = 0; r < GABLE_ROWS.length; r++) {
+      if (i === DOOR_BAY && GABLE_ROWS[r] < DOOR_HEAD_Z - 1e-6) continue
+      if (i === VENT_BAY && r === VENT_ROW) continue
+      const z0 = r === 0 ? GABLE_PANE_FOOT : GABLE_ROWS[r] + gableRowHalf(r) - PANE_LAP
+      const z1 =
+        r + 1 < GABLE_ROWS.length ? GABLE_ROWS[r + 1] - gableRowHalf(r + 1) + PANE_LAP : CROWN_Z + 0.3
+      const poly = clipConvex(
+        [
+          [a0, z0],
+          [a1, z0],
+          [a1, z1],
+          [a0, z1],
+        ],
+        clip,
+      )
+      if (poly.length < 3 || Math.abs(polyArea(poly)) < 0.0025) continue
+      const pts = poly.map(([a, z]) => frame.point(a, z, paneY))
+      // CCW in (across, up) winds the normal onto +along, so the -along gable
+      // takes the reversed order and both faces end up pointing outward.
+      sheet.polygon(end > 0 ? pts : pts.reverse())
+    }
+  }
+}
+
+/**
+ * The glazing bead that covers the pane-to-arch junction, both faces. It
+ * follows the SAME curve the panes are clipped to, so the two cannot
+ * disagree; the pane's own edge is buried 4 mm inside the arch's rebate
+ * behind it, and a 2 mm reveal keeps the bead off the arch soffit plane.
+ */
+function buildGableBead(writer: PartWriter, frame: HouseFrame, end: number): void {
+  const a = HALF_SPAN + ARCH_SOFFIT_A
+  const r = ARC_R + ARCH_SOFFIT_A
+  const y = end * GABLE_PANE_Y
+  const path: Vec3[] = [[a, y, SILL_Z]]
+  for (let i = 0; i <= GABLE_BEAD_SEGS; i++) {
+    const phi = SPRING_PHI + (i / GABLE_BEAD_SEGS) * (Math.PI - 2 * SPRING_PHI)
+    path.push([r * Math.cos(phi), y, ARC_C + r * Math.sin(phi)])
+  }
+  path.push([-a, y, SILL_Z])
+  // Walking the outline this way puts `tubeAlong`'s across-axis on the INWARD
+  // in-plane normal, so the profile reads (into the opening, along the range).
+  for (const s of [1, -1]) {
+    const profile: Vec2[] = [
+      [0.002, s * 0.005],
+      [0.002 + BEAD_DEPTH, s * 0.005],
+      [0.002 + BEAD_DEPTH, s * 0.018],
+      [0.002 + BEAD_DEPTH - 0.007, s * 0.023],
+      [0.008, s * 0.023],
+      [0.002, s * 0.018],
+    ]
+    const md = tubeAlong(path, profile, { up: [0, 1, 0], cap: true })
+    smoothShade(md, SMOOTH.moulded)
+    place(writer, 'aluminum', md, frame)
+  }
+}
+
+/**
+ * Louvred gable vent. It FILLS one grid cell (bay VENT_BAY, row VENT_ROW)
+ * whose pane is skipped, so it is an aperture in the frame rather than a
+ * patch laid over it. Every gable of every range carries one.
+ */
+function buildGableVent(writer: PartWriter, frame: HouseFrame, end: number): void {
+  const a0 = GABLE_MULLIONS[VENT_BAY] + MULLION_HALF + 0.006
+  const a1 = GABLE_MULLIONS[VENT_BAY + 1] - MULLION_HALF - 0.006
+  const z0 = GABLE_ROWS[VENT_ROW] + gableRowHalf(VENT_ROW) + 0.006
+  const z1 = GABLE_ROWS[VENT_ROW + 1] - gableRowHalf(VENT_ROW + 1) - 0.006
+  const yIn = end * (GABLE_MID - GABLE_DEPTH / 2)
+  const yOut = end * (GABLE_MID + GABLE_DEPTH / 2)
+  const yLo = Math.min(yIn, yOut)
+  const yHi = Math.max(yIn, yOut)
+  for (const b of [
+    [a0, z0, a0 + 0.05, z1],
+    [a1 - 0.05, z0, a1, z1],
+    [a0 + 0.05, z0, a1 - 0.05, z0 + 0.05],
+    [a0 + 0.05, z1 - 0.05, a1 - 0.05, z1],
+  ] as const) {
+    place(writer, 'aluminum', blockZ(b[0], yLo, b[1], b[2], yHi, b[3], 0.004), frame)
+  }
+  const blades = 6
+  for (let i = 0; i < blades; i++) {
+    const z = z0 + 0.06 + (i / blades) * (z1 - z0 - 0.1)
+    const blade = prismXZ(
+      [
+        [a0 + 0.052, z],
+        [a1 - 0.052, z],
+        [a1 - 0.052, z + 0.026],
+        [a0 + 0.052, z + 0.026],
+      ],
+      yLo + 0.014,
+      yHi - 0.014,
+    )
+    rotX(blade, end * -0.42, [0, (yIn + yOut) / 2, z + 0.013])
+    place(writer, 'dark', blade, frame)
+  }
+}
+
+// ──────────────────────────────────────────────────────────── the entrance
+
+/**
+ * The leaf hangs INBOARD of the gable, 30 mm clear of the foundation
+ * upstand's inner face — which is what lets it park over a full bay without
+ * its bottom rail driving through 140 mm of concrete.
+ */
+const LEAF_Y = HALF_LENGTH - FOUND_IN - 0.03
+const LEAF_WIDTH = DOOR_CLEAR_WIDTH + 0.09
+const LEAF_HEIGHT = DOOR_HEAD_Z - 0.05
+const LEAF_THICK = 0.052
+const LEAF_FOOT = 0.02
+const LEAF_STILE = 0.09
+const DOOR_TRACK_Z = DOOR_HEAD_Z + 0.16
+
+/**
+ * A glazed sliding leaf, built the way a leaf is built: two continuous
+ * stiles, rails butting between them, a single light bedded in beads on both
+ * faces, and its own hardware. Authored Z-up in leaf space (x across the
+ * leaf, y through its thickness with +y OUTBOARD, z up from its centre).
+ */
+function buildDoorLeaf(): Group {
+  const halfW = LEAF_WIDTH / 2
+  const halfH = LEAF_HEIGHT / 2
+  const halfT = LEAF_THICK / 2
+  const alu: MeshData[] = []
+  const dark: MeshData[] = []
+  const orange: MeshData[] = []
+
+  for (const s of [-1, 1]) {
+    const cx = s * (halfW - LEAF_STILE / 2)
+    alu.push(
+      prism(
+        chamferRect(LEAF_STILE, LEAF_THICK, 0.005).map(([x, y]) => [x + cx, y] as Vec2),
+        -halfH,
+        halfH,
+      ),
+    )
+  }
+  const railHalf = halfW - LEAF_STILE - 0.004
+  const rail = (z0: number, z1: number): MeshData =>
+    prismXZ(
+      chamferRect(railHalf * 2, z1 - z0, 0.005).map(([x, z]) => [x, z + (z0 + z1) / 2] as Vec2),
+      -halfT,
+      halfT,
+    )
+  alu.push(rail(halfH - 0.115, halfH))
+  alu.push(rail(-halfH, -halfH + 0.2))
+
+  // The light, bedded 5 mm either side of the leaf's mid-plane so the beads
+  // have a real rebate to sit in rather than lying on the glass.
+  const glassZ0 = -halfH + 0.2
+  const glassZ1 = halfH - 0.115
+  const glassHalfX = railHalf
+  const glass = prismXZ(
+    [
+      [-glassHalfX, glassZ0],
+      [glassHalfX, glassZ0],
+      [glassHalfX, glassZ1],
+      [-glassHalfX, glassZ1],
+    ],
+    -0.005,
+    0.005,
+  )
+  for (const f of [-1, 1]) {
+    for (const s of [-1, 1]) {
+      alu.push(
+        prism(
+          chamferRect(0.018, 0.017, 0.003).map(
+            ([x, y]) => [x + s * (glassHalfX - 0.009), y + f * 0.0165] as Vec2,
+          ),
+          glassZ0 + 0.002,
+          glassZ1 - 0.002,
+        ),
+      )
+    }
+    for (const z of [glassZ0 + 0.009, glassZ1 - 0.009]) {
+      alu.push(
+        prismXZ(
+          chamferRect(glassHalfX * 2 - 0.042, 0.018, 0.003).map(([x, zz]) => [x, zz + z] as Vec2),
+          f * 0.008,
+          f * 0.025,
+        ),
+      )
+    }
+  }
+
+  // Hanger straps up to the rollers, a pull, a bottom guide shoe.
+  for (const s of [-1, 1]) {
+    const cx = s * (halfW - 0.19)
+    alu.push(
+      prism(
+        chamferRect(0.05, 0.018, 0.003).map(([x, y]) => [x + cx, y] as Vec2),
+        halfH - 0.07,
+        halfH + 0.16,
+      ),
+    )
+    dark.push(
+      prism(
+        chamferRect(0.07, 0.04, 0.004).map(([x, y]) => [x + cx, y] as Vec2),
+        halfH + 0.16,
+        halfH + 0.22,
+      ),
+    )
+  }
+  const pullX = -halfW + 0.19
+  for (const f of [-1, 1]) {
+    dark.push(
+      tubeAlong(
+        [
+          [pullX, f * halfT, -0.17],
+          [pullX, f * (halfT + 0.075), -0.15],
+          [pullX, f * (halfT + 0.075), 0.15],
+          [pullX, f * halfT, 0.17],
+        ],
+        circle(0.014, 10),
+        { up: [0, 0, 1], cap: true },
+      ),
+    )
+  }
+  dark.push(
+    prism(
+      chamferRect(0.08, 0.03, 0.004).map(([x, y]) => [x, y] as Vec2),
+      -halfH - 0.014,
+      -halfH + 0.002,
+    ),
+  )
+  // Hazard band low on the leaf, 3 mm proud of the kick rail (never flush).
+  for (const f of [-1, 1]) {
+    orange.push(
+      prismXZ(
+        chamferRect(railHalf * 2 - 0.06, 0.12, 0.004).map(([x, z]) => [x, z - halfH + 0.1] as Vec2),
+        f * (halfT - 0.001),
+        f * (halfT + 0.005),
+      ),
+    )
+  }
+
+  for (const part of [...alu, ...dark, ...orange]) smoothShade(part, SMOOTH.moulded)
+  const materials = kitMaterials()
+  const leaf = new Group()
+  leaf.add(buildGroup({ aluminum: alu, dark, orange }, materials, { name: 'glasshouse:leaf' }))
+  // Glazing never enters the sun's shadow map (a transparent pane written
+  // into it darkens the very room it is meant to light).
+  leaf.add(
+    buildGroup({ cabinGlass: glass }, materials, {
+      name: 'glasshouse:leafGlass',
+      castShadow: false,
+      receiveShadow: false,
+    }),
+  )
+  return leaf
+}
+
+/**
+ * Everything an entrance is: a threshold that steps down to the ground in
+ * risers the character controller never has to climb, a head track the leaf
+ * really hangs from, a floor guide, a lamp — and the DoorSpec that gives the
+ * DoorsSystem its E prompt and its gating collider.
+ */
+function buildGableDoor(services: DistrictServices, frame: HouseFrame, end: number): void {
+  const { writer } = services
+  const sillOut = end * (HALF_LENGTH + 0.26)
+  // 30 mm UNDER the slab edge: ending it on the upstand's own inner plane put
+  // two same-facing cast faces in that plane over the 20 mm they share.
+  const sillIn = end * (HALF_LENGTH - FOUND_IN - 0.03)
+  const base = frame.groundMin - frame.floorY - 0.32
+
+  // Cast threshold filling the break in the upstand, with a rebate the
+  // aluminium weather plate sits in 6 mm proud of the slab — not the 35 mm
+  // up-then-down kerb that was there before.
+  const sill = prismYZ(
+    [
+      [sillOut, base],
+      [sillIn, base],
+      [sillIn, -0.006],
+      [sillOut, -0.006],
+    ],
+    UPSTAND_GAP_L - 0.02,
+    UPSTAND_GAP_R + 0.02,
+  )
+  smoothShade(sill, SMOOTH.cast)
+  place(writer, 'cast', sill, frame)
+  const plate = prismYZ(
+    [
+      [end * (HALF_LENGTH + 0.25), -0.006],
+      [end * (HALF_LENGTH - FOUND_IN + 0.012), -0.006],
+      [end * (HALF_LENGTH - FOUND_IN + 0.012), 0.001],
+      [end * (HALF_LENGTH - FOUND_IN + 0.018), 0.006],
+      [end * (HALF_LENGTH + 0.244), 0.006],
+      [end * (HALF_LENGTH + 0.25), 0.001],
+    ],
+    DOOR_LEFT + 0.004,
+    DOOR_RIGHT - 0.004,
+  )
+  smoothShade(plate, SMOOTH.moulded)
+  place(writer, 'aluminum', plate, frame)
+
+  // Approach steps. The doorway is up to 194 mm above the apron across the
+  // three ranges, so the drop is divided into risers of at most 58 mm and
+  // each tread carries its own collider.
+  const mouth = frame.point(DOOR_ACROSS, 0, end * (HALF_LENGTH + 0.9))
+  const drop = frame.floorY + 0.006 - interiorHeight(mouth.x, mouth.z)
+  const risers = Math.max(1, Math.ceil(drop / 0.058))
+  const rise = drop / risers
+  const tread = 0.34
+  for (let k = 1; k < risers; k++) {
+    const top = 0.006 - k * rise
+    // Each tread is also 30 mm wider than the one above it — a flight that
+    // splays. Repeating one half-width put every tread's SIDE face in the
+    // same plane, which is the other half of the same coplanar family.
+    const stepHalf = DOOR_CLEAR_WIDTH / 2 + 0.19 + (k - 1) * 0.03
+    // Each tread bites 20 mm into the one above it. Nesting them all back to
+    // ONE inner plane instead put five same-facing faces in the same plane —
+    // 9 m² of coplanar cast across the six doorways.
+    const lIn = end * (HALF_LENGTH + 0.23 + (k - 1) * tread)
+    const lOut = end * (HALF_LENGTH + 0.25 + k * tread)
+    // Each tread also digs 10 mm deeper than the one above it: sharing one
+    // base plane is the third face of the same coplanar family.
+    const foot = base - k * 0.01
+    const step = prismYZ(
+      [
+        [lIn, foot],
+        [lOut, foot],
+        [lOut, top - 0.014],
+        [lOut - end * 0.014, top],
+        [lIn, top],
+      ],
+      DOOR_ACROSS - stepHalf,
+      DOOR_ACROSS + stepHalf,
+    )
+    smoothShade(step, SMOOTH.cast)
+    place(writer, 'cast', step, frame)
+    services.colliders.push({
+      kind: 'box',
+      center: frame.point(DOOR_ACROSS, top - 0.3, end * (HALF_LENGTH + 0.25 + (k - 0.5) * tread)),
+      size: new Vector3(stepHalf * 2, 0.6, tread),
+      yaw: frame.yaw,
+    })
+  }
+
+  // Head track, end stops and the two brackets that carry it off the gable.
+  const trackA0 = DOOR_ACROSS - LEAF_WIDTH / 2 - 0.2
+  const trackA1 = DOOR_ACROSS + DOOR_SLIDE + LEAF_WIDTH / 2 + 0.2
+  const trackY = end * LEAF_Y
+  const track = prismYZ(
+    [
+      [trackY - 0.05, DOOR_TRACK_Z - 0.09],
+      [trackY + 0.05, DOOR_TRACK_Z - 0.09],
+      [trackY + 0.05, DOOR_TRACK_Z],
+      [trackY + 0.022, DOOR_TRACK_Z],
+      [trackY + 0.022, DOOR_TRACK_Z - 0.052],
+      [trackY - 0.022, DOOR_TRACK_Z - 0.052],
+      [trackY - 0.022, DOOR_TRACK_Z],
+      [trackY - 0.05, DOOR_TRACK_Z],
+    ],
+    trackA0,
+    trackA1,
+  )
+  smoothShade(track, SMOOTH.moulded)
+  place(writer, 'aluminum', track, frame)
+  for (const a of [trackA0 + 0.04, trackA1 - 0.04]) {
+    place(
+      writer,
+      'dark',
+      blockZ(
+        a - 0.03,
+        trackY - 0.056,
+        DOOR_TRACK_Z - 0.1,
+        a + 0.03,
+        trackY + 0.056,
+        DOOR_TRACK_Z + 0.012,
+        0.004,
+      ),
+      frame,
+    )
+  }
+  for (const a of [DOOR_ACROSS - 0.42, DOOR_ACROSS + DOOR_SLIDE + 0.42]) {
+    const inner = end * (GABLE_MID - GABLE_DEPTH / 2 - 0.004)
+    place(
+      writer,
+      'dark',
+      blockZ(
+        a - 0.032,
+        Math.min(trackY, inner),
+        DOOR_TRACK_Z - 0.026,
+        a + 0.032,
+        Math.max(trackY, inner),
+        DOOR_TRACK_Z + 0.028,
+        0.004,
+      ),
+      frame,
+    )
+  }
+  // Floor guide the leaf's shoe runs in, on the slab beside the opening.
+  place(
+    writer,
+    'dark',
+    blockZ(
+      DOOR_RIGHT + 0.08,
+      trackY - 0.05,
+      0,
+      DOOR_RIGHT + 0.16,
+      trackY + 0.05,
+      0.036,
+      0.005,
+    ),
+    frame,
+  )
+  // Utility lamp over the threshold, on the inside face of the header.
+  const lampY = end * (GABLE_MID - GABLE_DEPTH / 2)
+  place(
+    writer,
+    'aluminum',
+    blockZ(
+      DOOR_ACROSS - 0.11,
+      lampY - end * 0.13,
+      DOOR_HEAD_Z + 0.16,
+      DOOR_ACROSS + 0.11,
+      lampY,
+      DOOR_HEAD_Z + 0.28,
+      0.006,
+    ),
+    frame,
+  )
+  // The lens hangs 4 mm below the hood: touching its underside would put two
+  // faces of two SLOTS in one plane, which is the defect, not the joint.
+  place(
+    writer,
+    'utilityLight',
+    blockZ(
+      DOOR_ACROSS - 0.08,
+      lampY - end * 0.115,
+      DOOR_HEAD_Z + 0.142,
+      DOOR_ACROSS + 0.08,
+      lampY - end * 0.035,
+      DOOR_HEAD_Z + 0.156,
+      0.003,
+    ),
+    frame,
+  )
+
+  // The leaf itself. Local +z is the leaf's outboard normal, so the -along
+  // gable's panel is turned through pi; the slide is +across at both ends.
+  const panel = buildDoorLeaf()
+  panel.rotation.y = frame.yaw + (end > 0 ? 0 : Math.PI)
+  services.group.add(panel)
+  const centre = frame.point(DOOR_ACROSS, LEAF_FOOT + LEAF_HEIGHT / 2, end * LEAF_Y)
+  services.doors.push({
+    panel,
+    closedPosition: centre.clone(),
+    openOffset: new Vector3(Math.cos(frame.yaw), 0, -Math.sin(frame.yaw)).multiplyScalar(DOOR_SLIDE),
+    anchor: frame.point(DOOR_ACROSS, 1.05, end * (HALF_LENGTH - 0.1)),
+    label: 'Enter the greenhouse',
+    collider: {
+      center: frame.point(DOOR_ACROSS, DOOR_HEAD_Z / 2, end * HALF_LENGTH),
+      size: new Vector3(DOOR_CLEAR_WIDTH + 0.08, DOOR_HEAD_Z, 0.36),
+      yaw: frame.yaw,
+    },
+  })
+}
+
+/** One gable, complete: frame, glazing, bead, vent and entrance. */
+function buildGable(
+  services: DistrictServices,
+  sheet: PaneSheet,
+  frame: HouseFrame,
+  end: number,
+): void {
+  buildGableFrame(services.writer, frame, end)
+  buildGableGlazing(sheet, frame, end)
+  buildGableBead(services.writer, frame, end)
+  buildGableVent(services.writer, frame, end)
+  buildGableDoor(services, frame, end)
 }
 
 // ───────────────────────────────────────────────────── signage + lighting
 
 const HOUSE_LABELS = ['RANGE A · LEAF', 'RANGE B · HALL', 'RANGE C · ROOT']
 
-function buildHouseSign(services: DistrictServices, frame: HouseFrame): void {
+const SIGN_W = 1.92
+const SIGN_H = 0.34
+
+/** Both gables are entrances now, so both carry the range's name. */
+function buildHouseSign(services: DistrictServices, frame: HouseFrame, end: number): void {
   const { writer } = services
-  const backY = -(HALF_LENGTH - GABLE_FACE - GABLE_DEPTH) + 0.001
-  const plateY = -(HALF_LENGTH + 0.075)
+  // The brackets butt the gable's OUTER face with a 4 mm reveal. Reaching
+  // through to its inner face put them 1 mm off the head transom's own plane.
+  const backY = end * (HALF_LENGTH - GABLE_FACE + 0.004)
+  const plateY = end * (HALF_LENGTH + 0.075)
   const cz = 2.66
   // Two brackets off the gable head transom carry the plate clear of it.
   for (const a of [-0.86, 0.86]) {
-    const bracket = box(a - 0.045, plateY, cz - 0.32, a + 0.045, backY, cz + 0.04)
+    const bracket = box(
+      a - 0.045,
+      Math.min(plateY, backY),
+      cz - 0.32,
+      a + 0.045,
+      Math.max(plateY, backY),
+      cz + 0.04,
+    )
     bevel(bracket, BEVEL.panel, 2)
     place(writer, 'dark', bracket, frame)
   }
-  const plate = box(-1.06, plateY - 0.075, cz - 0.25, 1.06, plateY, cz + 0.25)
+  // `box()` does not sort its bounds and `bevel()` re-generates from them, so
+  // a mirrored plate authored y0 > y1 comes back inside-out and self-overlapping.
+  const span = (a: number, b: number): [number, number] => [Math.min(a, b), Math.max(a, b)]
+  const [py0, py1] = span(plateY, plateY + end * 0.075)
+  const plate = box(-1.06, py0, cz - 0.25, 1.06, py1, cz + 0.25)
   bevel(plate, BEVEL.panel, 2)
   place(writer, 'steel', plate, frame)
-  const lens = box(-0.99, plateY - 0.089, cz - 0.19, 0.99, plateY - 0.073, cz + 0.19)
+  const [ly0, ly1] = span(plateY + end * 0.073, plateY + end * 0.089)
+  const lens = box(-0.99, ly0, cz - 0.19, 0.99, ly1, cz + 0.19)
   place(writer, 'signageGlow', lens, frame)
 
   const face = new Mesh(
@@ -1384,11 +2017,12 @@ function buildHouseSign(services: DistrictServices, frame: HouseFrame): void {
       background: '#1a1d19',
       ink: '#e8f2df',
       widthPx: 512,
+      aspect: SIGN_W / SIGN_H,
     }),
   )
-  face.scale.set(1.92, 0.34, 1)
-  face.position.copy(frame.point(0, cz, plateY - 0.093))
-  face.rotation.y = frame.yaw + Math.PI
+  face.scale.set(SIGN_W, SIGN_H, 1)
+  face.position.copy(frame.point(0, cz, plateY + end * 0.093))
+  face.rotation.y = frame.yaw + (end > 0 ? 0 : Math.PI)
   face.castShadow = false
   face.receiveShadow = false
   services.group.add(face)
@@ -1420,18 +2054,20 @@ function buildRoomLights(writer: PartWriter, frame: HouseFrame): void {
 
 // ───────────────────────────────────────────────────────────── colliders
 
+/**
+ * All three ranges are walk-through, so all three get the same collider set:
+ * two side walls, four gable-wall segments leaving a gap at each entrance,
+ * the floor slab and the racks. There is no "solid box" range any more.
+ *
+ * Collider yaw θ maps box local X → (cosθ, −sinθ), which is exactly
+ * `frame.point`'s ACROSS axis at θ = frame.yaw — so `size.x` is the across
+ * extent and `size.z` the along extent. The gable segments were sized for
+ * the OLD (wrong) +π/2 yaw and had those two swapped, which is why the far
+ * gable used to be a 0.4 × 9 m slab sticking out of the end of the house.
+ */
 function buildHouseColliders(services: DistrictServices, frame: HouseFrame): void {
   const wallH = CROWN_Z + 0.3
-  const cross = frame.yaw + Math.PI / 2
-  if (frame.index !== 1) {
-    services.colliders.push({
-      kind: 'box',
-      center: frame.point(0, wallH / 2, 0),
-      size: new Vector3(HOUSE_WIDTH + 0.6, wallH, HOUSE_LENGTH + 0.6),
-      yaw: cross,
-    })
-    return
-  }
+  const cross = frame.yaw
   for (const s of [-1, 1]) {
     services.colliders.push({
       kind: 'box',
@@ -1440,27 +2076,21 @@ function buildHouseColliders(services: DistrictServices, frame: HouseFrame): voi
       yaw: cross,
     })
   }
-  services.colliders.push({
-    kind: 'box',
-    center: frame.point(0, wallH / 2, HALF_LENGTH),
-    size: new Vector3(0.4, wallH, HOUSE_WIDTH),
-    yaw: cross,
-  })
-  const jambL = DOOR_ACROSS - DOOR_CLEAR_WIDTH / 2
-  const jambR = DOOR_ACROSS + DOOR_CLEAR_WIDTH / 2
-  for (const [c0, c1] of [
-    [-HALF_SPAN, jambL],
-    [jambR, HALF_SPAN],
-  ] as const) {
-    services.colliders.push({
-      kind: 'box',
-      center: frame.point((c0 + c1) / 2, wallH / 2, -HALF_LENGTH),
-      size: new Vector3(0.4, wallH, c1 - c0),
-      yaw: cross,
-    })
+  for (const end of [-1, 1]) {
+    for (const [c0, c1] of [
+      [-HALF_SPAN - 0.3, DOOR_LEFT],
+      [DOOR_RIGHT, HALF_SPAN + 0.3],
+    ] as const) {
+      services.colliders.push({
+        kind: 'box',
+        center: frame.point((c0 + c1) / 2, wallH / 2, end * HALF_LENGTH),
+        size: new Vector3(c1 - c0, wallH, 0.4),
+        yaw: cross,
+      })
+    }
   }
-  // The floor: a 55 mm step at the threshold, well under the character
-  // controller's 0.42 m autostep.
+  // The floor. Its top IS the slab datum, so the only step a guest takes is
+  // the threshold's, which `buildGableDoor` breaks into ≤58 mm risers.
   services.colliders.push({
     kind: 'box',
     center: frame.point(0, -0.3, 0),
@@ -1658,7 +2288,12 @@ function buildReclaimTank(services: DistrictServices): void {
   emit('steel', plate)
   const face = new Mesh(
     signQuad(),
-    signageMaterial(['RECLAIM 04 · 38 m3'], { background: '#1c211c', ink: '#dfe8d6', widthPx: 512 }),
+    signageMaterial(['RECLAIM 04 · 38 m3'], {
+      background: '#1c211c',
+      ink: '#dfe8d6',
+      widthPx: 512,
+      aspect: 1.02 / 0.28,
+    }),
   )
   face.scale.set(1.02, 0.28, 1)
   face.position.set(TANK_X, base + 2.47, TANK_Z - 1.785)
@@ -2032,9 +2667,19 @@ function buildDepot(services: DistrictServices): void {
     radius: 0.16,
   })
 
-  const trayG = interiorHeight(103.9, 9.6)
+  // Stacked out on the yard, NOT against the dock stair — the stack used to
+  // stand through its bottom two treads, and its lowest tray's underside sat
+  // exactly on the ground datum.
+  const trayG = interiorHeight(102.7, 9.6)
   for (let i = 0; i < 9; i++) {
-    emitAt('dark', blockZ(-0.28, -0.2, i * 0.062, 0.28, 0.2, i * 0.062 + 0.05, 0.006), 103.9, trayG, 9.6, 0.18)
+    emitAt(
+      'dark',
+      blockZ(-0.28, -0.2, i * 0.062 - 0.012, 0.28, 0.2, i * 0.062 + 0.05, 0.006),
+      102.7,
+      trayG,
+      9.6,
+      0.18,
+    )
   }
 
   services.colliders.push({
@@ -2247,8 +2892,7 @@ export function buildFarmside(services: DistrictServices): void {
   const sheet = new PaneSheet()
 
   for (const frame of houseFrames()) {
-    const walkable = frame.index === 1
-    buildFoundation(writer, frame, walkable)
+    buildFoundation(writer, frame)
     buildFloorSlab(writer, frame)
     buildBaseTrack(writer, frame)
     buildVaultFrame(writer, frame)
@@ -2258,10 +2902,12 @@ export function buildFarmside(services: DistrictServices): void {
     buildVents(writer, frame)
     buildGutters(writer, frame)
     buildShadeRails(writer, frame)
-    buildGable(writer, sheet, frame, -1, walkable)
-    buildGable(writer, sheet, frame, 1, false)
+    // Every range is walk-through: an identical entrance at BOTH gables.
+    for (const end of [-1, 1]) {
+      buildGable(services, sheet, frame, end)
+      buildHouseSign(services, frame, end)
+    }
     buildRoomLights(writer, frame)
-    buildHouseSign(services, frame)
     buildHouseColliders(services, frame)
   }
 

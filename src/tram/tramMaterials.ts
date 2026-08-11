@@ -247,8 +247,11 @@ function liveryTexture(): CanvasTexture {
       g.font = `500 ${Math.round(h * 0.19)}px "Helvetica Neue", Helvetica, Arial, sans-serif`
       g.fillText('AUTOMATED PEOPLE MOVER  ·  ELYSIUM PLANITIA PARK', w * 0.03, h * 0.76)
     },
+    // The patch this lands on (tramBody `decalPatch`, z 2.06->3.14 by section
+    // 11.7->12.85) is 1.073 m by 0.325 m = aspect 3.30. At 1024x192 (5.33) the
+    // wordmark was condensed to 62 % of its authored width.
     1024,
-    192,
+    310,
   )
 }
 
@@ -267,8 +270,10 @@ function carNumberTexture(index: number): CanvasTexture {
       g.font = `600 ${Math.round(h * 0.14)}px "Helvetica Neue", Helvetica, Arial, sans-serif`
       g.fillText('UNIT', w * 0.5, h * 0.93)
     },
+    // Patch is 0.414 m by 0.2385 m = aspect 1.736; a square canvas stretched
+    // the numerals 74 % wide, the worst aspect error in the project.
     256,
-    256,
+    147,
   )
 }
 
@@ -301,8 +306,10 @@ function consoleScreen(): MeshStandardNodeMaterial {
       g.fillStyle = '#8fe6ef'
       g.fillRect(w * 0.06, h * 0.82, w * 0.31, h * 0.06)
     },
+    // `screenFace` gives this 0.552 m by 0.228 m = aspect 2.421; 512x256 (2.0)
+    // stretched the readout 21 % wide.
     512,
-    256,
+    211,
   )
   const material = new MeshStandardNodeMaterial()
   const sampled = texture(tex, uv())
