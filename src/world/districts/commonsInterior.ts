@@ -907,9 +907,12 @@ function longTableParts(): PartSoup[] {
         SMOOTH.moulded,
       ),
     )
+    // The foot pads start at 0.004, not 0: the assembly stands on the
+    // MEDALLION, which is 2.5 mm proud of the fields, so a pad on the floor
+    // plane is a pad 2.5 mm inside the disc it sits on.
     frame.push(
       bevel(
-        prism(roundedRect(0.09, 0.86, 0.02, 2).map(([x, y]) => [x + sx, y] as Vec2), 0, 0.03),
+        prism(roundedRect(0.09, 0.86, 0.02, 2).map(([x, y]) => [x + sx, y] as Vec2), 0.004, 0.03),
         BEVEL.carcass,
         2,
       ),
@@ -1026,12 +1029,19 @@ function assembly(shell: CommonsShell, services: DistrictServices): void {
       SMOOTH.top,
     ),
   )
-  // Reading lamp in the lectern's back reveal — 0.05 m² of utilityLight.
+  // Reading lamp in the lectern's back reveal, i.e. an ARC on the concave face
+  // the speaker stands at (r 0.24), 4 mm off it and under the desk top's 1.062
+  // underside. The lectern is a curved wall — every point of it is at
+  // y ≥ ly + 0.204 — so a straight bar at ly − 0.26 was not in a reveal at all:
+  // it floated 0.46 m behind the piece it belongs to.
   emit(
     'utilityLight',
     bevel(
       prism(
-        roundedRect(0.34, 0.05, 0.014, 2).map(([x, y]) => [lx + x, ly + y - 0.26] as Vec2),
+        [
+          ...arcPts(lx, ly, 0.236, face - 0.5, face + 0.5, 6),
+          ...arcPts(lx, ly, 0.196, face + 0.5, face - 0.5, 6),
+        ],
         zFloor + 1.005,
         zFloor + 1.045,
       ),
@@ -1100,8 +1110,15 @@ function galley(shell: CommonsShell, services: DistrictServices): number {
       ),
     )
   }
-  // Toe wash: the counter reads as lit from under, never as painted.
-  emit('interiorGlow', sector(rFront - 0.036, rFront - 0.09, a0 + 0.02, a1 - 0.02, zFloor + 0.036, zFloor + 0.064, 0.004, 0.6))
+  // Toe wash: the counter reads as lit from under, never as painted. It lives
+  // INSIDE the plinth's 24 mm set-back — face at rFront + 0.008, i.e. 8 mm
+  // behind the carcass line and BUTT clear of the plinth it is fixed to. At
+  // rFront − 0.036…− 0.09 it was 36 to 90 mm out in front of the carcass with
+  // the plinth 114 mm behind it: a lit bar hovering over the floor.
+  emit(
+    'interiorGlow',
+    sector(rFront + 0.024 - BUTT, rFront + 0.008, a0 + 0.02, a1 - 0.02, zFloor + 0.036, zFloor + 0.064, 0.004, 0.6),
+  )
   lenses += 1
 
   // Back-bar gantry on two radial cheeks, so nothing is coplanar with the drum.
@@ -1123,9 +1140,17 @@ function galley(shell: CommonsShell, services: DistrictServices): number {
     rotateZ(cheek, a - Math.PI / 2)
     emit('dark', cheek)
   }
+  // Shelves land ON their cheeks. A cheek centre is a0 + 0.04 / a1 − 0.04 and
+  // the plate is 60 mm thick tangentially, i.e. ±0.0037 rad at r 8.2, so a
+  // shelf ends 4 mm off its inner face. At a0 + 0.075 every shelf stopped
+  // 287 mm short of the thing that is supposed to carry it, at BOTH ends.
+  const shelfIn = 0.04 + 0.03 / 8.185 + BUTT / 8.185
   for (const z of [0.92, 1.36, 1.74, 2.1]) {
-    emit('aluminum', sector(g1 - 0.02, g0 + 0.02, a0 + 0.075, a1 - 0.075, zFloor + z, zFloor + z + 0.026, 0.004, 0.5))
-    emit('interiorGlow', sector(g0 + 0.09, g0 + 0.045, a0 + 0.09, a1 - 0.09, zFloor + z - 0.03, zFloor + z - 0.004, 0.003, 0.6))
+    emit('aluminum', sector(g1 - 0.02, g0 + 0.02, a0 + shelfIn, a1 - shelfIn, zFloor + z, zFloor + z + 0.026, 0.004, 0.5))
+    emit(
+      'interiorGlow',
+      sector(g0 + 0.09, g0 + 0.045, a0 + shelfIn + 0.015, a1 - shelfIn - 0.015, zFloor + z - 0.03, zFloor + z - 0.004, 0.003, 0.6),
+    )
     lenses += 1
   }
 
@@ -1317,16 +1342,44 @@ function clinic(shell: CommonsShell, services: DistrictServices): number {
       ),
     )
   }
-  emit('interiorGlow', sector(7.944, 7.9, cab0 + 0.01, cab1 - 0.01, zFloor + 1.955, zFloor + 1.985, 0.003, 0.4))
+  // The head reveal's strip is fixed to the CARCASS face (7.98) on the usual
+  // 4 mm butt, and is 10 mm proud of the door leaves under it. At 7.90…7.944 it
+  // hung 36 mm off the only surface above the doors that could carry it.
+  emit('interiorGlow', sector(7.98 - BUTT, 7.94, cab0 + 0.01, cab1 - 0.01, zFloor + 1.955, zFloor + 1.985, 0.003, 0.4))
   lenses += 1
   arcColliders(shell, services, 8.2, cab0, cab1, zFloor + 1.0, 2.0, 0.46, 1)
 
-  // Wall screen: a real bezel with the panel sitting in a 14 mm reveal.
+  // Wall screen: back box, a bezel that is a real FRAME, and the panel sitting
+  // in its opening on a 12 mm reveal.
+  //
+  // The bezel has to be four members. As one solid sector 8.37…8.398 it
+  // enclosed the panel's whole 8.382…8.386 band on every axis — the screen was
+  // not recessed behind the bezel, it was inside it, invisible and clashing.
+  // The panel now runs back to a BUTT reveal off the tray face (8.40) instead
+  // of hanging 14 mm off it in the dark.
   const sc0 = (302 * Math.PI) / 180
   const sc1 = (312 * Math.PI) / 180
+  // Panel extent; the frame's opening is this plus a 2 mm reveal all round, so
+  // no member ever lies over the screen's face.
+  const scA0 = sc0 + 0.006
+  const scA1 = sc1 - 0.006
+  const scZ0 = zFloor + 1.18
+  const scZ1 = zFloor + 1.82
+  const scRev = 0.002 / 8.39
   emit('dark', sector(8.46, 8.4, sc0, sc1, zFloor + 1.16, zFloor + 1.84, 0.006, 0.4))
-  emit('aluminum', sector(8.398, 8.37, sc0 - 0.004, sc1 + 0.004, zFloor + 1.14, zFloor + 1.86, 0.005, 0.4))
-  emit('signageGlow', sector(8.386, 8.382, sc0 + 0.006, sc1 - 0.006, zFloor + 1.18, zFloor + 1.82, 0, 0.4))
+  for (const [z0, z1] of [
+    [zFloor + 1.14, scZ0 - 0.002],
+    [scZ1 + 0.002, zFloor + 1.86],
+  ]) {
+    emit('aluminum', sector(8.398, 8.37, sc0 - 0.004, sc1 + 0.004, z0, z1, 0.005, 0.4))
+  }
+  for (const [s0, s1] of [
+    [sc0 - 0.004, scA0 - scRev],
+    [scA1 + scRev, sc1 + 0.004],
+  ]) {
+    emit('aluminum', sector(8.398, 8.37, s0, s1, scZ0 - 0.002, scZ1 + 0.002, 0.005, 0.4))
+  }
+  emit('signageGlow', sector(8.4 - BUTT, 8.382, scA0, scA1, scZ0, scZ1, 0, 0.4))
   lenses += 1
 
   for (const a of [a0, a1]) {
@@ -1390,13 +1443,20 @@ function wayfinding(shell: CommonsShell, services: DistrictServices): number {
       lenses += 1
     }
     const width = (a1 - a0) * rFace * 0.88
+    // The plate's HEIGHT is the tray's clear field — between the two wash
+    // strips (their inner edges are `half − railH − 0.019` off centre), less a
+    // 4 mm reveal each side. Deriving it from the plate's own width instead put
+    // a 0.544 m plate on a 0.40 m tray: it stood 72 mm past the tray top and
+    // bottom into open air, and because it hangs at rFace − 0.02, inside the
+    // rails' own 7.83…7.876 band, it ran straight THROUGH both of them.
+    const height = 2 * (half - railH - 0.019) - 0.008
     // A FLAT plate on this drum is a CHORD: at r 7.88 a 1.94 m plate's ends
     // recede 60 mm, which is past the tray's own inner face, so 42 % of the
     // fascia (48 % on the tighter clinic radius) was buried inside the tray
     // behind it. Bend the POSITIONS onto the drum and leave the UVs alone —
     // that is exactly an unrolled cylinder, so the type still reads true — and
     // the plate stands 20 mm proud the whole way across.
-    const geometry = new PlaneGeometry(width, width * 0.28, 16, 1)
+    const geometry = new PlaneGeometry(width, height, 16, 1)
     {
       const pos = geometry.attributes.position
       const r = rFace - 0.02
@@ -1408,7 +1468,10 @@ function wayfinding(shell: CommonsShell, services: DistrictServices): number {
       pos.needsUpdate = true
       geometry.computeVertexNormals()
     }
-    const plate = new Mesh(geometry, signageMaterial(lines, { background: '#131110', widthPx: 640 }))
+    const plate = new Mesh(
+      geometry,
+      signageMaterial(lines, { background: '#131110', widthPx: 640, aspect: width / height }),
+    )
     const am = (a0 + a1) / 2
     plate.position.copy(world(Math.cos(am) * (rFace - 0.02), Math.sin(am) * (rFace - 0.02), zc))
     plate.rotation.y = Math.atan2(-Math.cos(am), -Math.sin(am))
@@ -1424,7 +1487,16 @@ function wayfinding(shell: CommonsShell, services: DistrictServices): number {
   // Directory totem just inside the doors, off the walking line — and off the
   // entrance pots, which stand at 76.5 and 103.5 deg on r 7.5 with a 0.46 m
   // bowl. The first placement put it 91 mm from one of them.
-  const tDeg = 112
+  //
+  // The blade's two faces look RADIALLY (the plate is offset ±79 mm along the
+  // radius), so the INWARD one is read across the hall — straight through the
+  // column ring at r 6.05. At 112 deg it sat 0.5 deg off the column at 112.5
+  // and that face was almost entirely hidden by it. The free arc here is
+  // 97.5…118 (entrance below, helical stair above), so the totem goes to the
+  // bottom of it: at 100 deg the 0.62 m blade spans 97.4…102.6, its nearest
+  // edge is 1.04 m off the column axis, and the 103.5 deg pot is 0.38 m clear
+  // of the foot. It also reads better there — first thing past the doors.
+  const tDeg = 100
   const tPhi = (tDeg * Math.PI) / 180
   const [tx, ty] = at(tDeg, 6.9)
   const foot = revolve(
@@ -1528,9 +1600,23 @@ function planting(shell: CommonsShell, services: DistrictServices): void {
   ] as const) {
     const a = (deg * Math.PI) / 180
     const h = (halfDeg * Math.PI) / 180
-    emit('cast', sector(8.42, 7.72, a - h, a + h, zFloor, zFloor + 0.56, 0.018, 0.4))
-    emit('dark', sector(8.36, 7.78, a - h + 0.004, a + h - 0.004, zFloor + 0.455, zFloor + 0.495, 0.006, 0.4))
-    emit('soil', sector(8.34, 7.8, a - h + 0.006, a + h - 0.006, zFloor + 0.5, zFloor + 0.545, 0.008, 0.4))
+    // A trough is a VOID with walls round it. Built as ONE solid 0.70 m block
+    // from the floor to 0.56, the liner (r 7.78…8.36) and the soil (7.80…8.34,
+    // z 0.50…0.545) were both entirely INSIDE it: no soil was visible anywhere
+    // in the hall and the foliage cards grew out of cast mineral with their
+    // bases 20 mm under its top face. Base to 0.40, then four kerb walls, and
+    // the soil fills what they enclose to 15 mm under the kerb.
+    const kerb = zFloor + 0.4
+    const endK = 0.014
+    emit('cast', sector(8.42, 7.72, a - h, a + h, zFloor, kerb, 0.018, 0.4))
+    emit('cast', sector(8.42, 8.3, a - h, a + h, kerb, zFloor + 0.56, 0.014, 0.4))
+    emit('cast', sector(7.84, 7.72, a - h, a + h, kerb, zFloor + 0.56, 0.014, 0.4))
+    for (const s of [-1, 1]) {
+      const e0 = s > 0 ? a + h - endK : a - h
+      emit('cast', sector(8.3, 7.84, e0, e0 + endK, kerb, zFloor + 0.56, 0.014, 0.4))
+    }
+    emit('dark', sector(8.296, 7.844, a - h + endK + 0.003, a + h - endK - 0.003, kerb + 0.004, zFloor + 0.5, 0.006, 0.4))
+    emit('soil', sector(8.29, 7.85, a - h + endK + 0.006, a + h - endK - 0.006, kerb + 0.05, zFloor + 0.545, 0.008, 0.4))
     arcColliders(shell, services, 8.07, a - h, a + h, zFloor + 0.28, 0.56, 0.7, 1)
     const clumps = Math.max(3, Math.round((2 * h * 8.07) / 0.42))
     for (let i = 0; i < clumps; i++) {
@@ -1568,9 +1654,14 @@ function planting(shell: CommonsShell, services: DistrictServices): void {
       20,
       { capStart: false, capEnd: true },
     )
-    translate(bed, [px, py, zFloor + 0.53])
+    // The pot is nearly solid: its inside is a shallow dish running from z 0.56
+    // at the axis up to 0.575 at r 0.38, and the rim is 0.62. So the bed stands
+    // ON that dish (0.575) and the planting datum is its own domed top, not the
+    // 0.53/0.55 pair — those put the whole bed, and the base of every card,
+    // inside the pot's own material.
+    translate(bed, [px, py, zFloor + 0.575])
     emit('soil', bed)
-    plant(px, py, zFloor + 0.55, 16, 0.3, s > 0 ? 1.3 : 4.1)
+    plant(px, py, zFloor + 0.6, 16, 0.3, s > 0 ? 1.3 : 4.1)
     services.colliders.push({
       kind: 'cylinder',
       center: world(px, py, zFloor + 0.31),
@@ -1636,8 +1727,14 @@ function pendants(shell: CommonsShell): number {
     const phi = (i / 6) * Math.PI * 2 + 0.2
     hang(Math.cos(phi) * 3.05, Math.sin(phi) * 3.05, zLantern, 6.3)
   }
-  // Hall ring, kept out of the stair's arc where the flight is at head height.
-  for (const deg of [12, 40, 68, 100, 196, 224, 252, 280, 308, 336]) {
+  // Hall ring. It breaks over the stair (the flight is at head height there)
+  // and over the CLINIC for the same kind of reason: the shade is 0.27 m across
+  // on r 6.55 and hangs z 2.56…2.88, and the clinic's screen line is r
+  // 6.55…6.65 up to 2.816 with its fascia at 6.53. A shade centre therefore
+  // needs (0.27 + 0.045 + 0.05) / 6.55 = 3.2 deg of clear angle off the 282 and
+  // 332 deg end walls — 280 was 2 deg off one of them and 308 was inside the
+  // nook's glazing, its head rail AND the CLINIC plate.
+  for (const deg of [12, 40, 68, 100, 196, 224, 252, 276, 336]) {
     const phi = (deg * Math.PI) / 180
     hang(Math.cos(phi) * 6.55, Math.sin(phi) * 6.55, zSoffit - 0.02, 1.5)
   }

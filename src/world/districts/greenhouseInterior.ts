@@ -448,7 +448,12 @@ export function buildGlasshouseRacks(services: DistrictServices): void {
 let fastenerProto: MeshData | null = null
 
 function buildAisleDecks(writer: PartWriter, frame: HouseFrame): void {
-  const runStart = -RACK_LENGTH / 2 - 0.6
+  // The hall's run stops short at BOTH ends, where its floor-standing plant is:
+  // the dosing skid's bund at +Y, and the potting bench and its bins at −Y. The
+  // bench's front legs are at −15.04 and the near bin's front face at −15.06,
+  // so a deck starting at the other ranges' −15.4 had a 45 mm panel running
+  // straight through a leg and through the corner of a bin.
+  const runStart = frame.index === 1 ? -14.9 : -RACK_LENGTH / 2 - 0.6
   const runEnd = frame.index === 1 ? 14.55 : RACK_LENGTH / 2 + 0.6
   const runLength = runEnd - runStart
   const modules = Math.round(runLength / 2.4)
@@ -498,11 +503,21 @@ function buildAisleDecks(writer: PartWriter, frame: HouseFrame): void {
  * axis narrowed that doorway's aisle to 0.65 m.
  */
 const SKID_ACROSS = -1.45
+/**
+ * Skid centre line along the range. The bund is 1.5 m deep, so its near face is
+ * `SKID_ALONG − 0.75`: at the old 15.55 that landed on 14.80, which is exactly
+ * where the last rack frame stands — the two end uprights inside the bund's
+ * across span (−2.49 and −0.61) rose through the kerb and their 140 mm foot
+ * plates were cast into the tray. 15.8 leaves 180 mm between the foot plates
+ * (14.87) and the bund, and still keeps 310 mm to the gable frame's inner face
+ * (16.863).
+ */
+const SKID_ALONG = 15.8
 
 /** A bunded dosing skid: tanks, pumps, manifold, valves, control cabinet. */
 function buildDosingSkid(services: DistrictServices, frame: HouseFrame): void {
   const { writer } = services
-  const baseL = 15.55
+  const baseL = SKID_ALONG
   const emit = (slot: string, md: MeshData): void => {
     translate(md, [SKID_ACROSS, 0, 0])
     place(writer, slot, md, frame)
@@ -746,6 +761,13 @@ function buildDosingSkid(services: DistrictServices, frame: HouseFrame): void {
   const cab = box(-1.62, baseL - 0.24, 0.16, -1.62 + 0.22, baseL + 0.44, 1.42)
   bevel(cab, BEVEL.frame, 2)
   emit('steel', cab)
+  // The cabinet bears on the bund's west kerb (top 0.16) over only 90 mm of its
+  // 220 mm depth; the other 130 mm is over the sump, so it gets two feet down
+  // to it. Without them the inboard half of a 1.26 m cabinet simply stopped at
+  // z 0.16 with 75 mm of air under it.
+  for (const l of [baseL - 0.16, baseL + 0.36]) {
+    emit('dark', blockZ(-1.45, l - 0.03, 0.087, -1.41, l + 0.03, 0.16, 0.003))
+  }
   const doorLeaf = box(-1.4, baseL - 0.21, 0.34, -1.386, baseL + 0.41, 1.36)
   bevel(doorLeaf, BEVEL.panel, 2)
   emit('aluminum', doorLeaf)
@@ -957,17 +979,32 @@ function buildServiceBay(services: DistrictServices, frame: HouseFrame): void {
     { up: [0, 0, 1], cap: true },
   )
   emit('aluminum', chalk)
+  // Rear kickers. The board is free-standing (nothing may be fixed to glass),
+  // so each post is stayed BACK to its own pad on the slab — behind the board,
+  // clear of the hung tools (a −3.7…−1.95) and 0.26 m inboard of the gable
+  // frame. The pair used to rake FORWARD and stop at z 2.12 half a metre out in
+  // front of the board with nothing there to bear on: two tubes ending in air
+  // at eye height, in the first thing you see walking in.
   for (const a of [-3.95, -1.55]) {
     const stay = tubeAlong(
       [
-        [a, wallL + 0.02, 1.9],
-        [a + (a < -2.5 ? 0.34 : -0.34), wallL + 0.5, 2.12],
+        [a, wallL - 0.03, 1.86],
+        [a, wallL - 0.62, 0.018],
       ],
       circle(0.012, 6),
-      { up: [0, 0, 1], cap: true },
+      { up: [1, 0, 0], cap: true },
     )
     smoothShade(stay, SMOOTH.turned)
-    emit('dark', stay)
+    // `steel`, the post's own slot: both ends of this member are socketed (into
+    // the post at the head, into the pad at the foot) and one slot welds them.
+    emit('steel', stay)
+    const pad = prism(
+      roundedRect(0.16, 0.16, 0.02, 2).map(([x, y]) => [x + a, y + wallL - 0.62] as Vec2),
+      0,
+      0.022,
+    )
+    bevel(pad, BEVEL.hardware, 2)
+    emit('steel', pad)
   }
 
   const face = new Mesh(
@@ -1068,7 +1105,7 @@ export function buildGreenhouseInterior(services: DistrictServices): void {
   // therefore turned 90° — the skid read as a 3.4 m bar down the aisle.
   services.colliders.push({
     kind: 'box',
-    center: hall.point(SKID_ACROSS, 0.75, 15.55),
+    center: hall.point(SKID_ACROSS, 0.75, SKID_ALONG),
     size: new Vector3(3.4, 1.5, 1.6),
     yaw: hall.yaw,
   })

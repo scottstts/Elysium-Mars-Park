@@ -203,10 +203,14 @@ function consoleRun(services: DistrictServices, frame: Frame): void {
       [CONSOLE_BACK + 0.38, TOP_H + 0.08],
       [CONSOLE_BACK + 0.38, TOP_H],
     ]
-    for (const [a0, a1] of [
+    // The bezel runs in TWO segments with a 120 mm break on the centre line,
+    // over the gap between the two knee voids. Everything applied to the rake
+    // is set out FROM these runs — see the panel loop.
+    const bezelRuns = [
       [-CONSOLE_HALF + 0.06, -0.06],
       [0.06, CONSOLE_HALF - 0.06],
-    ] as const) {
+    ] as const
+    for (const [a0, a1] of bezelRuns) {
       const rings = [a0, a1].map((a) => sec.map(([c, h]) => frame.p(a, c, h)))
       const bezel = loft(rings, { closeV: true, capStart: true, capEnd: true })
       writeInto(writer, 'habShell', cleanMesh(smoothShade(bezel, SMOOTH.moulded)))
@@ -221,17 +225,27 @@ function consoleRun(services: DistrictServices, frame: Frame): void {
     const faceC = CONSOLE_BACK + 0.24
     const faceH = TOP_H + 0.2175
     const onRake = (d: number): [number, number] => [faceC + NX * d, faceH + NZ * d]
-    for (let i = 0; i < 6; i++) {
-      const a = -CONSOLE_HALF + 0.42 + i * 0.7
-      const panel = box(-0.093, -0.245, -0.014, 0.093, 0.245, 0.014)
-      rotY(panel, RAKE)
-      const [pc, ph] = onRake(0.018)
-      put(writer, 'dark', panel, frame, a, pc, ph, yaw)
-      for (let k = 0; k < 3; k++) {
-        const lens = box(-0.016, -0.016, -0.006, 0.016, 0.016, 0.006)
-        rotY(lens, RAKE)
-        const [lc, lh] = onRake(0.041)
-        put(writer, 'utilityLight', lens, frame, a - 0.15 + k * 0.15, lc, lh, yaw)
+    // A panel is set out inside ITS OWN bezel run: three per segment, with half
+    // a panel (0.245) plus 70 mm of bezel at each end. On the old flat stride
+    // (`-CONSOLE_HALF + 0.42 + i·0.7`) panel 3 spanned the 120 mm break between
+    // the two segments with nothing behind it, and panel 6 ran 225 mm past the
+    // bezel's end and 145 mm past the worktop — both standing in open air.
+    for (const [a0, a1] of bezelRuns) {
+      for (const a of [a0 + 0.315, (a0 + a1) / 2, a1 - 0.315]) {
+        const panel = box(-0.093, -0.245, -0.014, 0.093, 0.245, 0.014)
+        rotY(panel, RAKE)
+        const [pc, ph] = onRake(0.018)
+        put(writer, 'dark', panel, frame, a, pc, ph, yaw)
+        for (let k = 0; k < 3; k++) {
+          const lens = box(-0.016, -0.016, -0.006, 0.016, 0.016, 0.006)
+          rotY(lens, RAKE)
+          // 0.0395 on the rake normal, not 0.041: the panel's own face is at
+          // 0.032 (centre 0.018, half 0.014), so a lens at 0.041 hovered 3 mm
+          // off the part it is fitted into. This lands it on the 1.5 mm reveal
+          // the drawer pulls use.
+          const [lc, lh] = onRake(0.0395)
+          put(writer, 'utilityLight', lens, frame, a - 0.15 + k * 0.15, lc, lh, yaw)
+        }
       }
     }
   }
@@ -479,10 +493,16 @@ export function buildOpsInterior(services: DistrictServices): void {
       14,
       { smooth: SMOOTH.turned },
     )
-    put(writer, 'habShell', mug, frame, -halfA + 0.19, c1 - 0.42, 0.793, yaw)
+    // Loose items stand 1.5 mm proud of the shelf top (0.7925 = 0.775 + 0.035/2)
+    // — the reveal the drawer pulls use, never a flush butt.
+    put(writer, 'habShell', mug, frame, -halfA + 0.19, c1 - 0.42, 0.794, yaw)
+    // The clipboard lies FLAT and its long edge runs ACROSS the bench. Authored
+    // as 0.32 m of HEIGHT centred at 0.93 it stood upright with nothing holding
+    // it and its bottom edge 22 mm inside the 35 mm shelf slab; laid along the
+    // bench instead it would overhang the 0.34 m deep shelf by 35 mm.
     writer.box({
-      center: frame.v(-halfA + 0.235, c0 + 0.42, 0.93),
-      size: new Vector3(0.24, 0.32, 0.012),
+      center: frame.v(-halfA + 0.19, c0 + 0.42, 0.8),
+      size: new Vector3(0.32, 0.012, 0.24),
       rotationY: yaw - 0.14,
       slot: 'habShell',
       chamfer: 0.004,
@@ -500,9 +520,18 @@ export function buildOpsInterior(services: DistrictServices): void {
       slot: 'dark',
       chamfer: 0.02,
     })
+    // The cabinet's FRONT FACE is `along = a − 0.4`, and `writer.box` sizes are
+    // (ACROSS, height, ALONG) — the same order the console and the luminaires
+    // use. The blanks and their lamps were authored with those two swapped, so
+    // every blank was a 28 mm blade 560 mm deep that stood 255 mm out of the
+    // cabinet and 305 mm inside it, and the two rails sat 15 mm BEHIND the face
+    // where nothing can be seen. Everything applied here now stands 1.5 mm off
+    // the face it is fixed to, the reveal the console's drawer fronts use:
+    // rails proud, blanks recessed between them, lamps proud of the blanks.
+    const rackFace = a - 0.4
     for (const s of [-1, 1]) {
       writer.box({
-        center: frame.v(a - 0.36, c + s * 0.27, 1.06),
+        center: frame.v(rackFace - 0.0265, c + s * 0.27, 1.06),
         size: new Vector3(0.03, 1.86, 0.05),
         rotationY: yaw,
         slot: 'steelEdge',
@@ -512,9 +541,11 @@ export function buildOpsInterior(services: DistrictServices): void {
     for (let u = 0; u < 9; u++) {
       const h = 0.24 + u * 0.19
       const kind = u % 4
+      // 0.50 across: the rails' inner faces are at ±0.255 off the centre line,
+      // so a full 0.56 blank would run straight through both of them.
       writer.box({
-        center: frame.v(a - 0.375, c, h),
-        size: new Vector3(0.028, 0.17, 0.56),
+        center: frame.v(rackFace - 0.0155, c, h),
+        size: new Vector3(0.5, 0.17, 0.028),
         rotationY: yaw,
         slot: kind === 0 ? 'aluminum' : 'habShell',
         chamfer: 0.006,
@@ -522,8 +553,8 @@ export function buildOpsInterior(services: DistrictServices): void {
       if (kind === 2) {
         for (let k = 0; k < 4; k++) {
           writer.box({
-            center: frame.v(a - 0.4, c - 0.2 + k * 0.13, h + 0.05),
-            size: new Vector3(0.012, 0.022, 0.022),
+            center: frame.v(rackFace - 0.037, c - 0.2 + k * 0.13, h + 0.05),
+            size: new Vector3(0.022, 0.022, 0.012),
             rotationY: yaw,
             slot: 'utilityLight',
           })

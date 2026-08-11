@@ -129,6 +129,31 @@ export const LOOP = {
   ],
 }
 
+/**
+ * The arrival spur's plan alignment (world XZ), tube portal → loop merge.
+ * `tram/track.ts` owns the vertical profile over these stations;
+ * `pavingPlan.ts` cuts the boulevard's recessed spur corridor from the same
+ * spine. One list, so the corridor and the trackbed can never disagree.
+ */
+export const ARRIVAL_SPINE: ReadonlyArray<readonly [number, number]> = [
+  [0, 420],
+  [0, 340],
+  [0, 268],
+  [0, 210],
+  [0, 168],
+  [0, 152],
+  [0, 138],
+  [0, 128],
+  [-0.6, 122.5],
+  [-2.1, 117],
+  [-3.4, 113.6],
+  [-4.6, 109.5],
+  [-5.05, 104],
+  [-3.6, 99.4],
+  [-1.5, 97.3],
+  [0, 97],
+]
+
 export const GARDENS: GardenZone[] = [
   { id: 'gardens-main', x: -38, z: -40, radius: 28 },
   { id: 'gardens-south', x: -12, z: 60, radius: 16 },
@@ -172,7 +197,10 @@ export const PATHS: PathSpec[] = [
   },
   {
     id: 'works-lane',
-    points: [v(18, -19), v(28, -36), v(36, -48), v(42, -54)],
+    // Continues to the maintenance yard: the yard's three charge bays had no
+    // circulation reaching them at all (plausibility-audit finding). Ends at
+    // the yard pour's north-east apron.
+    points: [v(18, -19), v(28, -36), v(36, -48), v(42, -54), v(38, -61), v(31.5, -66.5)],
     width: 3.4,
     surface: 'track',
   },

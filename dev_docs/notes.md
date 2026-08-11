@@ -1632,3 +1632,512 @@ samples covered exactly once), concrete 4.3 m² → 0, duplicate floor lights
 79 m² → 0, tram car → 0, dome → 0, works trim → 0. Perf while compositing:
 1200+ fps exterior, ~58 fps inside the fully-dressed Commons on the dev
 machine's pane (hidden-pane FPS readings remain meaningless).
+
+## P-wave 3 orchestrator (2026-08-11): rails/turnout, corridor, entry UI
+
+- **Vite HMR is not to be trusted across multi-file cross-module edits.** After
+  editing track/pavingPlan/parkPlan together, every boot threw
+  `ReferenceError: emitRails is not defined` (and later ARRIVAL_SPINE) from
+  STALE transformed modules — with `tsc -b` green. The scene half-builds
+  (buildGuideway dies, park continues), which reads as "my geometry silently
+  vanished". After any batch of edits spanning import edges: RESTART the dev
+  server, then verify. Check the browser console for `Uncaught (in promise)`
+  before believing any visual absence.
+- **Screenshots can be COMPOSITOR-STALE when the pane is hidden.** Two
+  "different" loads returned pixel-identical frames (same FPS overlay text —
+  that's the tell). Front the tab (`tabs_select`) and re-shoot; cross-check the
+  FPS overlay string changed before drawing conclusions.
+- **Raycast probes beat screenshots for geometry truth.** `import three from
+  /node_modules/.vite/deps/three.js?v=<hash>`, collect `o.isMesh && !o.isSprite`,
+  one downward `Raycaster` per point, list `object.name@y`. Slice enough hits:
+  coplanar pairs (corridor floor vs crown) hide the third hit if you slice 2.
+  Finding any canvas sign: traverse for `material.map.isCanvasTexture` and read
+  boundingSphere centres through `matrixWorld` — no hunting by eye.
+- **`player.placeAt` raycasts from the sky** — it will stand you on the dome
+  glass. Teleport by `body.setTranslation` + reset previous/currentPosition +
+  `setLook`, after clearing seatedPose/exitPose/seatBlend/seatYawCarry when the
+  boot ride is involved.
+- **The guideway datum anchor is `groundGrade(0, LOOP.radius)`.** slabTop =
+  groundGrade + PAVE.rise everywhere; street/crown/channel-floor/corridor all
+  derive from the ring value. Field modifiers (the corridor's regolith dip)
+  MUST exclude the ring band or every guideway datum sinks together (45 mm).
+- **Region-based paving contracts:** a new pour-yielding surface = a region
+  (priority > its neighbours) + skip in the pour loop + its own emitter + a
+  field decision. The field treats EVERY region as slab for the walkable datum,
+  so a region that is actually a recess needs an explicit interiorHeight
+  branch; and any region polyline that leaves the existing paved band lifts
+  regolith out in the open. March coverage from the CHANNEL end backward — the
+  spur also crosses the rim promenade, and a forward scan latches onto it.
+- **Blend by signed distance, never by nested boolean margins.** The two-level
+  `insideX(m1)/insideX(m2)` blend tore the channel floor into shards (adjacent
+  vertices 12 cm apart). Expose the distance and smoothstep it.
+- **Sign accent bars:** `signageMaterial` lays the text block first and
+  reserves the accent strip under it (heat-rejection finding). Never draw
+  plate decorations at fixed canvas offsets.
+- **Entry screen (P3 redesign):** full-bleed typographic boot screen — thin
+  ELYSIUM wordmark, dome-as-hairline-arc standing on a glowing horizon, BOARD
+  ghost button framed at the dome crown, manifest reduced to two corner
+  whispers. Progress and button share one grid slot (progress fades, button
+  rises). Keep the `createEntryScreen` API stable; `flags.debug` overlay sits
+  top-left above it.
+
+## Continuity audit (P-wave 3) — every linear run that was pieced or hung
+
+Owner rejection: tram rails read as "pieced parts" instead of one continuous
+curve. Same class hunted across the park's other linear elements. **The rule
+that came out of it: a run is ONE sweep between two real terminations, and a
+free end is a defect until it dies into a post, a wall, a socket or a flange.**
+
+- **Radiator headers** (`works.ts` buildRadiatorField) — the supply header and
+  its expansion loop were two `writer.tube` calls butted at `headerPath[last]`:
+  two capped discs at the same point on the same tangent (a coplanar pair AND a
+  pieced run), and the supply's start, the loop's tail and BOTH ends of the
+  return header were flat caps floating 0.46–3.51 m up. Now one tube per header
+  through `filletPath`, ending in a `pipeBlock` at each end.
+- **`pipeBlock` / `wallSleeve` (new, `works.ts`)** — the two honest ways for a
+  pipe to stop. Both are the guardrail shoe's rule at pipe scale: a skirt or
+  plate, a rim, then a bore turned back to a cup floor, so the pipe ends INSIDE
+  a socket with a 18–40 mm annular reveal. No burial across slots, no cap in
+  air, and no pipe stabbing the regolith. Reach for these before inventing a
+  new termination.
+- **`filletPath` (new, `works.ts`)** — `writer.tube` frames each station on the
+  MEAN of its two edges, so a bare 90 deg vertex creases the section rather
+  than bending it. Quadratic-Bezier corners at 1.5 D, clamped to 45 % of the
+  shorter neighbour. Its 0.06 rad straight-through cut-off means a fine arc
+  (0.4 deg per station) passes untouched — safe to wrap a whole alignment in.
+- **Pipe rack wall end** (`works.ts` buildPipeRack) — the four pipes were the
+  shared start node plus a `side` offset, and `side` runs 55 deg ACROSS the
+  hall wall: the +0.6 pipe ended 0.48 m INSIDE the cladding at 5.4 m, the −0.62
+  one hung 0.51 m off it. Each pipe now leaves its OWN sleeve square to the
+  wall and fans onto its rack line at the first H-frame. **Never offset a run
+  laterally at a node that sits on a wall — offset it at the first support.**
+- **Pipe rack far end** — four capped tubes ending in mid-air over the tank
+  farm. Now carried 0.45 m past the last H-frame to a `flangePair` blank (a
+  flange is a legitimate terminus; a bare cap is not). A riser to grade was
+  rejected: the drop lands within 0.22 m of an LNG sphere.
+- **Conduit drops** (`works.ts` buildHallServices) — top cap sat at 5.46,
+  exactly the cable tray's soffit plane; the bottom stopped 0.13 m above its
+  pull box. Tray, drop and box are now ONE slot, so both ends socket in.
+- **Gallery stair rails** (`works.ts` buildGallery) — `stairFlight`'s rails are
+  bare tube ends. The chain's two FREE ends are the caller's to finish: a newel
+  return to a plate at the foot, and a cranked link into the walk guardrail's
+  first post (stopping 4 mm off its face, the run's own shadow gap).
+- **Overlook roof guardrail** (`leisure.ts`) — rails were sampled at the POST
+  pitch (30 equal-arc stations). On a 2:1 ellipse the tightest radius is
+  `ax²/az` = 2.71 m, so a 1.52 m chord sagged **106 mm** inside its own curve
+  and the rail cut both corners. Sampling now 150 (a multiple of the post
+  count, so every post still lands on a station). **Sample a rail from the
+  CURVE's tightest radius, never from the post pitch** — and note that equal
+  ARC spacing is the worst choice on an ellipse: parameter-uniform spacing
+  already bunches stations where the curvature is tight (the parapet's 96-point
+  `ellipsePoly` sags only 5 mm for that reason).
+- **Slide grab rails** (`leisure.ts`) — began 0.9 m above the deck and stopped
+  0.6 m above the chute, capped at both ends. Now one run: a foot buried in the
+  deck, a 0.16 m knee onto the grab line (the entry arc leaves t=0 horizontal,
+  so it stays tangent-continuous) and a leg landing on the chute's outer
+  flange. The chute's own frame decides that landing point:
+  `axis + across·0.295 + up·0.13`, where `up` is normal to the chute's slope.
+- **Ramp handrail** (`portalStation.ts` accessRamp) — flat capped ends at both
+  ends of the ramp, and `dark` stanchions climbing to the `orangeTop` rail's
+  AXIS (26 mm of one material inside another). Now a 90 mm turn-down return
+  inside each end (the kit handrail's detail), posts stopping 4 mm under the
+  soffit, end posts moved in so they carry rail, and post pitch off the run
+  (1.6 m). The ramp KERB's two end stations were dropped below the ramp top so
+  the run rises out of the pour instead of butting a capped disc on open slab —
+  the tram rails' feather, at kerb scale.
+- **Bike rack tie rail** (`parkAmenities.ts`) — "ONE ground rail ties every
+  foot" ran up the middle at y 0, which is 0.69 m under the crown of every arch
+  and touches NOTHING, then overhung both end hoops by 0.16 m into air. Moved
+  onto the foot line (y = −HALF) and ended inside the two end legs.
+
+Still open (out of this wave's scope, all verified by reading):
+- `archkit/kit.ts` `stairFlight` emits rails and balusters through
+  `writer.tube` **without cap flags — and caps default to OFF**, so every
+  flight in the Works and the lounge has open-ended hollow rails. Any
+  `writer.tube` that is not `capStart/capEnd: true` is an open pipe.
+- `tram/track.ts` `leaningRail`: top rail overhangs its posts by 90 mm and ends
+  in a flat cap, and the `dark` posts run up to the `orangeTop` rail's axis —
+  the identical pair of defects the portal ramp had.
+- `works.ts` cable tray stops 0.6 m short of both gables with no pull box.
+- Festoon wire (`parkAmenities.ts`) is deliberately per-segment (each run
+  carries its own sway weight); the 0.55 mm joint gap at 9 mm radius is below
+  notice. Leave it.
+
+## Plausibility sweep (P-wave 3) — "cleanly modelled but physically impossible"
+
+Lens: not overlap or z-fight, but whether a thing could WORK. Nine fixes, all
+arithmetic-confirmed against the builders before touching anything.
+
+- **A base plate is not a bearing unless the member LANDS on it.** Three
+  independent sites in `works.ts` started their columns well above their own
+  plates: yard gantry `foot` at padTop + 0.2 over a plate topping out at 0.114
+  (86 mm of daylight × 6), tank-farm sphere cradles 0.2 over 0.107 (93 mm × 24),
+  water-tower `legBase` 0.21 over a shim at 0.139 (71 mm × 6). The task board in
+  the SAME yard function already did it right (post at 0.115 on a 0.114 plate) —
+  when one member in a file bears correctly, diff every other one against it.
+  For a BATTERED leg add the end cap's dip: `section()` sweeps perpendicular to
+  the path, so a leg at tilt θ with a half-profile p drops `p·sinθ` below its
+  path start (19 mm on the cradles, 12 mm on the tower). Fixed → 2 mm reveal.
+- **The "docked" flag on a robot is a contract the site has to honour.**
+  `buildDockedRobot` swings the charge-port door open on the groundskeeper's
+  LEFT flank (local (-0.206, 0.33, -0.055)); the yard's lead stopped inside the
+  charge post 1.35 m away, so three machines sat "on charge" plugged into
+  nothing. The lead is now one continuous tube reel → post gland → outboard
+  flank → socket, and the dock YAW is drawn before the cable (`rng.range` hoisted
+  above the tube) because the socket's world position depends on it. Approach
+  the socket over the machine's REAR quarter: the open door swings onto the
+  nose side (local +Z), so a lead coming straight down the axis lands on it.
+- **Check which axis a stack is stepping along.** The spare wheel rack put four
+  Ø0.62 m wheels 0.42 m apart ACROSS their own axis, so every neighbouring pair
+  interpenetrated — invisible to the audit because they share slot `dark`
+  (same-slot crossings are licensed by construction). Wheels with a bore only
+  make sense threaded: `rotateZ(md, π/2)` swings a `revolve({axis:'x'})` onto
+  +Z, hub rides `bore − railR` under the rail, pitch ≥ tyre width.
+- **A hanging load needs a frame in the direction it hangs.** The same rack's
+  rail floated 0.3 m off a single planar A-frame that never touched it (and the
+  frame had zero base in that direction, so it would topple). Rebuilt as two
+  trestles splayed ACROSS the rail with the rail spanning them. Corollary from
+  the same object: a brace quoted at a fixed half-span runs PAST converging
+  legs — quote it at the legs' own offset for its height.
+- **A ladder is a claim about a route.** The water tower's only ladder stopped
+  at tankBottom + 0.4, 0.8 m under the crown walkway at tankBottom + 1.2; the
+  reclaimer's stack ladder BEGAN at padTop + 3.12 on a skid roof nothing else
+  could reach. Both fixed. `ladder()` now takes `cageTo` (default `top`) —
+  a landing needs the stiles 1 m past the deck AND the hoops dead below it, and
+  those are different heights. Also tied the tower ladder to leg 1 at the three
+  ring-brace nodes: a 12 m ladder standing free of its own tower is the same
+  defect from the other side.
+- **A drum's axle must be ON its axis.** The yard reel (`rotateZ(π/2)` → Z axis)
+  was "mounted" by a 0.56 m bar lying across its FACE, and its 0.34 m crown sat
+  60 mm inside the header beam. Now hung on two cheeks written in the HEADER's
+  slot (so the hanger welds to the beam it hangs from) with the drum 80 mm
+  clear underneath.
+- **Sag is not optional to bound.** The Common Hab festoon (`residential.ts`)
+  tied its front ends 0.57 m above the porch rail posts (`habUnit` postTop =
+  floor + 1.048) — nothing there — and its `hypot·0.12 + 0.06` drop over the
+  6.2 m cross run put the string 0.82 m above the deck, straight across the
+  step opening. Masts spliced onto the corner posts in the posts' own `orange`
+  slot, ties at floor + 2.54, sag capped at 0.34 m.
+- Convention confirmed while chasing a false alarm: the porch chairs are NOT
+  facing the wall. `writeSoups` maps a part's local +Y to `(sin yaw, cos yaw)`
+  and the chair is authored with +Y toward its BACK, while the PLAYER's forward
+  for the same yaw is `(−sin, −cos)`. `chairYaw = habYaw + π·{0.82,1.18}` puts
+  both the seat and the seated camera looking out at the park, ±32°.
+
+### Reported, not fixed
+- `works.ts` reclaimer: `planRect(skidX, skidZ, 0, 2.7, 2.2, 0.9)` pours a
+  4.4 m-wide pad under a 4.6 m-wide skid — the module overhangs its own
+  foundation 100 mm on both X faces. Widening `halfB` to 2.75 fixes it but
+  re-samples `outlineTop` (padTop moves) and cuts the clearance to the machine
+  hall's ACROSS-plus face from 0.96 m to 0.77 m — the two-pours-at-one-datum
+  hazard. Decide against the hall apron's real extent first.
+- `works.ts` yard registers a 3-lamp glow pool at padTop + 3.2 but carries no
+  `utilityLight` geometry above 0.96 m (only the three charge-post status
+  lenses). Either the gantry headers want downlights or the pool wants moving.
+- `PATHS['works-lane']` ends at (42, −54); the maintenance yard's 11 × 15 m pour
+  at (28, −70) has no path reaching it at all.
+
+### Probing note
+The browser pane's WebGPU canvas went **permanently stale** partway through this
+session: `toDataURL` AND a live `computer screenshot` both kept returning one
+frozen frame (proved by capturing pitch +1.2 and −1.2 and diffing 32×18 row
+means — identical). Survived `navigate(force:true)`, a fresh tab, and
+`tabs_select`; a brand-new tab then rendered 0 FPS black. Cheap gate worth
+keeping: JPEG byte length or a 5-row brightness profile tells you the frame is
+stale for free, before you spend a screenshot on it.
+
+## Prop-overlap audit (P-wave 3) — dressing that clashes, floats or is buried
+
+Same class as the tram console/vent fix, swept across the four hero interiors,
+the greenhouse fit-out and the station/plaza/hab/leisure dressing. One line per
+defect: what was wrong → root cause → the constraint that now holds it.
+
+**Hero interiors**
+- `opsInterior` console: 6 switch panels on a flat 0.7 stride over a bezel that
+  runs in TWO segments → panel 3 bridged the 120 mm break with nothing behind
+  it, panel 6 stood 225 mm past the bezel and 145 mm past the worktop. Stations
+  now derive from `bezelRuns` (3 per segment, half a panel + 70 mm of bezel).
+- `opsInterior` console: indicator lenses at rake d 0.041 against a panel face
+  at 0.032 → 3 mm float. Now 0.0395, the drawer-pull reveal.
+- `opsInterior` bench: the clipboard was 0.32 m of HEIGHT centred at 0.93 — an
+  unsupported upright with its bottom 22 mm inside the 35 mm shelf. Now flat,
+  long edge ACROSS the 0.34 m deep bench.
+- `opsInterior` rack: `writer.box` size is (ACROSS, height, ALONG); the 9 U
+  blanks and their lamps had those two swapped → each blank a 28 mm blade
+  560 mm deep, standing 255 mm out of the cabinet; the two rails sat 15 mm
+  BEHIND the face. All now set out from `rackFace = a − 0.4`.
+- `habInterior` shelf unit: contents on a fixed 70 mm stride with rng widths to
+  90 mm → neighbours overlapped up to 20 mm and the end pair cut the case
+  sides. Now one item per CELL with a 14 mm gap each side, heights clamped to
+  the clear height, and the case head 0.28 over the top shelf (was 94 mm, so
+  every top-shelf item grew out of the case).
+- `greenhouseInterior`: the dosing skid's bund began at along 14.80 — exactly
+  the last rack frame — so two uprights rose through the kerb and their 140 mm
+  foot plates were cast into the tray. `SKID_ALONG` 15.55 → 15.8.
+- `greenhouseInterior`: the hall's aisle deck started at −15.4, driving a 45 mm
+  panel through the potting bench's front leg and a bin corner. `runStart` is
+  now index-dependent, mirroring the existing `runEnd` rule.
+- `greenhouseInterior`: the service board's two stays raked FORWARD and stopped
+  at z 2.12 in open air → rear kickers to pads on the slab instead.
+- `greenhouseInterior`: the control cabinet bore on the bund kerb over 90 of
+  its 220 mm and cantilevered the rest 75 mm over the sump → two feet.
+- `commonsInterior` galley: the toe wash sat 36–90 mm in FRONT of the carcass
+  with its plinth 114 mm behind it → moved into the plinth's 24 mm set-back.
+- `commonsInterior` galley: back-bar shelves stopped 287 mm short of the cheeks
+  that carry them at BOTH ends → `shelfIn` from the cheek's own half-thickness.
+- `commonsInterior` clinic: the wall screen's panel was inside a SOLID bezel on
+  every axis. The bezel is now a four-member frame with a 2 mm reveal round the
+  panel, and the panel runs back to a BUTT off its tray instead of hanging
+  14 mm off it.
+- `commonsInterior` clinic: the supply cabinet's head strip hung 36 mm off the
+  carcass face → back on the 4 mm butt.
+- `commonsInterior`: hall pendants at 280/308 deg ran through the clinic's
+  glazing, its head rail and the CLINIC fascia → the ring now breaks over the
+  clinic exactly as it breaks over the stair (3.2 deg of clear angle needed).
+- `commonsInterior`: wayfinding plates were sized `width × 0.28` (0.544 m) on a
+  0.40 m tray → through both rails and 72 mm into air. Height is now the tray's
+  clear field and the canvas aspect follows it.
+- `commonsInterior`: planting troughs were ONE solid 0.70 m block, so the liner
+  and the soil were entirely inside it and the foliage cards' bases were 20 mm
+  under its top face. Now base + four kerb walls with the soil filling the void.
+- `commonsInterior`: the entrance pots' soil bed sat below the pot's own dished
+  inner floor → bed on the dish (0.575), planting datum 0.60.
+- `commonsInterior`: the lectern's reading lamp was a straight bar at ly − 0.26
+  while the lectern is an ARC whose nearest material is ly + 0.204 → 0.46 m of
+  air. Now an arc on the concave face under the desk top.
+- `commonsInterior` assembly: long-table foot pads started at z 0 on a
+  medallion that is 2.5 mm proud → 0.004.
+- `loungeInterior`: the penthouse lamp hung at 2.06–2.12 on the `pu − hu` line,
+  which is the U-prism's OPEN side → recessed into the lid's soffit.
+
+**Dressing (residential / leisure / parkAmenities)**
+- Common-Hab notice board: datum was the DOOR SILL face (`deckBack`), and the
+  barrel bulges 0.52 m further out by the board's own height → board, frame and
+  all six notices were 40–110 mm INSIDE the skin. Datum is now
+  `shellHalf[2] + 0.06` (the belt rail, the section's widest point).
+- …its surround: `annularPrism` builds its ring in XY and extrudes along Z — in
+  a +Y-forward frame that lays the "picture frame" FLAT, 3.1 m up over the
+  deck. Now four `prismXZ` members lapping the board's face by 24 mm.
+- …its notices: ±0.04 row jitter on a 0.28 pitch with 0.22 tall notes → 20 mm
+  overlap with coplanar same-facing faces. Jitter ±0.025.
+- Dry rack: `0.03 + t*0.21*(z === 0.86 ? 0 : 0)` is identically zero, so two
+  rails ended 53/101 mm short of the raking legs and the lower towel hung
+  250 mm off every rail. Both now read `rackRailY(z)`.
+- Clothesline: the post's first loft station was t 0.03 of a 2.086 run → 67 mm
+  of air over its cast foot. Garments were centred on x 0 BETWEEN the two lines
+  (±0.16) and 21 mm below them → each now hangs on a line with the same sag.
+- Porch chair: the rear leg ended 10 mm above its own pad (×10 chairs).
+- Stage: front-edge lens bars at `front − 0.45` were 60 mm inside the perimeter
+  beam, whose face is at `front − 0.36`.
+- Equipment alcove: the rack panel hung 10 mm off the wall's inner face; the
+  work lamp hung 30 mm under the roof soffit.
+- Bowl totem: the `signageGlow` bar was inside the 0.24 m post on every axis →
+  moved to the post's crown.
+- Climbing dome: `member()` trims `hub·0.83` off BOTH ends, so the 0.15 m legs
+  came out as 25 mm stubs floating 102 mm over their shoes, eight times round.
+  Legs are now built directly and buried into the shoe.
+- Overlook planter: soil 60 mm inside the wall's inner face AND 60 mm above the
+  apron → a floating block of earth. Now a 12 mm reveal, bedded on the apron.
+- Banner cloth: `HEM` 0.035 of the span = 52.5 mm inset against a ±23 mm arm →
+  29.5 mm of daylight at both arms.
+- Festoon: catenary ends pushed a blanket 0.1 along the span → 39 mm short of
+  the hanging eye. Now 0.052 = eye radius − wire radius.
+- Park model: bases at `TOP + 0.008`, a clearance sized for the plaza disc, so
+  every building standing on the bare table was undercut by 8 mm.
+- Fire point: the cabinet's back plate at y 0.09 against legs whose face is at
+  0.0445 — 45.5 mm with nothing spanning it. Two mounting pads per leg.
+
+**Lessons**
+- `writer.box`'s `size` is (ACROSS, height, ALONG) in the ops/hall frames. An
+  axis swap there does not look wrong in the numbers — it reads as a prop
+  stabbing out of its host. Write the host's FACE plane down as a named const
+  (`rackFace`, `bezelRuns`) and set everything applied out from it.
+- `annularPrism` builds in XY and extrudes in Z. In any Y-forward authoring
+  frame it silently lays a ring flat. Use `prismXZ` members for a vertical
+  frame; `prismXZ` is the only one of the pair that takes (x, z) + y bounds.
+- Four separate lit strips this pass were floating in front of, or buried
+  inside, their host — always the same cause: the host's face plane was never
+  written down, so the strip's radius/offset was chosen by eye. An emissive bar
+  is an APPLIED part and needs the same 4 mm butt every other applied part gets.
+- A planter must be a VOID with walls. A solid prism plus a soil prism inside
+  it hides the soil and buries the planting datum — check any planter whose
+  body is one `sector`/`prism` call (Commons troughs, Overlook planter, and the
+  entrance pots' dished-solid variant were all this).
+- When a run of props is set out on a flat stride but its HOST comes in
+  segments (bezel runs, kerbs, cheeks, bays), derive the stations from the
+  host's own array. Three defects this pass were exactly that.
+- rng-packed shelf/notice content needs CELLS, not a pitch: `pitch − 2·halfMax`
+  must be provably positive for the widest draw, or some seed overlaps.
+- Probing, with several agents saving at once: `window.__elysium.audit()` never
+  survived to completion — Vite HMR reloaded the page under it twice. The cheap
+  substitute for "did every district builder run" is the entry button: it only
+  reaches class `ready` after the world is built, so `navigate(force:true)` +
+  reading `document.querySelector('#entry button').className` is a 10-second
+  proof that nothing throws, for one tool call and no screenshot.
+
+## Signage audit (P-wave 3) — the tracking, the frame and the fin
+
+- **`signageMaterial`'s letterspacing is a PAIR OF U+200A HAIR SPACES, and the
+  shipping face draws U+200A at 0.015 em.** The old width budget
+  `width*0.78 / (1.18*line.length)` costed a character plus tracking at 1.18 em;
+  the real figure is ~0.72 em. So every width-bound line rendered at ~57 % of
+  the size that fits — the founding stone's 30 characters came out 4.4 cm tall
+  on a 2 m plate. Budgets over this string must be MEASURED (`measureText` at a
+  probe size), never counted off `line.length`. If you ever hand-type the
+  separator, note it is NOT two ASCII spaces; `tracked()` in `materials/library`
+  is now the single definition and is exported.
+- **A per-line size fit makes a sign ragged.** The clamp was applied per line,
+  so on any plate where width binds, shorter lines came out bigger: the hydro
+  totem drew 46/63/25/30 px (its subtitle half again its own name), the
+  greenhouse chalkboard 38/19/20/18, the commons directory 42/56/56. One size
+  for the block, fitted to the longest line. A sign that wants a hierarchy must
+  say so in the CONTENT — two plates — not by accident of character count.
+- **A frame in absolute pixels is a different frame on every sign.** The fixed
+  14 px inset / 6 px stroke is 2 % of the 1670 px hydro totem (a 7 mm hairline)
+  and 24 % of the 108 px bay plate (thick enough for the top line of type and
+  the accent bar to land on it). Keyed to `Math.min(w,h)*0.049 / *0.021` it is a
+  constant fraction of the PLATE and reproduces the old 14/6 exactly on the
+  1 : 0.28 plates. That one change cleared every BORDER collision in the park;
+  the text box itself did not need to move.
+- **`writer.box` + `placeYaw` sends LOCAL +Z to `rotationY`.** For a sign built
+  on a facing direction that makes local X the WIDTH and local Z the DEPTH.
+  `stationSign` and `departureBoard` had them swapped, so their cabinets were
+  0.1 m wide and `width` DEEP — a 3.2 m (portal: 5.2 m) fin standing out of the
+  middle of the plate straight at the reader. The plate was always right, which
+  is why nothing caught it: the tell is in the audit's backward ray, which read
+  1.62 m of "host" behind a 3.2 m sign — exactly half its width.
+  `works.ts stencilSign` has the same construction the right way round; copy
+  that one.
+- **Check what is IN FRONT of a sign, not just behind it.** Two signs were
+  perfectly built and unreadable: the side-platform name boards sat at u 0,
+  which `emitPlatformCanopy` makes a bay boundary (12.8 m in 2 bays → columns at
+  −6.4, 0, +6.4), and the commons directory sat at 112 deg, 0.5 deg off the hall
+  column at 112.5 — and its blade faces look RADIALLY, so the inward face was
+  read straight through that column. `tools/signage-audit.mjs` now casts from a
+  reader's eye 3 m out on each plate's normal back to the plate and reports
+  anything in between.
+- **The commons free arc for floor-standing signage is 97.5…118 deg only** —
+  entrance below, helical stair above (118…180). The directory totem is at 100.
+- The departure board draws its own canvas: a board is a TABLE (destinations
+  flush left, times flush right, shared baseline grid) and `signageMaterial`
+  centres every line, so the columns were faked with runs of spaces costed for a
+  monospace font — the time column landed 6.3/8.1/6.3 em from the row start,
+  ragged by ~8 cm on a 2.2 m board. Anything tabular needs its own layout.
+- **`tools/signage-audit.mjs` gained three things worth keeping**: a recording
+  2D context (per-line font size, every ink box, every rect/stroke drawn over
+  it) with MEASURED Helvetica Neue advance widths, so type defects fall out
+  arithmetically; coverage of the two owners the first version silently skipped
+  (`PortalStationSystem` is a class, not a `build*(services)` function, and the
+  side platforms come from `track.buildStations`); and detection of
+  `material.colorNode`/`emissiveNode` textures — `parkAmenities` binds its atlas
+  through TSL, not `material.map`, so all 66 atlas tiles were invisible to the
+  gate. They pass: no legend leaves its tile.
+
+### P-wave 3, second pass — the leftovers, plus the reassigned works/rim items
+
+- **`parkAmenities` rim walk: the instruction was arithmetically impossible, and
+  my own first-pass "fix" had silently emptied the walk.** The brief was to pull
+  the dressing radii in from ±2.45 so the props land on the paved promenade.
+  They cannot: the promenade's WALKING CORRIDOR is `corridorHalf(3.6)` = 1.116 m
+  and `SiteRegistry.free()` refuses anything whose `laneClearance` is under
+  `r + LANE_CLEARANCE`, so the nearest a bench (claim r 1.0) may stand is
+  1.116 + 1.0 + 0.28 = **2.396 m** off the centre line — already 0.6 m outside
+  the 1.8 m paving. Even the plaque (r 0.5) needs 1.896 against 1.8. Pulled to
+  ±1.2, **all 46 rim placements were refused and the 700 m walk had no dressing
+  at all** (the signage tool's placement census is what caught it: `rim-lamp 23,
+  rim-bench 8, rim-viewer 8, rim-plaque 7` refused, none placed). Reverted to
+  ±2.45 → 40 of 46 place. The verge IS the design: principle 2 in that file's
+  header says items on regolith get a base plate that reads as bedded.
+- **`tools/signage-audit.mjs` now prints each blocker's world POINT.** The slot
+  meshes are park-wide merges, so `part:steel` names nothing; the coordinates
+  are what let you find the member. It also tells a POST from a WALL for free:
+  slide the plate along its host and re-run — a post stays put, a wall's hit
+  tracks the plate. That is how the reclaimer's blocker turned out to be the
+  machine hall's gable sheeting 2 m away and not a rail.
+- works yard: all 9 partial occlusions cleared, 9 → 0. Bay numbers were on the
+  bay centre line, which is also the charge post's and the gantry column's; the
+  docked machines' name plates looked straight down the far column (14 deg of
+  park clears them, and the whole charging lead is derived from the pose, so it
+  follows); two of the three sphere cradle plates faced the horizontal N2
+  bullets 1.6 m away, and now take their outboard V face instead — the plate
+  goes on the face that has a read, which is not the same face on all three.
+- works yard: `works-yard` registered 3 `utilityLight` sources at padTop + 3.2
+  with **no emissive geometry above 0.96 m anywhere in the yard**. Three real
+  luminaires now hang off each bay's gantry header on cheeks in the header's own
+  slot. If a glow pool's `count` has no fixture behind it the rig is lighting
+  from nothing — worth a sweep of the other `registerGlowPool` sites.
+- Fixed with the same arithmetic as the first pass: the Ares/name-stone field
+  buried inside its own monolith (the face is the `+0.02` loft station, 0.28 off
+  the centre line, and the field sat at 0.245); the OVERLOOK stays running 10 mm
+  through the printed face; the entrance wash bar 158 mm from any solid (now
+  recessed under the head casting); the base-band wall-wash floating in the
+  middle of its groove; the Common Hab festoon's two back ties starting 95 mm
+  off a barrel that has already leaned in by that height; the connector walk's
+  tail (`link[length−1]` re-read INSIDE the interpolation loop, so the last two
+  pads landed 0.48 m apart); every dwelling's first spur pad inside the precast
+  step block; the rim binoculars' barrel hanging 85 mm in front of its yoke with
+  the lens hood on the wrong end; the park-model plaque as a 0.54 m flat quad on
+  a lathe (92 mm of air at both ends — a turned plinth needs a flat boss); the
+  fire-point legend running through the hose drum; the drinking fountain's pedal
+  and linkage inside the pedestal.
+- **Two findings from the first pass were wrong, and both were wrong the same
+  way — judging a joint without checking the SLOT.** The residential window's
+  mullion and transom share both offset planes, but they are one slot: a flush
+  mullion/transom in a single frame plane is normal joinery and the clash pass
+  compares slot pairs, so there is nothing to fix. Same for walk pads lapping
+  each other. Before reporting a coplanar pair, check whether the two parts are
+  even in different meshes.
+- Verified-resolved by another agent, left alone: the playground slide's grab
+  rails (foot now 50 mm into the deck slab, far end landed on the chute's outer
+  wall). Re-read a site before you fix it from an old note.
+
+**Third pass — nudge-scale leftovers only.** `leisure` bowl capacity stencils
+0.400 → 0.383 (the cheek is a ±0.19 wall shifted 0.19, face at 0.38);
+`leisure` bowl totem plate 0.142 → 0.123 (0.24 deep blade, face at 0.12);
+`leisure` Ares VII plaque 0.192 → 0.173 (0.34 deep stone, face at 0.17) — all
+three now on this file's 3 mm plate standoff, confirmed by the signage tool's
+`behind[0.004, …]` column. `residential` guitar case: `rotateInto`'s lift
+0.53 → 0.5124, because the tipped case's deepest vertex (y 0.52, z 0.018) maps
+to −0.5104 and the case leaned on nothing 19.6 mm over the deck.
+`residential` telescope legs end at foot + 0.021 rather than + 0.028: the 21.5
+deg rake dips the perpendicular end cap 4.8 mm, so all three legs finished 9 mm
+above their own pads. Lesson: a raked tube's end cap is BELOW its path end by
+`halfSection · sin(rake)` — quote a foot height at the cap, not at the axis.
+
+## P-wave 3 closing (2026-08-11)
+
+Owner's four screenshot defects all fixed and verified live: console vent
+relocated below the screen (25 mm clear); entry screen rebuilt as the
+typographic dome-on-the-horizon boot page; rails rebuilt as single continuous
+sweeps with a real turnout + TWO paving cuttings (boulevard throat, promenade
+level crossing) + a graded trench under the whole embedded run; the accent bar
+reserves its strip (and the signage agent then found the deeper truths: ALL
+sign type had rendered at ~57 % of fit size, fitting was per-line, frames were
+fixed-pixel — all measured now).
+
+Wave 3 (4 Opus agents, ~80 confirmed defects fixed): continuity (pipe
+fillets/sockets, rail terminations, 106 mm rail sag, bike rack), plausibility
+(charge leads that PLUG IN, ladders that ARRIVE, columns that BEAR, wheel
+rack/reel rebuilds, festoon rig), signage (systemic type engine + inside-out
+cabinets + occlusions 9→0 + measured audit gate), props (3 passes, ~50
+interpenetration/float/support fixes across every interior + dressing; two
+false alarms retracted; rim-walk tighten honestly REVERTED — the verge is the
+design, documented in code).
+
+Orchestrator batch: spurTrackDatum (interiorHeight) is the spur's ground
+truth — corridors' floors, the trench dip and the walkable datum all derive
+from it; stairFlight caps + baluster soffit gap; removable bollard now
+DROPPED INTO its socket; leaningRail turn-down returns + post soffit gap;
+works-lane extended to the maintenance yard.
+
+LEDGERED FOLLOW-UPS (explicit, small): trike + hand-cart are disconnected
+assemblies needing rebuilds (residential.ts); reclaimer pad underhangs its
+skid 100 mm both X faces (needs machine-hall apron extent before widening,
+works.ts ~2632); works cable tray stops 0.6 m short of both gables with no
+pull box; pre-existing diffuse part:dark::part:dark ~51 m² class (needs
+per-part sweeps). A raked tube's end cap sits below its path end by
+halfSection·sin(rake) — quote foot heights at the CAP (two agents hit this).
+
+Gates: tsc -b EXIT 0, eslint src --max-warnings=0 EXIT 0, fresh-server boot
+clean (no console errors), turnout/trench/crossing/yard/plaza verified live.
+Nothing committed (owner commits).

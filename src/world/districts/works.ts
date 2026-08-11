@@ -472,9 +472,114 @@ function cSection(depth: number, width: number, t = 0.01): Vector2[] {
   ]
 }
 
+/**
+ * Round a pipe polyline's interior corners into real bends before sweeping it.
+ * `writer.tube` frames every station on the MEAN of its two edges, so a bare
+ * 90 deg vertex creases the section instead of bending it, and a run built as
+ * one tube per straight butts two capped ends at every knee. Each corner
+ * becomes `segments` breaks of a quadratic Bezier whose end tangents ARE the
+ * straights either side, so the whole run stays tangent-continuous; the bend
+ * is clamped to 45 % of the shorter neighbour so two close corners cannot eat
+ * each other.
+ */
+function filletPath(points: Vector3[], radius: number, segments = 4): Vector3[] {
+  if (points.length < 3) return points.map((p) => p.clone())
+  const out: Vector3[] = [points[0].clone()]
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i]
+    const back = new Vector3().subVectors(p, points[i - 1])
+    const fore = new Vector3().subVectors(points[i + 1], p)
+    const backLen = back.length()
+    const foreLen = fore.length()
+    if (backLen < 1e-6 || foreLen < 1e-6) continue
+    back.divideScalar(backLen)
+    fore.divideScalar(foreLen)
+    const turn = Math.acos(Math.min(1, Math.max(-1, back.dot(fore))))
+    if (turn < 0.06) {
+      out.push(p.clone())
+      continue
+    }
+    const reach = Math.min(radius * Math.tan(turn / 2), backLen * 0.45, foreLen * 0.45)
+    const a = p.clone().addScaledVector(back, -reach)
+    const b = p.clone().addScaledVector(fore, reach)
+    for (let k = 0; k <= segments; k++) {
+      const u = k / segments
+      out.push(a.clone().lerp(p, u).lerp(p.clone().lerp(b, u), u))
+    }
+  }
+  out.push(points[points.length - 1].clone())
+  return out
+}
+
 /** Flat bar / plate section. */
 function barSection(across: number, up: number): Vector2[] {
   return roundedRect(across, up, Math.min(across, up) * 0.22, 2).map(([x, y]) => new Vector2(x, y))
+}
+
+/**
+ * Cast pipe block with a REAL socket: a skirt up to a rim, then a bore turned
+ * back DOWN to a cup floor. A run that ends in one is terminated into
+ * something — the pipe stops inside the bore with a 40 mm annular reveal, so
+ * nothing is flush, coplanar, or inside another material slot. This is the
+ * guardrail shoe's socket rule (`archkit/kit.ts`) at pipe scale, and it is the
+ * only honest way for a surface pipe to meet a buried main without either
+ * hanging in air or stabbing through the regolith.
+ *
+ * Returns the world Y at which the pipe's own end should stop.
+ */
+function pipeBlock(writer: PartWriter, x: number, z: number, ground: number, bore: number): number {
+  const w = bore + 0.04
+  const s = bore * 2.6
+  const h = bore * 1.7
+  const cup = h * 0.42
+  const block = revolve(
+    [
+      [0, 0],
+      [s, 0],
+      [s + 0.012, 0.026],
+      [s, 0.052],
+      [w + 0.055, h - 0.022],
+      [w + 0.04, h],
+      [w, h - 0.014],
+      [w, cup],
+      [0, cup],
+    ],
+    20,
+    { smooth: SMOOTH.cast },
+  )
+  const base = ground + 0.005
+  translate(block, [x, z, base])
+  writeInto(writer, 'cast', cleanMesh(block))
+  return base + cup + 0.04
+}
+
+/**
+ * Wall sleeve on the hall's ACROSS-plus face: a back plate lapped 8 mm into
+ * the sheeting's crest plane (the sign subframe's rule — lap, never butt) and
+ * a bored collar standing 0.16 m proud of it. The pipe stops INSIDE the bore
+ * with an 18 mm annular reveal, so the run ends in the wall it comes out of
+ * and is never inside the cladding's slot. Returns the point the pipe ends at.
+ */
+function wallSleeve(writer: PartWriter, a: number, h: number, radius: number, slot: string): Vector3 {
+  const bore = radius + 0.018
+  const out = radius + 0.038
+  const md = revolve(
+    [
+      [0, 0],
+      [out, 0],
+      [out, 0.16],
+      [bore, 0.16],
+      [bore, 0.03],
+      [0, 0.03],
+    ],
+    16,
+    { axis: 'x', smooth: SMOOTH.turned },
+  )
+  rotateZ(md, AX_ACROSS)
+  const [x, z] = hallPlan(a, HALF_C + 0.034)
+  translate(md, [x, z, FLOOR + h])
+  writeInto(writer, slot, cleanMesh(md))
+  return hv(a, HALF_C + 0.089, h)
 }
 
 /** A pair of raised collars: the read of a bolted pipe flange. */
@@ -501,6 +606,12 @@ function ladder(
   outward: Vector3,
   caged: boolean,
   cageFrom = 2.4,
+  /**
+   * Where the cage STOPS. A ladder that lands on a platform has to run its
+   * stiles a metre past the deck as grab rails, but the hoops must die below
+   * the deck or the cage crashes through it — so the two heights are separate.
+   */
+  cageTo = top,
 ): void {
   const out = outward.clone().setY(0).normalize()
   const side = new Vector3(-out.z, 0, out.x)
@@ -531,9 +642,9 @@ function ladder(
     })
   }
   if (!caged) return
-  const hoops = Math.max(1, Math.round((top - base.y - cageFrom) / 0.9))
+  const hoops = Math.max(1, Math.round((cageTo - base.y - cageFrom) / 0.9))
   for (let i = 0; i <= hoops; i++) {
-    const y = base.y + cageFrom + ((top - base.y - cageFrom) * i) / hoops
+    const y = base.y + cageFrom + ((cageTo - base.y - cageFrom) * i) / hoops
     const centre = base.clone().addScaledVector(out, 0.3).setY(y)
     const path = arcPts(0, 0, 0.42, -1.9, 1.9, 14).map(
       ([u, v]) => centre.clone().addScaledVector(side, u).addScaledVector(out, v),
@@ -545,7 +656,7 @@ function ladder(
     const v = Math.cos(t) * 0.42
     const from = base.clone().addScaledVector(side, u).addScaledVector(out, 0.3 + v).setY(base.y + cageFrom)
     writer.tube({
-      path: [from, from.clone().setY(top)],
+      path: [from, from.clone().setY(cageTo)],
       radius: 0.012,
       slot: 'steel',
       radialSegments: 5,
@@ -707,6 +818,11 @@ function stencilSign(
       accent: opts.accent ?? '#c94f1d',
       ink: opts.ink,
       widthPx: opts.widthPx,
+      // From the plate, never assumed. Every call site currently takes its
+      // height from `signHeight()` and so lands on the 1 : 0.28 default, but a
+      // plate that ever departs from it would rasterize landscape type onto a
+      // squarer face and squash it — silently, since nothing here checks.
+      aspect: opts.width / opts.height,
     }),
   )
   face.position.copy(opts.at.clone().addScaledVector(f, 0.063))
@@ -1300,9 +1416,16 @@ export function buildHallServices(services: DistrictServices): void {
       chamfer: 0.008,
     })
   }
+  // Conduit drops. Both ends now terminate INSIDE the thing they serve; both
+  // used to hang. The top cap sat at 5.46 — EXACTLY the tray's soffit plane,
+  // a coplanar disc under a 0.38 m wide tray — and the bottom stopped at 1.70
+  // with its pull box's top face (1.57) 0.13 m below it. The tray, the drop and
+  // the box are now ONE slot, which is what makes a socketed joint legal here:
+  // the drop buries 90 mm into the tray and 70 mm into the box, and no cap is
+  // ever left in air or on a shared plane.
   for (const a of [-8.2, -0.4, 7.8]) {
     writer.tube({
-      path: [hv(a, trayC + 0.06, 5.46), hv(a, trayC + 0.06, 2.1), hv(a, -(HALF_C + 0.2), 1.7)],
+      path: [hv(a, trayC + 0.06, 5.55), hv(a, trayC + 0.06, 2.1), hv(a, -(HALF_C + 0.2), 1.5)],
       radius: 0.045,
       slot: 'dark',
       radialSegments: 10,
@@ -1313,7 +1436,7 @@ export function buildHallServices(services: DistrictServices): void {
       center: hv(a, -(HALF_C + 0.2), 1.36),
       size: new Vector3(0.26, 0.42, 0.18),
       rotationY: PSI,
-      slot: 'steelEdge',
+      slot: 'dark',
       chamfer: 0.014,
     })
   }
@@ -1567,26 +1690,49 @@ export function buildPipeRack(services: DistrictServices): void {
     { side: 0.6, lift: 0.46, r: 0.13, slot: 'steel', jacket: false },
     { side: -0.25, lift: -0.2, r: 0.2, slot: 'aluminum', jacket: true },
   ]
+  // Where the rack's cross-run offset lands on the hall's own ALONG axis: the
+  // four pipes leave the wall at four different points ALONG it, not at four
+  // different depths INTO it.
+  const startDir = new Vector3().subVectors(nodes[1], nodes[0]).setY(0).normalize()
+  const startSide = new Vector3(-startDir.z, 0, startDir.x)
+  const alongOfSide = startSide.x * ALONG[0] + startSide.z * ALONG[1]
+  const wallOut = new Vector3(ACROSS[0], 0, ACROSS[1])
+
   for (const o of offsets) {
-    const path: Vector3[] = []
-    for (let i = 0; i < nodes.length; i++) {
+    // Rack stations, node 1 outward. Node 0's offset point is NOT one of them:
+    // `side` at the hall end runs 55 deg across the wall, so offsetting the
+    // shared start node put the four ends at four depths — the 0.6 pipe ended
+    // 0.48 m INSIDE the cladding at 5.4 m, the -0.62 one hung 0.51 m off it in
+    // air. Each pipe now leaves its own sleeve SQUARE to the wall, turns at a
+    // knee 0.8 m out and fans onto its rack line at the first H-frame.
+    const rack: Vector3[] = []
+    for (let i = 1; i < nodes.length; i++) {
       const a = nodes[Math.max(0, i - 1)]
       const b = nodes[Math.min(nodes.length - 1, i + 1)]
       const dir = b.clone().sub(a).setY(0).normalize()
       const side = new Vector3(-dir.z, 0, dir.x)
-      path.push(nodes[i].clone().addScaledVector(side, o.side).setY(nodes[i].y + o.lift))
+      rack.push(nodes[i].clone().addScaledVector(side, o.side).setY(nodes[i].y + o.lift))
     }
+    const mouth = wallSleeve(writer, 8.4 + o.side * alongOfSide, 5.4 + o.lift, o.r, o.slot)
+    const knee = mouth.clone().addScaledVector(wallOut, 0.8)
+    // Battery limit: the run carries 0.45 m past the last H-frame and ends on
+    // a bolted blank — its own cap standing 3 mm proud of the flange collars.
+    const tailDir = new Vector3().subVectors(rack[rack.length - 1], rack[rack.length - 2]).normalize()
+    const tail = rack[rack.length - 1].clone().addScaledVector(tailDir, 0.45)
     writer.tube({
-      path,
+      // 0.55 m bends: the rack turns 74 deg at node 2, which as a bare vertex
+      // creased a 0.4 m pipe in half.
+      path: filletPath([mouth, knee, ...rack, tail], 0.55, 4),
       radius: o.r,
       slot: o.slot,
       radialSegments: 14,
       capStart: true,
       capEnd: true,
     })
+    flangePair(writer, tail.clone().addScaledVector(tailDir, -0.045), tailDir, o.r, 'steelEdge')
     if (o.jacket) {
-      const from = path[1].clone()
-      const to = path[2].clone()
+      const from = rack[0].clone()
+      const to = rack[1].clone()
       writer.tube({
         path: [from, to],
         radius: o.r + 0.055,
@@ -1608,8 +1754,7 @@ export function buildPipeRack(services: DistrictServices): void {
         })
       }
     }
-    const dir = path[1].clone().sub(path[0]).normalize()
-    flangePair(writer, path[0].clone().addScaledVector(dir, 0.55), dir, o.r, 'steelEdge')
+    flangePair(writer, mouth.clone().addScaledVector(wallOut, 0.42), wallOut, o.r, 'steelEdge')
   }
 
   // Valve station at the rack's midpoint: bodies, bonnets, handwheels.
@@ -2175,6 +2320,53 @@ export function buildGallery(services: DistrictServices): void {
   })
   // `stairFlight` carries the flight handrails; only the half landing needs a
   // rail of its own, and its ends bury into the flights' rails (same slot).
+  //
+  // The two FREE ends of that chain are ours to finish. `stairFlight` leaves
+  // its rail as a bare tube end at the foot of the bottom flight (1.02 m up,
+  // over open ground) and at the head of the top flight, which stops 0.08 m
+  // short of the walk and 0.16 m inboard of the walk's own guardrail — 0.41 m
+  // of nothing between two rails a hand is meant to move along. Both runs
+  // below start EXACTLY on that end station with the same radius and slot, so
+  // the joint is a continuation, not a butt.
+  const stairRailY = 1.02
+  const flightDir = new Vector3(ALONG[0], 0, ALONG[1])
+    .multiplyScalar(run)
+    .setY(stepRise)
+    .normalize()
+  for (const s of [-1, 1]) {
+    // Bottom newel: past the first riser, then down to a plate on the pad.
+    const railFoot = hv(baseA, s * 0.79, 0).setY(lowerOrigin.y + stairRailY)
+    const knee = railFoot.clone().addScaledVector(flightDir, -0.16)
+    const pad = groundY(knee)
+    writer.tube({
+      path: filletPath([railFoot, knee, new Vector3(knee.x, pad + 0.08, knee.z)], 0.1, 3),
+      radius: 0.028,
+      slot: 'orangeTop',
+      radialSegments: 10,
+      capStart: true,
+      capEnd: true,
+    })
+    writer.box({
+      center: new Vector3(knee.x, pad + 0.045, knee.z),
+      size: new Vector3(0.24, 0.09, 0.24),
+      rotationY: PSI,
+      slot: 'steelEdge',
+      chamfer: 0.01,
+    })
+    // Head: across into the walk guardrail's first post, stopping 4 mm off its
+    // face — the shadow gap every other bay on that run butts against.
+    writer.tube({
+      path: [
+        hv(stairTopA - 0.7, s * 0.79, DECK_H + stairRailY),
+        hv(stairTopA - 0.62, s * (WALK_HALF - 0.0365), DECK_H + stairRailY),
+      ],
+      radius: 0.028,
+      slot: 'orangeTop',
+      radialSegments: 10,
+      capStart: true,
+      capEnd: true,
+    })
+  }
   for (const s of [-1, 1]) {
     writer.tube({
       path: [
@@ -2717,6 +2909,21 @@ export function buildReclaimer(services: DistrictServices): void {
     true,
     1.6,
   )
+  // ...and the way UP to it. The stack ladder above starts on the roof plate at
+  // padTop + 3.12 and nothing else climbed the 3.1 m module, so the whole
+  // maintenance story stopped in mid-air. This one stands on the pour off the
+  // ribbed flank (the -Z face is all access panels, and the pad has no width
+  // outboard of the skid in X), lands over the roof kerb, and runs its stiles
+  // 1.04 m past it; the cage dies 0.42 m below the deck it serves.
+  ladder(
+    writer,
+    new Vector3(skidX + 1.0, padTop + 0.02, skidZ + 1.85),
+    padTop + 4.16,
+    new Vector3(0, 0, 1),
+    true,
+    2.2,
+    padTop + 2.7,
+  )
 
   // ---- Relief vents with rain caps (the caps live here, clear of the plume).
   for (const s of [-1, 1]) {
@@ -2798,8 +3005,17 @@ export function buildReclaimer(services: DistrictServices): void {
   stencilSign(services, {
     // 1.694, not 1.72: the skid's flank is 61 mm behind `at` at 1.72, so the
     // bosses (35 mm reach) hung 26 mm clear of the machine they name.
-    at: new Vector3(skidX, padTop + 2.5, skidZ - 1.694),
-    facing: new Vector3(0, 0, -1),
+    //
+    // On the +X flank, not the −Z one. −Z faces the machine hall's ALONG-plus
+    // gable across a 2 m gap: the signage auditor put the whole 2.2 m plate
+    // behind that sheeting, and sliding it along the flank only changed the
+    // range (the blocker tracked it, which is how you tell a WALL from a post).
+    // +X is the skid's other plain face — no flank ribs, corner posts at z
+    // ±1.54 well outside the plate's ±1.1 — and it reads across the open apron
+    // toward the tank farm. Same 35 mm rule: the face is at +2.3, so `at` is
+    // 2.265 and the bosses land on the machine they name.
+    at: new Vector3(skidX + 2.265, padTop + 2.5, skidZ),
+    facing: new Vector3(1, 0, 0),
     width: 2.2,
     height: signHeight(2.2),
     lines: ['WATER', 'RECLAIMER', 'R-2'],
@@ -2933,7 +3149,11 @@ export function buildTankFarm(services: DistrictServices): void {
       const ang = (k / 8) * Math.PI * 2 + 0.2
       const foot = new Vector3(
         x + Math.cos(ang) * (RING_R + 0.34),
-        padTop + 0.2,
+        // BEARS on its base plate. The plate tops out at padTop + 0.107 and the
+        // leg used to start at 0.2, so all 24 cradle columns stood on 93 mm of
+        // daylight. The leg is battered 11.6 deg, so its perpendicular end cap
+        // dips 19 mm below the path start: 0.107 + 0.019 + 0.002 of reveal.
+        padTop + 0.128,
         z + Math.sin(ang) * (RING_R + 0.34),
       )
       const head = new Vector3(x + Math.cos(ang) * RING_R, ringY + 0.02, z + Math.sin(ang) * RING_R)
@@ -3062,7 +3282,18 @@ export function buildTankFarm(services: DistrictServices): void {
     )
 
     // Identity plate on the cradle — NASA-punk honesty, read from the walk.
-    const face = new Vector3(-U[0], 0, -U[1])
+    //
+    // The plate goes on the face that HAS a clear read, which is not the same
+    // face on all three spheres. −U is the cluster's inside: the two flanking
+    // spheres (v = ∓5) look straight into the horizontal N2 bullets, whose
+    // aluminium shells stand 1.6 m off their plates and which the signage
+    // auditor reported as blocking both. Those two turn onto their outboard V
+    // face, where the ray runs 3 m into open apron; the far sphere keeps −U.
+    // It also takes the plate off the −U gauge board 0.62 m behind it.
+    const face =
+      v === 0
+        ? new Vector3(-U[0], 0, -U[1])
+        : new Vector3(Math.sign(v) * V[0], 0, Math.sign(v) * V[1])
     stencilSign(services, {
       // +0.30, not +0.34: the cradle ring's nearest face is 75 mm behind `at`
       // at 0.34, so the plate's bosses stood 40 mm off the steel.
@@ -3294,7 +3525,10 @@ export function buildWaterTower(services: DistrictServices): void {
   const mastTop = padTop + WATER_TOWER.height
 
   // ---- Battered lattice legs with three ring braces and X diagonals.
-  const legBase = padTop + 0.21
+  // Same bearing rule as the cradles: the steel shim on the cast plinth tops out
+  // at padTop + 0.139 and the 5.6 deg batter dips the end cap 12 mm, so the leg
+  // starts at 0.153 instead of the old 0.21 (71 mm of daylight under six legs).
+  const legBase = padTop + 0.153
   const legAt = (k: number, t: number): Vector3 => {
     const ang = (k / LEGS) * Math.PI * 2 + 0.26
     const r = legFootR + (legHeadR - legFootR) * t
@@ -3439,18 +3673,38 @@ export function buildWaterTower(services: DistrictServices): void {
     capStart: true,
     capEnd: true,
   })
+  // The climb runs OUTBOARD of leg 1 (`ladderAng` is that leg's own bearing),
+  // up the 0.33 m slot between the tank barrel (R 3.2) and the crown walkway's
+  // inner edge, and lands ON the walkway: it used to stop at tankBottom + 0.4,
+  // 0.8 m short of the only deck it serves, which is a ladder to nowhere. The
+  // hoops die 0.55 m under the deck so the cage cannot cut through it.
   const ladderAng = 0.26 + (2 * Math.PI) / LEGS
   const ladderDir = new Vector3(Math.cos(ladderAng), 0, Math.sin(ladderAng))
-  ladder(
-    writer,
-    new Vector3(x + ladderDir.x * (legFootR + 0.46), padTop + 0.02, z + ladderDir.z * (legFootR + 0.46)),
-    tankBottom + 0.4,
-    ladderDir,
-    true,
-    2.4,
-  )
+  const ladderR = legFootR + 0.46
   const walkR = R + 0.75
   const walkY = tankBottom + 1.2
+  const ladderFoot = new Vector3(x + ladderDir.x * ladderR, padTop + 0.02, z + ladderDir.z * ladderR)
+  ladder(writer, ladderFoot, walkY + 1.05, ladderDir, true, 2.4, walkY - 0.55)
+  // Standoffs to leg 1 at the ring-brace heights. A 12 m ladder standing free
+  // of the frame it climbs is the same defect from the other side.
+  const ladderSide = new Vector3(-ladderDir.z, 0, ladderDir.x)
+  for (const t of [0.28, 0.56, 0.84]) {
+    const anchor = legAt(1, t)
+    for (const s of [-1, 1]) {
+      writer.tube({
+        // Both ends land INSIDE 'steel' members, so the laps weld.
+        path: [
+          anchor.clone().addScaledVector(ladderSide, s * 0.06),
+          ladderFoot.clone().addScaledVector(ladderSide, s * 0.23).setY(anchor.y),
+        ],
+        radius: 0.018,
+        slot: 'steel',
+        radialSegments: 6,
+        capStart: true,
+        capEnd: true,
+      })
+    }
+  }
   ringSection(
     writer,
     'deck',
@@ -3559,7 +3813,10 @@ export function buildMaintenanceYard(services: DistrictServices): void {
     const v = -4.3 + bay * 4.3
     // Gantry: two columns, a header, and a braced knee at each corner.
     for (const s of [-1, 1]) {
-      const foot = yv(s * 1.5, v, 0.2)
+      // The column is vertical and its plate tops out at padTop + 0.114, so it
+      // starts 2 mm clear of it (the task board's posts in this same yard
+      // already do exactly that). At 0.2 the six columns floated 86 mm.
+      const foot = yv(s * 1.5, v, 0.116)
       section(writer, 'steel', [foot, foot.clone().setY(padTop + 3.14)], cSection(0.22, 0.16))
       writer.box({
         center: yv(s * 1.5, v, 0.057),
@@ -3597,22 +3854,95 @@ export function buildMaintenanceYard(services: DistrictServices): void {
       18,
       { axis: 'x', smooth: SMOOTH.turned },
     )
-    const reelAt = yv(0.55, v, 2.86)
+    // The drum turns on a Z axis (rotateZ swings the revolve's +X onto +Z, the
+    // header's own direction). At y 2.86 its 0.34 m crown stood 60 mm INSIDE
+    // the header beam, and it was "mounted" by a 0.56 m bar lying across its
+    // face — the axle 90 deg out from the drum it was meant to carry. It now
+    // hangs 80 mm clear of the beam soffit on two cheeks in the HEADER's own
+    // slot, so the hanger welds to the thing it hangs from.
+    const reelAt = yv(0.55, v, 2.72)
     rotateZ(reel, Math.PI / 2)
     translate(reel, [reelAt.x, reelAt.z - 0.17, reelAt.y])
     writeInto(writer, 'dark', cleanMesh(reel))
+    for (const s of [-1, 1]) {
+      writer.box({
+        // Inner faces 15 mm off the drum's 0.34 m-wide barrel.
+        center: yv(0.55 + s * 0.21, v, 3.0),
+        size: new Vector3(0.14, 0.5, 0.05),
+        slot: 'orange',
+        chamfer: 0.008,
+      })
+    }
+    // Bay downlight. `works-yard` registers three `utilityLight` sources at
+    // padTop + 3.2 — the header line — and the yard had no emissive geometry
+    // above 0.96 m anywhere: three lamps in the light rig with nothing in the
+    // world casting them. One luminaire per bay, hung off the header on two
+    // cheeks in the HEADER's own slot (the cable reel's idiom, so the hanger
+    // welds to the thing it hangs from) and kept on u −0.6, clear of the reel
+    // at 0.21…0.89 and over the machine that parks under it.
+    for (const s of [-1, 1]) {
+      writer.box({
+        center: yv(-0.6 + s * 0.2, v, 3.06),
+        size: new Vector3(0.14, 0.42, 0.05),
+        slot: 'orange',
+        chamfer: 0.008,
+      })
+    }
     writer.box({
-      center: reelAt.clone(),
-      size: new Vector3(0.56, 0.1, 0.1),
+      center: yv(-0.6, v, 2.9),
+      size: new Vector3(0.24, 0.14, 0.35),
       slot: 'steelEdge',
-      chamfer: 0.01,
+      chamfer: 0.012,
     })
+    // Lens on the usual 2 mm reveal under the housing — never flush, and never
+    // a bare emissive face standing on its own.
+    writer.box({
+      center: yv(-0.6, v, 2.815),
+      size: new Vector3(0.17, 0.026, 0.28),
+      slot: 'utilityLight',
+    })
+
+    // The machine's pose is drawn HERE, not at the placement below, because the
+    // charging lead has to terminate in the socket on its left flank and the
+    // socket's world position depends on the yaw jitter.
+    // +0.24 rad off square. The machine's own name plate reads outward on its
+    // rear quarter, and parked dead square it looked straight down the barrel
+    // of the gantry's −u column (0.22 m of steel 0.96 m away, half-angle 6.5
+    // deg): all three name plates came back BLOCKED. A 14 deg park swings the
+    // plate's sight line clear, and everything that depends on the pose — the
+    // socket, and therefore the whole charging lead — is derived from it.
+    const dockYaw = Math.PI + 0.24 + rng.range(-0.05, 0.05)
+    const dockAt = yv(-0.35, v, 0.006)
+    const dockCos = Math.cos(dockYaw)
+    const dockSin = Math.sin(dockYaw)
+    // Charge socket: local (-0.206, 0.33, -0.055) on the groundskeeper shell
+    // (`chassis.ts`, origin at ground contact, +Z forward), carried through the
+    // dock yaw. `out` is the socket's own axis; `fwd` is the machine's nose,
+    // which is the side the open port door swings onto — so the lead comes in
+    // over the REAR quarter and never lands on the door.
+    const socket = new Vector3(
+      dockAt.x - 0.206 * dockCos - 0.055 * dockSin,
+      dockAt.y + 0.33,
+      dockAt.z + 0.206 * dockSin - 0.055 * dockCos,
+    )
+    const dockOut = new Vector3(-dockCos, 0, dockSin)
+    const dockFwd = new Vector3(dockSin, 0, dockCos)
+    // ONE continuous cable: off the reel, through the post's gland, down the
+    // machine's outboard flank and into the socket. It used to stop dead at the
+    // post, 1.4 m from a port that stands open on a machine that is supposedly
+    // on charge.
     writer.tube({
       path: [
-        yv(0.55, v + 0.02, 2.6),
+        // Leaves the drum tangentially at its underside (same slot, so the
+        // 40 mm inside the barrel welds).
+        yv(0.55, v + 0.02, 2.42),
         yv(0.9, v + 0.05, 1.8),
         yv(1.05, v + 0.08, 1.05),
         yv(0.98, v + 0.1, 0.72),
+        yv(0.62, v + 0.4, 0.56),
+        socket.clone().addScaledVector(dockOut, 0.44).addScaledVector(dockFwd, -0.24).setY(padTop + 0.46),
+        socket.clone().addScaledVector(dockOut, 0.24).addScaledVector(dockFwd, -0.11),
+        socket.clone().addScaledVector(dockOut, 0.02),
       ],
       radius: 0.026,
       slot: 'dark',
@@ -3649,9 +3979,14 @@ export function buildMaintenanceYard(services: DistrictServices): void {
       const d = new Vector3(trayOuter[i][0], padTop + 0.055, trayOuter[i][1])
       writer.quad('dark', a, b, c, d)
     }
-    // Bay number on the pad edge.
+    // Bay number on the pad edge, offset 0.75 m off the bay's centre line.
+    // The plate reads back INTO the bay (facing −Z), and on the centre line
+    // that sight line runs through the charge post (u 0.92…1.18, x v−0.05…
+    // v+0.25) and then the gantry's own column (u 1.39…1.61, x v±0.11): the
+    // signage auditor had all three bay numbers BLOCKED at 0.90 and 1.37 m.
+    // Offsetting the plate clears both by 0.19 m and moves nothing structural.
     stencilSign(services, {
-      at: yv(2.35, v, 0.5),
+      at: yv(2.35, v - 0.75, 0.5),
       facing: new Vector3(0, 0, -1),
       width: 0.9,
       height: signHeight(0.9),
@@ -3668,10 +4003,10 @@ export function buildMaintenanceYard(services: DistrictServices): void {
       yaw: 0,
     })
 
-    // The parked machine itself.
+    // The parked machine itself, on the pose the lead was routed against.
     const robot = buildDockedRobot(robotNames[bay])
-    robot.position.copy(yv(-0.35, v, 0.006))
-    robot.rotation.y = Math.PI + rng.range(-0.05, 0.05)
+    robot.position.copy(dockAt)
+    robot.rotation.y = dockYaw
     robot.name = `works:docked:${robotNames[bay]}`
     services.group.add(robot)
   }
@@ -3726,18 +4061,63 @@ export function buildMaintenanceYard(services: DistrictServices): void {
     })
   }
 
-  // ---- Spare wheel rack: an A-frame carrying four real wheels.
+  // ---- Spare wheel rack: two trestles carrying four wheels on a threaded rail.
   {
     const u = 3.2
     const v = 4.6
-    for (const s of [-1, 1]) {
-      const foot = yv(u + s * 0.75, v, 0.02)
-      // The two legs stop 100 mm apart so their end caps never coincide.
-      section(writer, 'steel', [foot, yv(u + s * 0.05, v, 1.55)], cSection(0.12, 0.09))
+    // A hanging rack is only honest if the rail is CARRIED and the tyres are
+    // THREADED. The old build had neither: the rail floated 0.3 m off a single
+    // knife-edge frame that never touched it, and the four 0.62 m discs were
+    // spaced 0.42 m ACROSS the rail, so every neighbouring pair intersected.
+    const HEAD_Y = 1.42
+    const RAIL_Y = HEAD_Y + 0.033
+    const RAIL_R = 0.024
+    const BORE = 0.06
+    for (const e of [-1, 1]) {
+      const uz = u + e * 0.62
+      // The trestles splay across `v`, i.e. PERPENDICULAR to the rail, which is
+      // the only direction a rail-hung load has no bracing of its own.
+      for (const s of [-1, 1]) {
+        section(
+          writer,
+          'steel',
+          [yv(uz, v + s * 0.42, 0.03), yv(uz, v + s * 0.05, HEAD_Y)],
+          cSection(0.11, 0.08),
+        )
+        // Base plate in the LEG's slot, so the buried foot welds instead of
+        // clashing (the plate is the only thing resisting overturning).
+        writer.box({
+          center: yv(uz, v + s * 0.42, 0.03),
+          size: new Vector3(0.22, 0.06, 0.22),
+          slot: 'steel',
+          chamfer: 0.01,
+        })
+      }
+      // Tie quoted at the legs' OWN offset for its height, so it can never run
+      // past the members it braces.
+      const tieV = 0.42 - 0.37 * ((0.62 - 0.03) / (HEAD_Y - 0.03))
+      section(writer, 'steel', [yv(uz, v - tieV, 0.62), yv(uz, v + tieV, 0.62)], cSection(0.09, 0.07))
+      // Saddle over the trestle head, 2 mm clear of the leg tops (cross-slot).
+      writer.box({
+        center: yv(uz, v, HEAD_Y + 0.033),
+        size: new Vector3(0.24, 0.062, 0.14),
+        slot: 'steelEdge',
+        chamfer: 0.008,
+      })
     }
-    section(writer, 'steel', [yv(u - 0.6, v, 0.72), yv(u + 0.6, v, 0.72)], cSection(0.1, 0.08))
+    writer.tube({
+      path: [yv(u - 0.78, v, RAIL_Y), yv(u + 0.78, v, RAIL_Y)],
+      radius: RAIL_R,
+      slot: 'steelEdge',
+      radialSegments: 8,
+      capStart: true,
+      capEnd: true,
+    })
     for (let k = 0; k < 4; k++) {
-      const rail = yv(u - 0.62 + k * 0.42, v - 0.2 + (k % 2) * 0.05, 1.0)
+      // A 0.06 m bore over a 0.024 m rail rides (BORE - RAIL_R) under the rail
+      // axis; 0.2 m-wide tyres at 0.28 m pitch leave 80 mm of air between them
+      // and 45 mm to each trestle.
+      const at = yv(u - 0.42 + k * 0.28, v, RAIL_Y - (BORE - RAIL_R))
       const wheel = revolve(
         [
           [0.06, 0],
@@ -3756,17 +4136,11 @@ export function buildMaintenanceYard(services: DistrictServices): void {
         18,
         { axis: 'x', smooth: SMOOTH.turned },
       )
-      translate(wheel, [rail.x - 0.1, rail.z, rail.y])
+      // Swing the axis of revolution onto +Z, i.e. onto the rail.
+      rotateZ(wheel, Math.PI / 2)
+      translate(wheel, [at.x, at.z - 0.1, at.y])
       writeInto(writer, 'dark', cleanMesh(wheel))
     }
-    writer.tube({
-      path: [yv(u - 0.75, v - 0.3, 1.02), yv(u + 0.75, v - 0.3, 1.02)],
-      radius: 0.024,
-      slot: 'steelEdge',
-      radialSegments: 8,
-      capStart: true,
-      capEnd: true,
-    })
   }
 
   // ---- Task board on twin posts, facing the bays.
@@ -3876,21 +4250,67 @@ export function buildRadiatorField(services: DistrictServices): void {
       p.y = interiorHeight(p.x, p.z) + 0.46
       headerPath.push(p)
     }
+    // Return header, 100 mm outboard and level with the panels' top stubs.
+    const returnPath = headerPath.map((p) => {
+      const q = p.clone().setY(p.y + panelH + 0.5)
+      return q.addScaledVector(p.clone().setY(0).normalize(), 0.1)
+    })
+
+    /**
+     * The riser that turns a header down into a cast pipe block — the buried
+     * main surfacing. Both ends of both headers used to be a flat capped disc
+     * floating in air; this is the only thing either run may end in.
+     */
+    const riser = (top: Vector3, bore: number): Vector3[] => [
+      top.clone(),
+      top.clone().setY(pipeBlock(writer, top.x, top.z, interiorHeight(top.x, top.z), bore)),
+    ]
+    const headTop = (t: number, dr: number, lift: number): Vector3 => {
+      const p = at(t, dr)
+      return p.setY(interiorHeight(p.x, p.z) + lift)
+    }
+
+    // The supply header is ONE run: buried main, the whole row, the expansion
+    // loop, and back into a second block. It used to be two tubes butted at
+    // `headerPath[last]` — two capped discs at the same point on the same
+    // tangent, which is a coplanar pair AND the pieced read the tram rails
+    // were rejected for. Nothing between the two blocks is a joint.
+    const loopBase = at(span + 0.9 / R)
+    loopBase.y = interiorHeight(loopBase.x, loopBase.z) + 0.46
+    const tangent = new Vector3(-loopBase.z, 0, loopBase.x).normalize()
+    const loopTail = loopBase.clone().addScaledVector(tangent, 1.7)
+    const supply: Vector3[] = [
+      ...riser(headTop(-0.9 / R, 0, 0.46), 0.115).reverse(),
+      ...headerPath,
+      loopBase.clone(),
+      loopBase.clone().setY(loopBase.y + 1.15),
+      loopBase.clone().addScaledVector(tangent, 0.85).setY(loopBase.y + 1.15),
+      loopBase.clone().addScaledVector(tangent, 0.85).setY(loopBase.y),
+      ...riser(loopTail, 0.115),
+    ]
     writer.tube({
-      path: headerPath,
+      // 0.34 m bends: 1.5 diameters, and the header's own 0.71 m stations turn
+      // 0.4 deg apiece, which is under `filletPath`'s straight-through cut-off.
+      path: filletPath(supply, 0.34, 4),
       radius: 0.115,
       slot: 'steel',
       radialSegments: 12,
       capStart: true,
       capEnd: true,
     })
-    // Return header, 100 mm outboard and level with the panels' top stubs.
-    const returnPath = headerPath.map((p) => {
-      const q = p.clone().setY(p.y + panelH + 0.5)
-      return q.addScaledVector(p.clone().setY(0).normalize(), 0.1)
-    })
+    // The return dives at its own tangential stations (-1.5 and +0.4): its
+    // risers stand 100 mm outboard of the supply's, so a shared station would
+    // put two 0.2 m pipes through each other.
     writer.tube({
-      path: returnPath,
+      path: filletPath(
+        [
+          ...riser(headTop(-1.5 / R, 0.1, panelH + 0.96), 0.095).reverse(),
+          ...returnPath,
+          ...riser(headTop(span + 0.4 / R, 0.1, panelH + 0.96), 0.095),
+        ],
+        0.3,
+        4,
+      ),
       radius: 0.095,
       slot: 'steel',
       radialSegments: 12,
@@ -3984,28 +4404,6 @@ export function buildRadiatorField(services: DistrictServices): void {
         })
       }
     }
-
-    // Expansion loop at the ALONG-plus end of every run.
-    const endT = span + 0.9 / R
-    const loopBase = at(endT)
-    loopBase.y = interiorHeight(loopBase.x, loopBase.z) + 0.46
-    const radial = loopBase.clone().setY(0).normalize()
-    const tangent = new Vector3(-radial.z, 0, radial.x)
-    writer.tube({
-      path: [
-        headerPath[headerPath.length - 1].clone(),
-        loopBase.clone(),
-        loopBase.clone().setY(loopBase.y + 1.15),
-        loopBase.clone().addScaledVector(tangent, 0.85).setY(loopBase.y + 1.15),
-        loopBase.clone().addScaledVector(tangent, 0.85).setY(loopBase.y),
-        loopBase.clone().addScaledVector(tangent, 1.7).setY(loopBase.y),
-      ],
-      radius: 0.115,
-      slot: 'steel',
-      radialSegments: 12,
-      capStart: true,
-      capEnd: true,
-    })
 
     const rowMid = at(span / 2)
     const rowTangent = new Vector3(-rowMid.z, 0, rowMid.x).normalize()

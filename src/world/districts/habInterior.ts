@@ -552,7 +552,22 @@ function sofa(parts: Record<string, MeshData[]>, cx: number, cy: number, yawFlip
   }
 }
 
-/** A shelf unit against the far end wall — the room's stored life. */
+/**
+ * A shelf unit against the far end wall — the room's stored life.
+ *
+ * Set-out that the contents depend on: the side panels' INNER faces are at
+ * `x ± 0.184` (centres ±0.197, 26 mm thick) and the shelf pitch is 0.40, so
+ * every shelf has 0.374 of clear height under the next one. The case head is
+ * 0.28 over the top shelf for the same reason — at the old 1.94 the top shelf
+ * had 94 mm of air over it and its contents grew straight out of the case.
+ */
+const SHELF_PITCH = 0.4
+const SHELF_0 = 0.22
+const SHELF_COUNT = 5
+const CASE_H = SHELF_0 + (SHELF_COUNT - 1) * SHELF_PITCH + 0.28
+/** Clear width the contents may occupy: inner faces less an 8 mm side margin. */
+const SHELF_CLEAR_HALF = 0.176
+
 function shelfUnit(parts: Record<string, MeshData[]>, x: number, rng: Rng): void {
   const back = -(FLOOR_HALF - 0.03)
   const depth = 0.36
@@ -561,21 +576,31 @@ function shelfUnit(parts: Record<string, MeshData[]>, x: number, rng: Rng): void
     const side = prism(
       roundedRect(0.026, depth, 0.006, 1).map(([px, py]) => [px + x + sy * 0.197, py + back + depth / 2] as Vec2),
       F,
-      F + 1.94,
+      F + CASE_H,
     )
     bevel(side, BEVEL.panel, 2)
     put(parts, 'habShell', side)
   }
-  for (let k = 0; k < 5; k++) {
-    const z = F + 0.22 + k * 0.4
+  for (let k = 0; k < SHELF_COUNT; k++) {
+    const z = F + SHELF_0 + k * SHELF_PITCH
     const shelf = prism(polyOffset(plan, -0.028), z, z + 0.024)
     bevel(shelf, BEVEL.panel, 2)
     put(parts, 'habShell', shelf)
+    // Contents are packed into equal CELLS across the clear width, one item per
+    // cell with a 14 mm gap either side of it. On the old fixed 70 mm stride
+    // (`x − 0.14 + i/(items−1) · 0.28`) two 90 mm boxes could not both fit in
+    // it: at five items neighbours overlapped by up to 20 mm and the end pair
+    // ran 1 mm into the side panels.
     const items = rng.int(2, 5)
+    const cell = (SHELF_CLEAR_HALF * 2) / items
+    // Height is bounded by what is actually over this shelf, so nothing grows
+    // through the shelf above it or out of the top of the case.
+    const clear = (k === SHELF_COUNT - 1 ? CASE_H - (SHELF_0 + k * SHELF_PITCH) : SHELF_PITCH) - 0.026 - 0.03
     for (let i = 0; i < items; i++) {
-      const h = rng.range(0.1, 0.24)
-      const wdt = rng.range(0.04, 0.09)
-      const px = x - 0.14 + (i / Math.max(1, items - 1)) * 0.28
+      const h = rng.range(0.1, Math.min(0.24, clear))
+      const wdt = Math.min(rng.range(0.04, 0.09), cell - 0.028)
+      const slack = (cell - wdt - 0.028) / 2
+      const px = x - SHELF_CLEAR_HALF + (i + 0.5) * cell + rng.range(-slack, slack)
       const box = prism(
         roundedRect(wdt, rng.range(0.14, 0.24), 0.008, 1).map(
           ([bx, by]) => [bx + px, by + back + depth * 0.5] as Vec2,

@@ -703,7 +703,11 @@ function writeBanner(soup: SwaySoup, spec: BannerSpec, rect: AtlasRect): void {
   // The cloth stops 3.5 % short of each arm centreline: it is sleeved over
   // them in the fiction, but a grid that reaches the arm axis threads straight
   // through the 46 mm arm section.
-  const HEM = 0.035
+  // 0.014 of the 1.5 m arm-to-arm span = 21 mm, which is inside the arm
+  // section's own ±23 mm half-height. At 0.035 the inset was 52.5 mm and the
+  // cloth's hem ended 29.5 mm clear of the arm it is sleeved over, top and
+  // bottom — a strip of daylight where the sleeve should be.
+  const HEM = 0.014
 
   const at = (ci: number, ri: number, layer: number): { p: Vector3; u: number; v: number; w: number } => {
     const u = ci / COLS
@@ -954,6 +958,26 @@ function firePointParts(): PartSoup[] {
   rotX(shell, -Math.PI / 2)
   translate(shell, [0, BACK, 0.95])
   orange.push(smoothShade(shell, SMOOTH.shell))
+  // Mounting pads, two per leg. The columns are 10-gons on x = ±0.46 whose
+  // forward face reaches only y = 0.0445, and the cabinet's back plate is at
+  // y = BACK = 0.09: without something spanning that 45.5 mm the whole cabinet
+  // hangs in the air 0.57 m over its plinth, carried by nothing. Same slot as
+  // both parts, so each pad welds into the leg and butts the shell.
+  for (const sx of [-1, 1]) {
+    for (const pz of [0.73, 1.17]) {
+      orange.push(
+        bevel(
+          prism(
+            roundedRect(0.06, 0.07, 0.012, 2).map(([px, py]) => [px + sx * 0.46, py + 0.055] as Vec2),
+            pz - 0.045,
+            pz + 0.045,
+          ),
+          BEVEL.hardware,
+          2,
+        ),
+      )
+    }
+  }
   const drum = revolve(
     [
       [0, 0],
@@ -1054,13 +1078,27 @@ function fountainParts(): PartSoup[] {
     ),
   )
   // Foot pedal + linkage — the part that says this is plumbed, not decorative.
-  dark.push(bevel(prism(roundedRect(0.26, 0.09, 0.015, 2), 0.115, 0.145), BEVEL.hardware, 1))
+  // Both stand on the USER's side (−y, the side the bottle filler's nozzle and
+  // the bubbler both turn to). Centred on the axis, the pedal was inside the
+  // pedestal: its surface is r 0.122 at this height, so all that showed was
+  // 15 mm of each corner, and the linkage was buried whole.
+  dark.push(
+    bevel(
+      prism(
+        roundedRect(0.26, 0.09, 0.015, 2).map(([x, y]) => [x, y - 0.16] as Vec2),
+        0.115,
+        0.145,
+      ),
+      BEVEL.hardware,
+      1,
+    ),
+  )
   dark.push(
     smoothShade(
       tubeAlong(
         [
           [0, -0.02, 0.13],
-          [0, -0.115, 0.13],
+          [0, -0.16, 0.13],
         ],
         circle(0.014, 8),
         { up: [0, 0, 1] },
@@ -1103,12 +1141,17 @@ function rackParts(): PartSoup[] {
       cast.push(shoe)
     }
   }
+  // The tie rail runs ON the foot line (y = -HALF), not up the middle: at y 0
+  // it passed 0.69 m under the crown of every arch and touched nothing, then
+  // overhung both end hoops by 0.16 m and stopped in air. It now dies inside
+  // the two end legs — same slot, so those are welds — and its 50 mm width is
+  // 2 mm under the leg's own diameter, so no face is ever flush with one.
   white.push(
     smoothShade(
       tubeAlong(
         [
-          [-span - 0.16, 0, 0.102],
-          [span + 0.16, 0, 0.102],
+          [-span, -HALF, 0.102],
+          [span, -HALF, 0.102],
         ],
         roundedRect(0.05, 0.024, 0.007, 2),
         { up: [0, 0, 1] },
@@ -1244,8 +1287,29 @@ function binocularParts(): PartSoup[] {
     { smooth: SMOOTH.turned },
   )
   rotX(body, Math.PI / 2 + 0.1)
-  translate(body, [0, -0.16, 1.3])
+  // The barrel is CARRIED BY the yoke: its rear cap sits 15 mm behind the
+  // cheeks' back face (y ±0.075) so the whole eyepiece end runs between them,
+  // and the axis crosses their z band (1.06…1.34) at 1.231. At (0, −0.16, 1.3)
+  // it began 85 mm in FRONT of the cheeks — a barrel hanging in the air off the
+  // end of a yoke that touched nothing, on eight rim-walk viewers.
+  translate(body, [0, 0.09, 1.24])
   alloy.push(body)
+  // Trunnion bosses across the 7 mm clearance to each cheek, stopping on the
+  // 1.5 mm reveal. Barrel slot, so the buried half welds into the barrel.
+  for (const sx of [-1, 1]) {
+    const boss = revolve(
+      [
+        [0, -0.0118],
+        [0.019, -0.0118],
+        [0.019, 0.0118],
+        [0, 0.0118],
+      ],
+      12,
+      { axis: 'x', smooth: SMOOTH.turned },
+    )
+    translate(boss, [sx * 0.0518, 0, 1.231])
+    alloy.push(boss)
+  }
   const shade = ringBand(
     0.05,
     0,
@@ -1258,7 +1322,11 @@ function binocularParts(): PartSoup[] {
     14,
   )
   rotX(shade, Math.PI / 2 + 0.1)
-  translate(shade, [0, 0.2, 1.264])
+  // On the OBJECTIVE, which the barrel's own axis puts at (0, −0.308, 1.20):
+  // this ring sits just behind the nose at 0.37 of the barrel's length. At
+  // (0, 0.2, 1.264) it was 0.35 m up the wrong end, floating behind the
+  // eyepiece — the barrel points toward −y.
+  translate(shade, [0, -0.27, 1.203])
   alloy.push(shade)
   BINOCULAR = bakeParts({ dark, aluminum: alloy, steelEdge: cast })
   return BINOCULAR
@@ -1455,6 +1523,18 @@ function noticeParts(): PartSoup[] {
   const cast: MeshData[] = []
   const BACK = 0.05
   for (const sx of [-1, 1]) {
+    // Set pad under each shoe. This board is 1.72 m between posts, it is placed
+    // as ONE rigid soup on ONE `interiorHeight` sample at its centre, and it
+    // stands on open regolith — the grade across it runs to 155 mm, which a
+    // 64 mm shoe cannot absorb, so one shoe hung in the air. A 0.17 m plinth
+    // takes the difference either way: buried on the high side, a bedded pad on
+    // the low one. Same slot as the shoe, so the 4 mm it laps welds.
+    const setPad = bevel(
+      prism(roundedRect(0.26, 0.26, 0.03, 2).map(([x, y]) => [x + sx * 0.86, y] as Vec2), -0.17, 0.004),
+      BEVEL.carcass,
+      2,
+    )
+    cast.push(setPad)
     const shoe = postShoe(0.095, 0.056)
     translate(shoe, [sx * 0.86, 0, 0])
     cast.push(shoe)
@@ -1517,6 +1597,23 @@ function parkModelParts(): PartSoup[] {
       { smooth: SMOOTH.turned },
     ),
   )
+  // Flat boss for the plaque on the local −y face. The plinth is a LATHE: at
+  // the plaque's 0.5 m height its surface is r 0.4116, so the 0.54 m flat quad
+  // hung on r 0.425 stood 92 mm off the casting at both ends. A raised pad is
+  // what a plate needs on a turned plinth — same slot as the plinth, so the
+  // 23 mm it bites in welds, and its face gives the plate a true 3.4 mm
+  // standoff across its whole width.
+  cast.push(
+    bevel(
+      prism(
+        roundedRect(0.6, 0.0416, 0.012, 2).map(([x, y]) => [x, y - 0.4008] as Vec2),
+        0.36,
+        0.62,
+      ),
+      BEVEL.panel,
+      2,
+    ),
+  )
   // Table top: a rolled-edge disc, the model's ground plane.
   cast.push(
     revolve(
@@ -1566,6 +1663,12 @@ function parkModelParts(): PartSoup[] {
     [WORKS.machineHall.x, WORKS.machineHall.z, 10, 9],
     [PORTAL_STATION.x, PORTAL_STATION.z, 9, 5],
   ]
+  // TOP + 0.003, not + 0.008: the plaza disc and the boulevard ring are only
+  // 7 mm thick and cover r ≤ 0.124 and r ∈ [0.433, 0.491] of the table, so a
+  // clearance sized to sit on THEM left every building that stands on the bare
+  // table (Commons, Hydro, Water Tower, Overlook, machine hall) with an 8 mm
+  // undercut — on the one object a guest reads at half a metre. Everything
+  // here is one slot, so where a base does land on the disc it simply welds.
   for (const [mx, mz, r, h] of model) {
     const tower = revolve(
       [
@@ -1578,7 +1681,7 @@ function parkModelParts(): PartSoup[] {
       12,
       { smooth: SMOOTH.turned },
     )
-    translate(tower, [mx * SCALE, mz * SCALE, TOP + 0.008])
+    translate(tower, [mx * SCALE, mz * SCALE, TOP + 0.003])
     alloy.push(tower)
   }
   for (const hab of habSites()) {
@@ -1593,7 +1696,7 @@ function parkModelParts(): PartSoup[] {
       10,
       { smooth: SMOOTH.turned },
     )
-    translate(pod, [hab.x * SCALE, hab.z * SCALE, TOP + 0.008])
+    translate(pod, [hab.x * SCALE, hab.z * SCALE, TOP + 0.003])
     alloy.push(pod)
   }
   // The First Tree, 12 m tall at 1:210 — 57 mm of ginkgo.
@@ -2056,6 +2159,21 @@ function dressPlaza(d: Dressing): void {
  */
 function dressRimWalk(d: Dressing): void {
   const radius = PARK.rimWalkRadius
+  /**
+   * ±2.45 is the VERGE line, and it is not free to move inward.
+   *
+   * The promenade is paved 3.6 m wide (r 110.2…113.8) but its walking corridor
+   * is `corridorHalf(3.6)` = 1.116 m, and `free()` refuses any placement whose
+   * `laneClearance` is under `r + LANE_CLEARANCE`. The widest family here is
+   * the bench (claim r 1.0), so the nearest a bench may stand is
+   * 1.116 + 1.0 + 0.28 = 2.396 m off the centre line — already 0.6 m outside
+   * the paving. There is no offset that is both clear of the corridor and on
+   * the slab: even the plaque (r 0.5) needs 1.896 against 1.8 m of paving.
+   * Pulled in to ±1.2 as an experiment, ALL 46 rim placements were refused and
+   * the whole 700 m walk went undressed. Verge it is — which is also principle
+   * 2 in this file's header: items on regolith get a base plate that reads as
+   * bedded, exactly as every path family already does.
+   */
   const inner = radius - 2.45
   const outer = radius + 2.45
   const spacing = 15.4
@@ -2659,11 +2777,18 @@ function dressServiceLayer(d: Dressing, rng: Rng): void {
       // shell tops out at 1.26, so the legend used to stand 16 mm proud of the
       // mouth with its top 50 mm hanging in open air above the cabinet. This
       // is the notice board's proven 14 mm reveal inside the rim.
-      center: spot.clone().addScaledVector(forward, 0.376).setY(spot.y + 1.09),
+      // 0.416 x 0.16 on 1.165, not 0.62 x 0.24 on 1.09. The hose drum lies on
+      // the same axis: its barrel is r 0.12 about z 0.95 at this plate's depth
+      // (its flanges reach 0.19), so a 0.24 m legend centred on 1.09 ran its
+      // bottom 100 mm THROUGH the drum. The clear field between the drum's
+      // barrel (1.07) and the shell head (1.26) is 0.19 m, and this is the
+      // largest plate at the registered 2.6 aspect that sits inside it with a
+      // 15 mm margin top and bottom.
+      center: spot.clone().addScaledVector(forward, 0.376).setY(spot.y + 1.165),
       yaw,
       pitch: 0,
-      width: 0.62,
-      height: 0.24,
+      width: 0.416,
+      height: 0.16,
       lit: false,
     })
     d.services.colliders.push({
@@ -2749,11 +2874,13 @@ function dressFestoons(d: Dressing, wire: SwaySoup, bulbs: SwaySoup): void {
 
   const bulb = festoonBulb()
   for (const [rawA, rawB, sag] of anchors) {
-    // Start each catenary clear of the mast it hangs from: a wire beginning on
-    // the mast axis threads straight through the column.
+    // Start each catenary ON the hanging eye it is tied to, not merely clear of
+    // the mast: the eye's outer surface is 0.061 off the mast axis and the wire
+    // is 0.009 thick, so 0.052 lands the end cap on it. A blanket 0.1 left a
+    // 39 mm gap between the wire and the ring it hangs from.
     const along = new Vector3().subVectors(rawB, rawA).normalize()
-    const a = rawA.clone().addScaledVector(along, 0.1)
-    const b = rawB.clone().addScaledVector(along, -0.1)
+    const a = rawA.clone().addScaledVector(along, 0.052)
+    const b = rawB.clone().addScaledVector(along, -0.052)
     const span = a.distanceTo(b)
     const stations = Math.max(10, Math.round(span / 0.9))
     const path: Vector3[] = []

@@ -478,14 +478,27 @@ export function stairFlight(writer: PartWriter, spec: StairSpec): { top: Vector3
       bottom.clone().setY(bottom.y + 1.02),
       top.clone().setY(top.y + 1.02),
     ]
-    writer.tube({ path: railPath, radius: 0.028, slot: 'orangeTop', radialSegments: 10 })
+    // Caps ON (the default is off — every flight shipped with open hollow
+    // rail ends), and balusters stop 4 mm under the rail soffit instead of
+    // running to its axis: 20 mm of one tube inside another reads as a weld
+    // blob at every post.
+    writer.tube({
+      path: railPath,
+      radius: 0.028,
+      slot: 'orangeTop',
+      radialSegments: 10,
+      capStart: true,
+      capEnd: true,
+    })
     for (const t of [0.12, 0.5, 0.88]) {
       const foot = bottom.clone().lerp(top, t)
       writer.tube({
-        path: [foot.clone(), foot.clone().setY(foot.y + 1.02)],
+        path: [foot.clone(), foot.clone().setY(foot.y + 1.02 - 0.028 - 0.004)],
         radius: 0.02,
         slot: 'orange',
         radialSegments: 8,
+        capStart: true,
+        capEnd: true,
       })
     }
   }
@@ -883,15 +896,26 @@ function buildBollard(removable: boolean): PartSoup[] {
   const white: MeshData[] = []
   const bright: MeshData[] = []
   const dark: MeshData[] = []
-  const foot = removable ? 0.055 : 0
   const top = removable ? 0.92 : 1.0
 
+  // Removable: a PLAIN shaft dropped 60 mm into the collar (the fixed
+  // variant's base flare would foul the 110 mm socket bore) — the socket
+  // visibly RECEIVES the column. It used to start 55 mm in the air above
+  // its own socket (prop-audit finding).
+  const base: Vec2[] = removable
+    ? [
+        [0, -0.06],
+        [0.093, -0.06],
+      ]
+    : [
+        [0, 0],
+        [0.104, 0],
+        [0.108, 0.01],
+        [0.104, 0.022],
+        [0.093, 0.075],
+      ]
   const column: Vec2[] = [
-    [0, foot],
-    [0.104, foot],
-    [0.108, foot + 0.01],
-    [0.104, foot + 0.022],
-    [0.093, foot + 0.075],
+    ...base,
     // machined groove for the reflective band
     [0.093, top - 0.31],
     [0.083, top - 0.298],

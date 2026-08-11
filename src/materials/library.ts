@@ -135,6 +135,20 @@ export function heroGlass(tint = new Color(0.86, 0.93, 0.88)): MeshPhysicalNodeM
 }
 
 /**
+ * Letter tracking for stencil type: a PAIR OF U+200A HAIR SPACES between
+ * glyphs. The shipping face draws U+200A at 0.015 em, so this is ~0.03 em of
+ * air per gap — nowhere near the ~0.56 em a pair of ASCII spaces would add.
+ * Any width budget written against this string has to be MEASURED, not
+ * counted off the character count (see `signageMaterial`).
+ */
+export function tracked(line: string): string {
+  return line.split('').join('  ')
+}
+
+/** Horizontal scale the stencil face is drawn at — part of the drawn width. */
+const XSCALE = 1.06
+
+/**
  * Stencil signage: crisp uppercase text on a plate, canvas-rasterized.
  * `aspect` is the TARGET PLANE's width/height — the canvas matches it so
  * texels stay square on the mesh. The old fixed 1:0.28 canvas squashed the
@@ -161,34 +175,87 @@ export function signageMaterial(
     const ink = options?.ink ?? '#efe9dc'
     g.fillStyle = options?.background ?? '#1c1a19'
     g.fillRect(0, 0, canvas.width, canvas.height)
+    // The frame is a FRACTION OF THE PLATE'S SHORT SIDE, not the fixed 14 px
+    // inset / 6 px stroke it carried before. Those absolutes are 2 % of the
+    // 1670 px hydro totem and 24 % of the 108 px bay plate, so the same
+    // "border" was a 7 mm hairline on one sign and, on another, a slab thick
+    // enough for the accent bar and the top line of type to land on it. Keyed
+    // to the short side it is a constant fraction of the PLATE, and on a
+    // 1 : 0.28 plate (short side 287 px of a 1024 canvas) it resolves to
+    // exactly the 14 / 6 it always was.
+    const short = Math.min(canvas.width, canvas.height)
+    const frameInset = Math.max(4, Math.round(short * 0.049))
+    const frameLine = Math.max(2, Math.round(short * 0.021))
+    // Keep-out for everything that is NOT the frame — type and accent bar
+    // both respect it: the frame's own reach plus a breath.
+    const pad = frameInset + frameLine + Math.max(4, Math.round(short * 0.035))
     // The border is the ink at a quarter strength, NOT a hard-coded pale
     // grey: on a light plate (the water tower) a pale border is invisible.
     // For the default cream ink this is the same pixel it always was.
     g.globalAlpha = 0.25
     g.strokeStyle = ink
-    g.lineWidth = 6
-    g.strokeRect(14, 14, canvas.width - 28, canvas.height - 28)
+    g.lineWidth = frameLine
+    g.strokeRect(
+      frameInset,
+      frameInset,
+      canvas.width - 2 * frameInset,
+      canvas.height - 2 * frameInset,
+    )
     g.globalAlpha = 1
     g.fillStyle = ink
     g.textAlign = 'center'
     g.textBaseline = 'middle'
-    const lineHeight = canvas.height / (lines.length + 0.6)
+    // The accent bar reserves its own strip UNDER the text block. Drawn at a
+    // fixed 34 px off the plate bottom (as it was), any 3-line sign's last
+    // line ran straight through it (heat-rejection finding). With no accent
+    // the band is zero and the layout is pixel-identical to the old one.
+    const accentH = options?.accent ? Math.max(10, Math.round(canvas.height * 0.05)) : 0
+    const accentBand =
+      accentH > 0
+        ? accentH +
+          Math.max(16, Math.round(canvas.height * 0.1)) +
+          Math.max(14, Math.round(canvas.height * 0.06))
+        : 0
+    const boxH = canvas.height - accentBand
+    const lineHeight = boxH / (lines.length + 0.6)
+    // ONE size for the whole block, and it is MEASURED.
+    //
+    // The old budget was `width * 0.78 / (1.18 * line.length)`, where 1.18 em
+    // stood for a character plus the tracking added below. But that tracking
+    // is a PAIR OF U+200A HAIR SPACES, which the shipping face draws at
+    // 0.015 em — next to nothing — so a cap plus tracking is ~0.72 em, not
+    // 1.18. Two owner-visible consequences: every width-bound line rasterized
+    // at ~57 % of the size that fits (the founding stone's 30 characters came
+    // out 4.4 cm tall on a 2 m plate), and because the budget was per LINE the
+    // lines of one sign came out at different sizes — the hydro totem drew
+    // 46 / 63 / 25 / 30 px, so its subtitle was half again its own name.
+    //
+    // Measuring the longest line at a probe size and sharing that size across
+    // the block fixes both. A sign that wants a hierarchy states it in the
+    // CONTENT — a name plate and a caption plate — not by accident of length.
+    const probe = 100
+    g.font = `700 ${probe}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+    let fit = Infinity
+    for (const line of lines) {
+      const drawn = g.measureText(tracked(line)).width * XSCALE
+      if (drawn > 0) fit = Math.min(fit, ((canvas.width - 2 * pad) * probe) / drawn)
+    }
+    const size = Math.min(lineHeight * 0.72, fit)
+    g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
     lines.forEach((line, index) => {
-      // Width term must account for the letter spacing applied below, or any
-      // line ≥ 12 chars overflows the plate (works-district finding).
-      const size = Math.min(lineHeight * 0.72, (canvas.width * 0.78) / Math.max(4, 1.18 * line.length))
-      g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
-      const y = canvas.height / 2 + (index - (lines.length - 1) / 2) * lineHeight
+      const y = boxH / 2 + (index - (lines.length - 1) / 2) * lineHeight
       g.save()
       g.translate(canvas.width / 2, y)
-      g.scale(1.06, 1)
-      const spaced = line.split('').join('  ')
-      g.fillText(spaced, 0, 0)
+      g.scale(XSCALE, 1)
+      g.fillText(tracked(line), 0, 0)
       g.restore()
     })
-    if (options?.accent) {
+    if (options?.accent && accentH > 0) {
       g.fillStyle = options.accent
-      g.fillRect(24, canvas.height - 34, canvas.width - 48, 10)
+      const barBottom = canvas.height - Math.max(16, Math.round(canvas.height * 0.1))
+      // Same keep-out as the type. At a fixed 24 px the bar ran straight
+      // through the side frame of any plate whose short side is over ~500 px.
+      g.fillRect(pad, barBottom - accentH, canvas.width - 2 * pad, accentH)
     }
   }
   const texture = new CanvasTexture(canvas)

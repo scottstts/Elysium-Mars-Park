@@ -1,5 +1,6 @@
 import { CatmullRomCurve3, Vector2, Vector3 } from 'three'
 import {
+  ARRIVAL_SPINE,
   BOULEVARD,
   COMMONS,
   FIRST_TREE,
@@ -279,6 +280,88 @@ function buildRegions(): Region[] {
       halfWidth: path.width / 2,
       curb: true,
     })
+  }
+
+  // The arrival spur's recessed corridor across the boulevard band — the
+  // turnout's counterpart of the guideway channel (same recess, same width,
+  // paving.ts emits its floor+lips; the track agent lays the trackbed and
+  // rails into it). Clipped to the EXISTING paved cover: the corridor region
+  // feeds the walkable-datum field like any region, so a run past the band
+  // edge would grade the regolith trench up to slab datum.
+  {
+    // The FULL spine, not a tail subset: a Catmull-Rom through a subset loses
+    // the upstream control points' pull on the end tangents and bows metres
+    // off the true alignment — the corridors must sit exactly under the
+    // trackbed the track agent sweeps from these same stations.
+    const spine = ARRIVAL_SPINE.map(([x, z]) => new Vector2(x, z))
+    const sampled = ribbonLine(spine, 0, 0)
+    const covered = (p: Vector2): boolean =>
+      list.some(
+        (region) =>
+          region.id !== 'guideway-channel' &&
+          region.priority < 98 &&
+          regionDistance(region, p.x, p.y) < -0.05,
+      ) || Math.abs(p.length() - GUIDEWAY_CHANNEL.radius) < GUIDEWAY_CHANNEL.width / 2
+    // The boulevard corridor is the CONTIGUOUS covered run that ends at the
+    // channel — marched backward from the loop end. A forward findIndex would
+    // latch onto the rim-promenade crossing 10 m upstream and pave the
+    // regolith gap between the two bands.
+    let first = -1
+    for (let i = sampled.length - 1; i >= 0; i--) {
+      if (covered(sampled[i])) first = i
+      else if (first >= 0) break
+    }
+    if (first >= 0) {
+      const line = sampled.slice(first)
+      if (first > 0 && line.length >= 2) {
+        // One overhang station past the band edge, so the corridor mouth
+        // meets the regolith trench instead of leaving a buried strip.
+        const dir = sampled[first].clone().sub(sampled[first + 1]).normalize()
+        line.unshift(sampled[first].clone().addScaledVector(dir, 0.35))
+      }
+      if (line.length >= 2) {
+        list.push({
+          kind: 'ribbon',
+          id: 'spur-corridor',
+          priority: 98,
+          line,
+          halfWidth: GUIDEWAY_CHANNEL.width / 2,
+          curb: false,
+        })
+      }
+    }
+    // The rim-promenade crossing gets the same treatment: without a cut the
+    // trackbed submarines ~50 mm under the walk and the promenade kerbs died
+    // 0.2–0.4 m short of it into bare regolith (continuity-audit finding).
+    // The ribbon is the contiguous stretch of the spine covered by the
+    // promenade annulus, run 0.5 m past both edges so the cut mouths open
+    // into the trench.
+    const promenade = list.find((region) => region.id === 'rim-promenade')
+    if (promenade) {
+      let i0 = -1
+      let i1 = -1
+      for (let i = 0; i < sampled.length; i++) {
+        if (regionDistance(promenade, sampled[i].x, sampled[i].y) < -0.01) {
+          if (i0 < 0) i0 = i
+          i1 = i
+        } else if (i0 >= 0) break
+      }
+      if (i0 > 0 && i1 > i0 && i1 < sampled.length - 1) {
+        const line = sampled.slice(i0, i1 + 1)
+        const head = sampled[i0].clone().sub(sampled[i0 + 1]).normalize()
+        line.unshift(sampled[i0].clone().addScaledVector(head, 0.5))
+        const tail = sampled[i1].clone().sub(sampled[i1 - 1]).normalize()
+        line.push(sampled[i1].clone().addScaledVector(tail, 0.5))
+        list.push({
+          kind: 'ribbon',
+          id: 'spur-corridor-promenade',
+          priority: 98,
+          line,
+          halfWidth: GUIDEWAY_CHANNEL.width / 2,
+          curb: false,
+        })
+      }
+    }
   }
 
   return list
@@ -573,6 +656,8 @@ export function pavedTraffic(x: number, z: number): number {
   for (let i = 0; i < segments.length; i += 2) {
     const region = PAVED_REGIONS[segments[i]]
     if (region.kind !== 'ribbon') continue
+    // The spur corridors are guideway, not walk — no desire-line wear.
+    if (region.id.startsWith('spur-corridor')) continue
     const s = segments[i + 1]
     const d = Math.sqrt(segmentDistanceSq(region.line[s], region.line[s + 1], x, z))
     const reach = region.halfWidth + 1.2
@@ -719,4 +804,53 @@ export function insidePlanter(x: number, z: number, margin = 0): boolean {
 export function insideGuidewayChannel(x: number, z: number, margin = 0): boolean {
   const r = Math.hypot(x, z)
   return Math.abs(r - GUIDEWAY_CHANNEL.radius) < GUIDEWAY_CHANNEL.width / 2 + margin
+}
+
+/** True inside the recessed arrival-spur corridor (same contract).
+ *  Hot path — interiorHeight asks for every floor vertex and heightfield
+ *  sample — so a cached AABB rejects the whole park in four compares. */
+/** Both spur cuttings share one contract; interiorHeight, the floor-light
+ *  exclusion and the channel-lip suppression all ask through here. */
+const CORRIDOR_IDS = ['spur-corridor', 'spur-corridor-promenade']
+
+interface CorridorBox {
+  region: Region & { kind: 'ribbon' }
+  minX: number
+  maxX: number
+  minZ: number
+  maxZ: number
+}
+let corridorBoxes: CorridorBox[] | null = null
+
+/** Signed distance to the nearest corridor edge: negative inside, large when
+ *  absent. Hot path — the cached AABBs reject the whole park in compares. */
+export function spurCorridorDistance(x: number, z: number): number {
+  if (corridorBoxes === null) {
+    corridorBoxes = []
+    for (const id of CORRIDOR_IDS) {
+      const region = PAVED_REGIONS.find((r) => r.id === id)
+      if (!region || region.kind !== 'ribbon') continue
+      const xs = region.line.map((p) => p.x)
+      const zs = region.line.map((p) => p.y)
+      const pad = region.halfWidth + 2.4
+      corridorBoxes.push({
+        region,
+        minX: Math.min(...xs) - pad,
+        maxX: Math.max(...xs) + pad,
+        minZ: Math.min(...zs) - pad,
+        maxZ: Math.max(...zs) + pad,
+      })
+    }
+  }
+  let best = 1e4
+  for (const box of corridorBoxes) {
+    if (x < box.minX || x > box.maxX || z < box.minZ || z > box.maxZ) continue
+    const d = polylineDistance(box.region.line, x, z) - box.region.halfWidth
+    if (d < best) best = d
+  }
+  return best
+}
+
+export function insideSpurCorridor(x: number, z: number, margin = 0): boolean {
+  return spurCorridorDistance(x, z) < margin
 }

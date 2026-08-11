@@ -333,10 +333,13 @@ function buildChair(fabricSlot: string): SlotParts {
       'aluminum',
       smoothShade(
         tubeAlong(
+          // Ends at 0.028: the 0.024-deep section puts the tube's underside on
+          // 0.016, a 2 mm reveal over the 0.014 pad. At 0.036 the rear leg
+          // finished 10 mm above the pad it is supposed to stand on.
           [
             [x, 0.17, 0.44],
             [x, 0.2, 0.24],
-            [x, 0.225, 0.036],
+            [x, 0.225, 0.028],
           ],
           roundedRect(0.028, 0.024, 0.009, 2),
           { cap: true },
@@ -612,7 +615,15 @@ function touchGuitar(): SlotParts {
   return parts
 }
 
-/** Tip a part that was drawn lying flat up onto its edge (about +X). */
+/**
+ * Tip a part that was drawn lying flat up onto its edge (about +X).
+ *
+ * The lift is 0.5124, not 0.53. The case's deepest vertex is (y 0.52, z 0.018)
+ * and at this angle that maps to `0.52·sin + 0.018·cos` = −0.5104, so at 0.53
+ * the whole case — the one object on the porch that is meant to be LEANING on
+ * something — floated 19.6 mm over the deck. This lands its lowest point on the
+ * 2 mm reveal the porch chair's own pads use.
+ */
 function rotateInto(md: MeshData, angle: number): MeshData {
   const c = Math.cos(angle)
   const s = Math.sin(angle)
@@ -620,7 +631,7 @@ function rotateInto(md: MeshData, angle: number): MeshData {
     const y = v[1]
     const z = v[2]
     v[1] = y * c - z * s
-    v[2] = y * s + z * c + 0.53
+    v[2] = y * s + z * c + 0.5124
   }
   md.provenance = null
   return md
@@ -732,9 +743,13 @@ function touchTelescope(): SlotParts {
       'aluminum',
       smoothShade(
         tubeAlong(
+          // Foot end at +0.021, not +0.028: the leg rakes 21.5 deg off vertical
+          // so its perpendicular end cap dips 4.8 mm below the path, which puts
+          // the tube's lowest point on the 2 mm reveal over its 14 mm pad. At
+          // 0.028 all three legs finished 9 mm above the pads they stand on.
           [
             [head[0], head[1], head[2] - 0.08],
-            [foot[0], foot[1], foot[2] + 0.028],
+            [foot[0], foot[1], foot[2] + 0.021],
           ],
           roundedRect(0.026, 0.022, 0.008, 2),
           { cap: true },
@@ -849,6 +864,11 @@ function touchToolbag(rng: Rng): SlotParts {
   return parts
 }
 
+/** y of the dry rack's raking leg line at height z — rails and drapes share it. */
+function rackRailY(z: number): number {
+  return 0.24 + (0.03 - 0.24) * ((z - 0.01) / 0.87)
+}
+
 function touchDryRack(): SlotParts {
   const parts: Record<string, MeshData[]> = {}
   const tube = roundedRect(0.024, 0.024, 0.008, 2)
@@ -871,6 +891,11 @@ function touchDryRack(): SlotParts {
       )
     }
   }
+  // The legs rake in as they rise (y ±0.24 at z 0.01 → ±0.03 at z 0.88), so a
+  // rail's y has to be SOLVED from that line at its own height. Both ends used
+  // a literal 0.03 — the multiplier on one of them was `(z === 0.86 ? 0 : 0)`,
+  // identically zero — which left the two lower rails ending 53 mm and 101 mm
+  // short of the legs in y, in mid-air.
   for (const z of [0.86, 0.66, 0.46]) {
     const t = (0.88 - z) / 0.88
     put(
@@ -879,8 +904,8 @@ function touchDryRack(): SlotParts {
       smoothShade(
         tubeAlong(
           [
-            [-0.3 - t * 0.04, 0.03 + t * 0.21 * (z === 0.86 ? 0 : 0), z],
-            [0.3 + t * 0.04, 0.03, z],
+            [-0.3 - t * 0.04, rackRailY(z), z],
+            [0.3 + t * 0.04, rackRailY(z), z],
           ],
           roundedRect(0.018, 0.018, 0.006, 2),
           { cap: true },
@@ -889,9 +914,11 @@ function touchDryRack(): SlotParts {
       ),
     )
   }
+  // Each drape straddles the rail it hangs on, so its y is that same solved
+  // line: at −0.17 the lower towel hung 250 mm clear of every rail in the rack.
   for (const [z, slot, depthY] of [
-    [0.86, "fabricBlue", 0.03],
-    [0.66, "fabricRust", -0.17],
+    [0.86, "fabricBlue", rackRailY(0.86)],
+    [0.66, "fabricRust", rackRailY(0.66)],
   ] as const) {
     const rings: Vec3[][] = []
     for (let i = 0; i <= 8; i++) {
@@ -930,13 +957,16 @@ function clothesline(rng: Rng): SlotParts {
       'steel',
       smoothShade(
         loft(
+          // The first station is t = 0 at z = 0.046, i.e. 4 mm INSIDE the cast
+          // foot's 0.05 top. At t = 0.03 of a 2.086 run the post's own base
+          // ring started at 0.117 and the post stood on 67 mm of air.
           (
             [
-              [0.03, 0],
+              [0, 0],
               [0.2, -0.012],
               [1, -0.03],
             ] as Array<[number, number]>
-          ).map(([t, off]) => polyOffset(base, off).map(([x, yy]) => [x, yy + y, 0.054 + t * 2.086] as Vec3)),
+          ).map(([t, off]) => polyOffset(base, off).map(([x, yy]) => [x, yy + y, 0.046 + t * 2.094] as Vec3)),
           { closeV: true, capStart: true, capEnd: true },
         ),
         SMOOTH.moulded,
@@ -978,6 +1008,11 @@ function clothesline(rng: Rng): SlotParts {
   for (let k = 0; k < hung; k++) {
     const t = (k + 0.7) / (hung + 0.4)
     const y = -span / 2 + t * span
+    // A garment hangs ON one of the two lines (x = ±0.16) and its fold closes
+    // over the line's own sagged height — `sag()` drops 0.13·4t(1−t) from
+    // 2.045. Centred on x = 0 at 2.02 − droop it hung in the gap BETWEEN the
+    // lines, 21 mm under both of them, attached to nothing.
+    const lineX = k % 2 === 0 ? -0.16 : 0.16
     const droop = 0.13 * 4 * t * (1 - t) + 0.014
     const rings: Vec3[][] = []
     const w = rng.range(0.24, 0.36)
@@ -996,7 +1031,7 @@ function clothesline(rng: Rng): SlotParts {
             [-0.034 + fold, -0.03],
             [-0.028 + fold, 0.012],
           ] as Vec2[]
-        ).map(([x, z]) => [x, yy, z + 2.02 - droop] as Vec3),
+        ).map(([x, z]) => [x + lineX, yy, z + 2.055 - droop] as Vec3),
       )
     }
     put(
@@ -1143,22 +1178,59 @@ function festoon(unit: HabUnitContract, shellY: number): SlotParts {
   const parts: Record<string, MeshData[]> = {}
   const hw = unit.deckHalfWidth
   const front = unit.deckFront
+  // The porch's own railing posts top out at HAB_FLOOR_Z + 1.048 (`habUnit`'s
+  // `postTop`), so the string's front ends used to tie to nothing 0.57 m above
+  // the post heads — and the 6.2 m cross run then sagged to 0.82 m over the
+  // deck, straight across the step opening. Two masts spliced onto the front
+  // corner posts carry it, and the sag is capped so no run crosses head height.
+  const postX = hw - 0.145
+  const tieY = front - 0.17
+  const MAST_TOP = HAB_FLOOR_Z + 2.62
+  const TIE_Z = HAB_FLOOR_Z + 2.54
+  for (const sx of [-1, 1]) {
+    put(
+      parts,
+      // The porch posts' own slot, so the 0.43 m splice welds instead of
+      // clashing.
+      'orange',
+      smoothShade(
+        tubeAlong(
+          [
+            [sx * postX, tieY, HAB_FLOOR_Z + 0.62],
+            [sx * postX, tieY, MAST_TOP],
+          ],
+          roundedRect(0.042, 0.042, 0.012, 2),
+          { cap: true },
+        ),
+        SMOOTH.turned,
+      ),
+    )
+  }
+  // The two back runs die INTO the shell, 5 mm inside its skin. `shellY` is
+  // the door sill's face and the barrel has already leaned back in by the time
+  // it reaches z = HAB_FLOOR_Z + 2.1: the section there is
+  // `WAIST_Y − (WAIST_Y − SIDE_TOP_Y)·t^1.7` at t = 0.892, i.e. 2.642 × 1.2 =
+  // 3.171, which is `shellY + 0.325`. At + 0.42 both wires started 95 mm off
+  // the wall, tied to nothing at all.
+  const backTie = shellY + 0.32
   const anchors: Array<[Vec3, Vec3]> = [
     [
-      [-hw + 0.16, shellY + 0.42, HAB_FLOOR_Z + 2.1],
-      [-hw + 0.16, front - 0.18, HAB_FLOOR_Z + 1.62],
+      [-postX, backTie, HAB_FLOOR_Z + 2.1],
+      [-postX, tieY, TIE_Z],
     ],
     [
-      [hw - 0.16, shellY + 0.42, HAB_FLOOR_Z + 2.1],
-      [hw - 0.16, front - 0.18, HAB_FLOOR_Z + 1.62],
+      [postX, backTie, HAB_FLOOR_Z + 2.1],
+      [postX, tieY, TIE_Z],
     ],
     [
-      [-hw + 0.16, front - 0.18, HAB_FLOOR_Z + 1.62],
-      [hw - 0.16, front - 0.18, HAB_FLOOR_Z + 1.62],
+      [-postX, tieY, TIE_Z],
+      [postX, tieY, TIE_Z],
     ],
   ]
   for (const [a, b] of anchors) {
-    const drop = Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.12 + 0.06
+    // Capped: an unbounded 0.12-per-metre sag is fine for a 2 m run and puts a
+    // 6 m run through the walkway.
+    const drop = Math.min(0.34, Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.12 + 0.06)
     const path = sag(a, b, drop, 14)
     put(parts, 'dark', smoothShade(tubeAlong(path, circle(0.007, 5), { cap: false }), SMOOTH.turned))
     const lamps = Math.max(3, Math.round(Math.hypot(b[0] - a[0], b[1] - a[1]) / 0.58))
@@ -1200,7 +1272,18 @@ function festoon(unit: HabUnitContract, shellY: number): SlotParts {
 function commonPorchFittings(unit: HabUnitContract, shellY: number, rng: Rng): SlotParts {
   const parts: Record<string, MeshData[]> = {}
   const bx = -unit.deckHalfWidth + 1.15
-  // notice board on two legs, standing off the shell
+  /**
+   * The board's back plane. `shellY` is the DOOR SILL's face (`deckBack`), and
+   * the barrel bulges 0.52 m further out than that by the time it reaches this
+   * board's own height: at sill + 0.29…0.33 every part of the board, its frame
+   * and all six notices were 40…110 mm INSIDE the skin. A free-standing board
+   * on the deck has to clear the widest section — the belt rail, which is what
+   * `shellHalf[2]` is — by a real gap.
+   */
+  const back = unit.shellHalf[2] + 0.06
+  const cz = HAB_FLOOR_Z + 1.18
+  // notice board on two legs. The legs stand BEHIND the board's back plane;
+  // centred in its 40 mm thickness they ran through it and out of its face.
   for (const sx of [-1, 1]) {
     put(
       parts,
@@ -1208,8 +1291,8 @@ function commonPorchFittings(unit: HabUnitContract, shellY: number, rng: Rng): S
       smoothShade(
         tubeAlong(
           [
-            [bx + sx * 0.5, shellY + 0.32, HAB_FLOOR_Z],
-            [bx + sx * 0.5, shellY + 0.3, HAB_FLOOR_Z + 1.72],
+            [bx + sx * 0.5, back - 0.025, HAB_FLOOR_Z],
+            [bx + sx * 0.5, back - 0.025, HAB_FLOOR_Z + 1.72],
           ],
           roundedRect(0.05, 0.05, 0.014, 2),
           { cap: true },
@@ -1225,28 +1308,44 @@ function commonPorchFittings(unit: HabUnitContract, shellY: number, rng: Rng): S
       [bx + 0.58, HAB_FLOOR_Z + 1.64],
       [bx - 0.58, HAB_FLOOR_Z + 1.64],
     ],
-    shellY + 0.29,
-    shellY + 0.33,
+    back,
+    back + 0.04,
   )
   put(parts, 'dark', board)
-  // A picture-frame surround has to be a RING. A capped stacked-ring loft is
-  // a solid slab — it laid 1.07 m2 of steel straight over the board's face,
-  // and the audit called it exactly that.
-  const boardPlan = roundedRect(1.2, 0.98, 0.04, 2).map(
-    ([x, z]) => [x + bx, z + HAB_FLOOR_Z + 1.18] as Vec2,
-  )
-  put(
-    parts,
-    'steelEdge',
-    annularPrism(polyOffset(boardPlan, 0.024), boardPlan, shellY + 0.286, shellY + 0.348, 0.01, 1),
-  )
+  // Picture-frame surround: four members lying ON the board's face, lapping its
+  // edge by 24 mm. It was an `annularPrism`, which builds its ring in XY and
+  // extrudes along Z — in this frame (+Y out of the porch, +Z up) that laid the
+  // whole surround FLAT, 3.1 m up in the air over the deck.
+  for (const [x0, z0, x1, z1] of [
+    [bx - 0.606, cz - 0.486, bx + 0.606, cz - 0.436],
+    [bx - 0.606, cz + 0.436, bx + 0.606, cz + 0.486],
+    [bx - 0.606, cz - 0.436, bx - 0.556, cz + 0.436],
+    [bx + 0.556, cz - 0.436, bx + 0.606, cz + 0.436],
+  ] as const) {
+    put(
+      parts,
+      'steelEdge',
+      prismXZ(
+        [
+          [x0, z0],
+          [x1, z0],
+          [x1, z1],
+          [x0, z1],
+        ],
+        back + 0.04,
+        back + 0.058,
+      ),
+    )
+  }
   // pinned notices, in FRONT of the board on a coarse grid so two can never
-  // land on the same square
+  // land on the same square. The row jitter is ±0.025, not ±0.04: rows are
+  // 0.28 apart and a note is up to 0.22 tall, so ±0.04 let two notes in one
+  // column overlap by 20 mm — with their faces on one plane.
   for (let k = 0; k < 6; k++) {
     const w = rng.range(0.13, 0.19)
     const h = rng.range(0.15, 0.22)
     const px = bx - 0.36 + (k % 3) * 0.36 + rng.range(-0.05, 0.05)
-    const pz = HAB_FLOOR_Z + (k < 3 ? 1.31 : 1.03) + rng.range(-0.04, 0.04)
+    const pz = HAB_FLOOR_Z + (k < 3 ? 1.31 : 1.03) + rng.range(-0.025, 0.025)
     const note = prismXZ(
       [
         [px - w / 2, pz - h / 2],
@@ -1254,8 +1353,8 @@ function commonPorchFittings(unit: HabUnitContract, shellY: number, rng: Rng): S
         [px + w / 2, pz + h / 2],
         [px - w / 2, pz + h / 2],
       ],
-      shellY + 0.332,
-      shellY + 0.348,
+      back + 0.042,
+      back + 0.058,
     )
     put(parts, k === 2 ? 'orange' : 'steelEdge', note)
   }
@@ -1653,7 +1752,12 @@ function placeWalks(services: DistrictServices, frames: HabFrame[], rng: Rng): v
   // all the way in and the last spur pad lands on top of a row pad, which is
   // 1.5 m2 of same-facing cast on cast.
   for (const frame of frames) {
-    const start = habLocalToWorld(frame.center, frame.yaw, 0, frame.unit.deckFront + 0.85, 0)
+    // 1.06 off the deck front, not 0.85. The precast step block runs from
+    // `deckFront + 0.01` to `+ 0.69` (`buildStepBlock`), a pad is 0.48 deep and
+    // the ±0.2 rad set jitter swings its near corner 0.297 back from its own
+    // centre — so the first pad of every spur was landing 90…150 mm inside the
+    // block, with the row's own 45 mm nosing buried in precast.
+    const start = habLocalToWorld(frame.center, frame.yaw, 0, frame.unit.deckFront + 1.06, 0)
     const startR = Math.hypot(start.x, start.z)
     const bearing = Math.atan2(start.z, start.x)
     const endR = WALK_RADIUS + 0.95
@@ -1682,10 +1786,15 @@ function placeWalks(services: DistrictServices, frames: HabFrame[], rng: Rng): v
     link.push([Math.cos(gapBearing) * radius, Math.sin(gapBearing) * radius])
   }
   const head: [number, number] = [-86, -26]
+  // `tail` is read ONCE, before the run. Re-reading `link[length − 1]` inside
+  // the loop made each step interpolate from the pad just pushed, so the four
+  // steps came out 0.250, 0.375, 0.281 and 0.094 of the distance to the head:
+  // the last two pads landed 0.48 m apart and overlapped by most of their
+  // 0.60 x 0.46 footprint.
+  const tail = link[link.length - 1]
   for (let k = 1; k <= 4; k++) {
     const t = k / 4
-    const a = link[link.length - 1]
-    link.push([a[0] + (head[0] - a[0]) * t, a[1] + (head[1] - a[1]) * t])
+    link.push([tail[0] + (head[0] - tail[0]) * t, tail[1] + (head[1] - tail[1]) * t])
   }
   for (let k = 0; k < link.length; k++) {
     const [x, z] = link[k]

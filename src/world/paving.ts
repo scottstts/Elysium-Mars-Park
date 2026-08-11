@@ -10,7 +10,7 @@ import {
 } from './groundMaterials'
 import { GroundWriter, sweepSection } from './groundWriter'
 import type { GroundVertex, SweepStation } from './groundWriter'
-import { groundGrade } from './interiorHeight'
+import { groundGrade, spurTrackDatum } from './interiorHeight'
 import {
   CURB,
   GUIDEWAY_CHANNEL,
@@ -21,9 +21,11 @@ import {
   coveringRegion,
   insideGuidewayChannel,
   insidePlanter,
+  insideSpurCorridor,
   pavedSignedDistance,
   pavedTraffic,
   regionDistance,
+  spurCorridorDistance,
 } from './pavingPlan'
 import type { Region } from './pavingPlan'
 
@@ -1160,6 +1162,7 @@ function emitFloorLights(writer: GroundWriter, runs: BoundaryStation[][]): numbe
       const x = best.x - best.outX * 0.55
       const z = best.z - best.outZ * 0.55
       if (insidePlanter(x, z, 0.5) || insideGuidewayChannel(x, z, 0.9)) continue
+      if (insideSpurCorridor(x, z, 0.9)) continue
       if (pavedSignedDistance(x, z) > -0.2) continue
       // 2.5 m guard against a 7 m nominal pitch: only ever rejects a repeat
       // stamp, never a legitimately spaced fixture.
@@ -1327,7 +1330,21 @@ function emitGuidewayChannel(writer: GroundWriter): void {
   const rInner = GUIDEWAY_CHANNEL.radius - GUIDEWAY_CHANNEL.width / 2
   const rOuter = GUIDEWAY_CHANNEL.radius + GUIDEWAY_CHANNEL.width / 2
   const steps = Math.round((TAU * GUIDEWAY_CHANNEL.radius) / 1.4)
-  const floorY = (x: number, z: number): number => slabTop(x, z) - GUIDEWAY_CHANNEL.recess
+  // The channel floor is radially dished (slabTop falls toward the ring). At
+  // the turnout mouth it eases down onto the corridor's constant level so the
+  // two floors meet without a step; elsewhere the dish is untouched.
+  const corridorLevel =
+    groundGrade(0, GUIDEWAY_CHANNEL.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess - 0.01
+  const floorY = (x: number, z: number): number => {
+    const dished = slabTop(x, z) - GUIDEWAY_CHANNEL.recess
+    // Smooth by true corridor distance: a stepped blend tears the floor into
+    // shards where adjacent vertices land on different levels.
+    const d = spurCorridorDistance(x, z)
+    if (d >= 0.9) return dished
+    const t = Math.min(1, (0.9 - d) / 1.2)
+    const eased = t * t * (3 - 2 * t)
+    return dished + (Math.min(dished, corridorLevel) - dished) * eased
+  }
   const point = (r: number, angle: number, y: (x: number, z: number) => number): GroundVertex => {
     const x = Math.cos(angle) * r
     const z = Math.sin(angle) * r
@@ -1360,6 +1377,9 @@ function emitGuidewayChannel(writer: GroundWriter): void {
       const lipR = radius + GUIDEWAY_CHANNEL.lip * outward
       const a = { x: Math.cos(a0) * radius, z: Math.sin(a0) * radius }
       const b = { x: Math.cos(a1) * radius, z: Math.sin(a1) * radius }
+      // The spur corridor opens through the outer lip at the turnout — a lip
+      // segment there would stand as a berm across the trackbed's path.
+      if (outward > 0 && insideSpurCorridor((a.x + b.x) / 2, (a.z + b.z) / 2, -0.02)) continue
       const c = { x: Math.cos(a1) * lipR, z: Math.sin(a1) * lipR }
       const d = { x: Math.cos(a0) * lipR, z: Math.sin(a0) * lipR }
       const corners: GroundVertex[] = [
@@ -1373,6 +1393,130 @@ function emitGuidewayChannel(writer: GroundWriter): void {
   }
 }
 
+/** Clip a ground polygon to f(x,z) ≥ 0, bisecting the boundary crossings. */
+function clipGround(
+  corners: GroundVertex[],
+  f: (x: number, z: number) => number,
+): GroundVertex[] {
+  const out: GroundVertex[] = []
+  const value = corners.map((corner) => f(corner.p.x, corner.p.z))
+  for (let i = 0; i < corners.length; i++) {
+    const j = (i + 1) % corners.length
+    const a = corners[i]
+    const b = corners[j]
+    if (value[i] >= 0) out.push(a)
+    if (value[i] >= 0 !== value[j] >= 0) {
+      let lo = 0
+      let hi = 1
+      for (let k = 0; k < 10; k++) {
+        const mid = (lo + hi) / 2
+        const x = a.p.x + (b.p.x - a.p.x) * mid
+        const z = a.p.z + (b.p.z - a.p.z) * mid
+        if (f(x, z) >= 0 === value[i] >= 0) lo = mid
+        else hi = mid
+      }
+      const t = (lo + hi) / 2
+      out.push({
+        p: a.p.clone().lerp(b.p, t),
+        n: a.n && b.n ? a.n.clone().lerp(b.n, t).normalize() : undefined,
+        uv: a.uv && b.uv ? a.uv.clone().lerp(b.uv, t) : undefined,
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * The arrival spur's recessed cuttings — emitGuidewayChannel's counterpart
+ * along the spur ribbons (the boulevard throat AND the rim-promenade
+ * crossing). The floor follows the trackbed crown 10 mm below it (level at
+ * the ring, descending across the promenade), flush with the channel floor
+ * where they butt on the channel's own emitted n-gon; the sides are vertical
+ * cast walls up to the local slab top, not 60 mm lips. The mouths toward the
+ * regolith trench stay open (the trackbed apron crosses them).
+ */
+function emitSpurCorridor(writer: GroundWriter): void {
+  for (const id of ['spur-corridor', 'spur-corridor-promenade']) emitSpurCut(writer, id)
+}
+
+function emitSpurCut(writer: GroundWriter, id: string): void {
+  const region = PAVED_REGIONS.find((entry) => entry.id === id)
+  if (!region || region.kind !== 'ribbon') return
+  const line = region.line
+  const half = region.halfWidth
+  // The crown datum comes from the spur's own ground truth; the fallback is
+  // the ring street level (only reachable if a ribbon strays past the tail's
+  // bounding box, which the plan construction prevents). 10 mm below the
+  // crown, so floor and crown are never coplanar.
+  const fallback = groundGrade(0, GUIDEWAY_CHANNEL.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess
+  const floorAt = (x: number, z: number): number => (spurTrackDatum(x, z)?.y ?? fallback) - 0.01
+  const steps = Math.round((TAU * GUIDEWAY_CHANNEL.radius) / 1.4)
+  const rOuter = GUIDEWAY_CHANNEL.radius + GUIDEWAY_CHANNEL.width / 2
+  // The corridor approaches the ring from outside: > 0 = clear of the channel.
+  const clear = (x: number, z: number): number => ngonSigned(0, 0, rOuter, steps, x, z)
+  const run: number[] = [0]
+  for (let i = 1; i < line.length; i++) run.push(run[i - 1] + line[i].distanceTo(line[i - 1]))
+  const sideAt = (i: number): Vector2 => {
+    const a = line[Math.max(0, i - 1)]
+    const b = line[Math.min(line.length - 1, i + 1)]
+    const t = b.clone().sub(a)
+    const l = t.length() || 1
+    return new Vector2(t.y / l, -t.x / l)
+  }
+  const at = (i: number, across: number): { x: number; z: number } => {
+    const side = sideAt(i)
+    return { x: line[i].x + side.x * across, z: line[i].y + side.y * across }
+  }
+  const floorVertex = (i: number, across: number): GroundVertex => {
+    const p = at(i, across)
+    return {
+      p: new Vector3(p.x, floorAt(p.x, p.z), p.z),
+      n: new Vector3(0, 1, 0),
+      uv: new Vector2(run[i], across),
+    }
+  }
+  const wallVertex = (i: number, across: number, y: number): GroundVertex => {
+    const p = at(i, across)
+    return { p: new Vector3(p.x, y, p.z), uv: new Vector2(run[i], y) }
+  }
+  const acrossSteps = 3
+  for (let i = 0; i < line.length - 1; i++) {
+    for (let j = 0; j < acrossSteps; j++) {
+      const a0 = -half + (2 * half * j) / acrossSteps
+      const a1 = -half + (2 * half * (j + 1)) / acrossSteps
+      const cell = clipGround(
+        [
+          floorVertex(i, a0),
+          floorVertex(i + 1, a0),
+          floorVertex(i + 1, a1),
+          floorVertex(i, a1),
+        ],
+        clear,
+      )
+      if (cell.length >= 3) writer.face('channel', cell)
+    }
+    for (const s of [-1, 1] as const) {
+      const pa = at(i, s * half)
+      const pb = at(i + 1, s * half)
+      const floorA = floorAt(pa.x, pa.z)
+      const floorB = floorAt(pb.x, pb.z)
+      const topA = Math.max(floorA, slabTop(pa.x, pa.z))
+      const topB = Math.max(floorB, slabTop(pb.x, pb.z))
+      if (topA - floorA < 0.012 && topB - floorB < 0.012) continue
+      const wall = clipGround(
+        [
+          wallVertex(i, s * half, floorA),
+          wallVertex(i + 1, s * half, floorB),
+          wallVertex(i + 1, s * half, topB),
+          wallVertex(i, s * half, topA),
+        ],
+        clear,
+      )
+      if (wall.length >= 3) writer.face('channel', s > 0 ? wall : [...wall].reverse())
+    }
+  }
+}
+
 // ----------------------------------------------------------------- build ---
 
 export function buildPaving(): PavingBuild {
@@ -1381,7 +1525,7 @@ export function buildPaving(): PavingBuild {
   const lightRuns: BoundaryStation[][] = []
 
   for (const region of PAVED_REGIONS) {
-    if (region.id === 'guideway-channel') continue
+    if (region.id === 'guideway-channel' || region.id.startsWith('spur-corridor')) continue
     switch (region.kind) {
       case 'disc':
         emitPolarSurface(writer, region, region.cx, region.cz, 0, region.radius)
@@ -1404,6 +1548,7 @@ export function buildPaving(): PavingBuild {
   }
 
   emitGuidewayChannel(writer)
+  emitSpurCorridor(writer)
   emitFloorLights(writer, lightRuns)
   emitPlanters(writer, colliders)
 

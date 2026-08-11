@@ -707,10 +707,13 @@ function buildAmphitheater(services: DistrictServices): void {
       new PlaneGeometry(2.1, 0.42),
       signageMaterial(['ROWS A–F · 620'], { background: '#2c2823', widthPx: 640, aspect: 2.1 / 0.42 }),
     )
+    // 0.383: the cheek is a ±0.19 radial wall shifted 0.19 off the bearing, so
+    // its outer face is at 0.38 and this is the file's 3 mm plate standoff. At
+    // 0.4 the stencil floated 20 mm off the concrete it is painted on.
     plate.position.set(
-      BOWL.x + Math.cos(angle) * stencilRadius + fx * 0.4,
+      BOWL.x + Math.cos(angle) * stencilRadius + fx * 0.383,
       decks[3] + 0.16,
-      BOWL.z + Math.sin(angle) * stencilRadius + fz * 0.4,
+      BOWL.z + Math.sin(angle) * stencilRadius + fz * 0.383,
     )
     plate.rotation.y = plateYaw(fx, fz)
     services.group.add(plate)
@@ -812,9 +815,12 @@ function buildStage(services: DistrictServices): void {
   // a visible strip. Flush against the beam would be a coplanar pair.
   // Kept inside the deck's straight front run: past ±5.65 the beam turns into
   // its corner arc and a straight 1.1 m bar cuts the corner off.
+  // front − 0.324, not − 0.45: the beam's own outer face is at
+  // `front − 0.38 + 0.02` = front − 0.36 (see `beamPoly` below), so a 60 mm bar
+  // centred 0.45 in was 60 mm INSIDE the beam, invisible and cross-slot.
   for (let s = 0; s < 9; s++) {
     const lateral = -4.6 + (s * 9.2) / 8
-    const [lx, lz] = local(front - 0.45, lateral)
+    const [lx, lz] = local(front - 0.324, lateral)
     lensBar(services, [lx, lz, deckTop - 0.44], [0.06, 1.0, 0.06], facing)
   }
 
@@ -899,18 +905,23 @@ function buildStage(services: DistrictServices): void {
     1,
   )
   rotateZ(rack, alcoveYaw)
+  // 1.01, not 1.0: the U's back wall has its inner face at local x = −1.06, so
+  // a 0.1 deep panel centred on −1.0 hung 10 mm clear of the only surface that
+  // could carry it. It now butts that face.
   translate(rack, [
-    alcoveCenter[0] - Math.cos(alcoveYaw) * 1.0,
-    alcoveCenter[1] - Math.sin(alcoveYaw) * 1.0,
+    alcoveCenter[0] - Math.cos(alcoveYaw) * 1.01,
+    alcoveCenter[1] - Math.sin(alcoveYaw) * 1.01,
     0,
   ])
   parts.push(['darkGlass', rack])
+  // The lamp is surface-mounted: its 50 mm body ends ON the roof's 2.3 soffit.
+  // At 2.22 it hung 30 mm below the slab it is fixed to.
   lensBar(
     services,
     [
       alcoveCenter[0] + Math.cos(alcoveYaw) * 0.4,
       alcoveCenter[1] + Math.sin(alcoveYaw) * 0.4,
-      alcoveGround + 2.22,
+      alcoveGround + 2.25,
     ],
     [0.09, 1.4, 0.05],
     alcoveYaw,
@@ -1000,10 +1011,15 @@ function buildStage(services: DistrictServices): void {
       aspect: 1.62 / 0.62,
     }),
   )
-  totem.position.set(tx + fx * 0.142, ty + 1.68, tz + fz * 0.142)
+  // 0.123: the post is a 0.24 deep blade, so its face is at 0.12 and this is
+  // the 3 mm standoff. At 0.142 the plate hung 22 mm off it.
+  totem.position.set(tx + fx * 0.123, ty + 1.68, tz + fz * 0.123)
   totem.rotation.y = plateYaw(fx, fz)
   services.group.add(totem)
-  lensBar(services, [tx, tz, ty + 2.28], [1.5, 0.1, 0.05], crossYaw(fx, fz), 'signageGlow')
+  // Crown wash, standing ON the post's 2.35 head. The post is 0.24 deep and
+  // this bar is 0.10, so at ty + 2.28 it was inside the post on every axis —
+  // an emissive strip that could not be seen from anywhere.
+  lensBar(services, [tx, tz, ty + 2.35], [1.5, 0.1, 0.05], crossYaw(fx, fz), 'signageGlow')
   alignedBox(
     services,
     new Vector3(tx, ty + 1.1, tz),
@@ -1123,9 +1139,13 @@ function buildOverlook(services: DistrictServices): void {
     const nl = Math.hypot(nx, nz) || 1
     // `lensBar`'s first extent runs ACROSS the face it is set into, the second
     // is its depth: with `crossYaw`, local +X is the tangential direction.
+    // 0.2335 inward: the groove's BACK is the section's −0.26 station and the
+    // bar is 45 mm deep, so this seats it on that face with the file's 4 mm
+    // reveal. At 0.19 it hung in the middle of the slot — 47.5 mm off the back
+    // and 47.5 mm behind the mouth, touching neither.
     lensBar(
       services,
-      [mx - (nx / nl) * 0.19, mz - (nz / nl) * 0.19, shell.apron + 0.345],
+      [mx - (nx / nl) * 0.2335, mz - (nz / nl) * 0.2335, shell.apron + 0.345],
       [width - 0.06, 0.045, 0.06],
       crossYaw(nx / nl, nz / nl),
     )
@@ -1258,7 +1278,18 @@ function buildOverlook(services: DistrictServices): void {
     ),
   ])
   // Stood 80 mm inboard of the parapet's inner face, not on it.
-  const railStations = ellipseStations(shell.x, shell.z, shell.ax - 0.36, shell.az - 0.36, 30)
+  //
+  // The RAIL's sampling is set by the curve, not by the post pitch. This drum
+  // is a 2:1 ellipse, so its tightest radius is `ax^2 / az` = 2.71 m at the two
+  // ends: a chord the length of one bay (45.5 m of perimeter / 30 = 1.52 m)
+  // sags 106 mm inside its own curve there, and the run reads as a ring of
+  // straights cutting both corners. RAIL_STEPS is a multiple of RAIL_POSTS so
+  // every post still lands exactly on a rail station; at 150 the chord is
+  // 0.30 m and the sag 4 mm.
+  const RAIL_POSTS = 30
+  const RAIL_STEPS = 150
+  const railStations = ellipseStations(shell.x, shell.z, shell.ax - 0.36, shell.az - 0.36, RAIL_POSTS)
+  const railPath = ellipseStations(shell.x, shell.z, shell.ax - 0.36, shell.az - 0.36, RAIL_STEPS)
   for (const [height, profile, slot] of [
     [1.06, roundedRect(0.055, 0.045, 0.014, 3), 'orangeTop'],
     [0.62, roundedRect(0.038, 0.03, 0.01, 2), 'orange'],
@@ -1267,7 +1298,7 @@ function buildOverlook(services: DistrictServices): void {
       slot,
       smoothShade(
         tubeAlong(
-          railStations.map((s) => [s.x, s.z, shell.roofTop + height] as Vec3),
+          railPath.map((s) => [s.x, s.z, shell.roofTop + height] as Vec3),
           profile,
           { up: [0, 0, 1], closePath: true, cap: false },
         ),
@@ -1348,22 +1379,29 @@ function buildOverlook(services: DistrictServices): void {
   // glazing line while the head casting stops at -0.16, so it hung 0.36 m off
   // the building on nothing at all.
   for (const s of [-1, 1]) {
+    // 0.357 long on 0.0185: the head casting's outer face is at −0.16 and the
+    // plate's own plane is at +0.20, so a 0.37 stay on 0.025 ran 10 mm THROUGH
+    // the printed face. This butts the casting and dies 3 mm behind the plate.
     const stay = bevel(
-      prism(roundedRect(0.05, 0.37, 0.012, 1), shell.apron + 2.795, shell.apron + 2.845),
+      prism(roundedRect(0.05, 0.357, 0.012, 1), shell.apron + 2.795, shell.apron + 2.845),
       BEVEL.carcass,
       1,
     )
     rotateZ(stay, doorYaw)
     translate(stay, [
-      doorMidX + doorUx * s * 0.6 + doorFx * 0.025,
-      doorMidZ + doorUz * s * 0.6 + doorFz * 0.025,
+      doorMidX + doorUx * s * 0.6 + doorFx * 0.0185,
+      doorMidZ + doorUz * s * 0.6 + doorFz * 0.0185,
       0,
     ])
     parts.push(['steelEdge', stay])
   }
+  // Entrance wash, recessed under the head casting (soffit apron + 2.42, depth
+  // −0.46…−0.16). At +0.19/3.10 the bar stood 0.2 m above the casting and 0.35
+  // m out from the glazing line — 158 mm from the nearest solid in any
+  // direction, an emissive bar hanging in the air over the door.
   lensBar(
     services,
-    [doorMidX + doorFx * 0.19, doorMidZ + doorFz * 0.19, shell.apron + 3.1],
+    [doorMidX - doorFx * 0.31, doorMidZ - doorFz * 0.31, shell.apron + 2.37],
     [doorWidth - 0.24, 0.08, 0.05],
     doorYaw,
     'signageGlow',
@@ -1390,12 +1428,15 @@ function buildOverlook(services: DistrictServices): void {
         { closed: true },
       ),
     ])
-    // Soil set 60 mm inside the wall's inner face: the swept wall follows the
-    // path's chord normal and `polyOffset` follows the true corner mitre, so
-    // the two curves are not identical — a nominal flush fit overlaps.
+    // Soil set 12 mm inside the wall's inner face (the swept section's −0.2
+    // station) and bedded ON the apron. The chord-normal sweep and
+    // `polyOffset`'s true mitre differ by ~7 mm at the corners of this
+    // roundedRect, so 12 mm is a reveal that cannot close; the old pair
+    // (−0.26, apron + 0.06) was a 60 mm gap all round AND a 60 mm undercut,
+    // i.e. a block of earth floating inside a planter.
     parts.push([
       'soil',
-      bevel(prism(polyOffset(outer, -0.26), shell.apron + 0.06, shell.apron + 0.4), BEVEL.panel, 1),
+      bevel(prism(polyOffset(outer, -0.212), shell.apron + 0.002, shell.apron + 0.4), BEVEL.panel, 1),
     ])
     services.colliders.push({
       kind: 'box',
@@ -1522,7 +1563,24 @@ function buildPlayground(services: DistrictServices): void {
   const shoeTop = pad + 0.11
   for (let m = 0; m < meridians; m++) {
     const foot = node(m, 0)
-    parts.push(['playBlue', member(foot, [foot[0], foot[1], shoeTop + 0.04], 0.036)])
+    // The leg runs from inside its hub ball down INTO the shoe, and is built
+    // directly rather than through `member()`: that trims `hub · 0.83` off
+    // BOTH ends, and over the 0.15 m from node to shoe the two trims left a
+    // 25 mm stub hanging 102 mm above the pad, eight times round the ring.
+    parts.push([
+      'playBlue',
+      smoothShade(
+        tubeAlong(
+          [
+            [foot[0], foot[1], foot[2] - hub * 0.83],
+            [foot[0], foot[1], shoeTop - 0.03],
+          ],
+          circle(0.036, 9),
+          { up: [1, 0, 0], cap: true },
+        ),
+        SMOOTH.turned,
+      ),
+    ])
     parts.push(['playBlue', member(foot, node((m + 1) % meridians, 0), 0.028)])
     // The shoe takes the FRAME's slot, not the cast one: a slanted tube's end
     // cap dips below its own axis, so leg and shoe always share a little
@@ -1599,12 +1657,37 @@ function buildPlayground(services: DistrictServices): void {
     translate(shoe, [slide.x + sx * 1.28, slide.z + sz * 1.28, 0])
     parts.push(['playRed', shoe])
   }
+  // Grab rails: ONE run each, from a foot buried in the deck, over the entry,
+  // and down onto the chute's outer flange. Both ends used to be a capped tube
+  // floating in air — the rail began 0.9 m above the deck it is meant to be
+  // held from and stopped 0.6 m above the chute. Every knot below is on the
+  // deck, on the entry arc, or on the chute, so the run terminates INTO the
+  // two things it belongs to and the arc's own tangent is unchanged.
+  //
+  // Landing point: the chute is swept with its own frame, so the outer wall's
+  // top face at a station is `axis + across*0.295 + up*0.13`, where `up` is
+  // perpendicular to the chute's slope — hence the z lead of the last knot.
   for (const side of [-1, 1]) {
-    const railPath: Vec3[] = []
+    const x = slide.x + side * 0.42
+    const railPath: Vec3[] = [
+      // Foot: 50 mm into the 110 mm deck slab, well inboard of its front edge.
+      [x, slide.z + 0.26, slide.y - 0.05],
+    ]
+    // Knee onto the grab line: a real 0.16 m bend, four 22.5 deg breaks, not a
+    // mitred corner. The entry arc leaves t=0 horizontal, so the whole run
+    // through the knee is tangent-continuous.
+    for (let k = 0; k <= 4; k++) {
+      const a = Math.PI - (k / 4) * (Math.PI / 2)
+      railPath.push([x, slide.z + 0.42 + Math.cos(a) * 0.16, slide.y + 0.74 + Math.sin(a) * 0.16])
+    }
     for (let k = 0; k <= 8; k++) {
       const t = k / 8
-      railPath.push([slide.x + side * 0.42, slide.z + 0.74 + t * 1.5, slide.y + 0.9 - t * t * 0.62])
+      railPath.push([x, slide.z + 0.74 + t * 1.5, slide.y + 0.9 - t * t * 0.62])
     }
+    railPath.push(
+      [x, slide.z + 2.32, slide.y + 0.2],
+      [slide.x + side * 0.295, slide.z + 2.5, slide.y - 0.29],
+    )
     parts.push([
       'playRed',
       smoothShade(tubeAlong(railPath, circle(0.026, 8), { up: [0, 0, 1], cap: true }), SMOOTH.turned),
@@ -1810,7 +1893,9 @@ function buildPlayground(services: DistrictServices): void {
     new PlaneGeometry(0.86, 0.34),
     signageMaterial(['DONATED BY THE CREW OF ARES VII'], { background: '#2b2723', widthPx: 512, aspect: 0.86 / 0.34 }),
   )
-  plaque.position.set(plinth.x + pfx * 0.192, plinth.y + 0.68, plinth.z + pfz * 0.192)
+  // 0.173: the stone is 0.34 deep, so its face is at 0.17 — the 3 mm standoff
+  // again. At 0.192 this plaque stood 22 mm off the plinth it is set into.
+  plaque.position.set(plinth.x + pfx * 0.173, plinth.y + 0.68, plinth.z + pfz * 0.173)
   plaque.rotation.y = plateYaw(pfx, pfz)
   services.group.add(plaque)
   alignedBox(
@@ -2260,13 +2345,20 @@ function buildFirstTreePlaza(services: DistrictServices): void {
     1,
   )
   rotateZ(field, stoneYaw)
-  translate(field, [sx + sfx * 0.245, sz + sfz * 0.245, 0])
+  // 0.314, not 0.245. The monolith's face is its `+0.02` loft station, i.e.
+  // 0.28 off the stone's centre line over the whole 0.09…1.42 straight band —
+  // so a 60 mm field centred on 0.245 (0.215…0.275) was entirely INSIDE the
+  // casting: a recess that could not be seen, in a second material. It is an
+  // applied panel now, standing on the 4 mm reveal this file uses everywhere.
+  translate(field, [sx + sfx * 0.314, sz + sfz * 0.314, 0])
   parts.push(['dark', field])
   const name = new Mesh(
     new PlaneGeometry(2.0, 0.44),
     signageMaterial(['ELYSIUM COMMONS · EST. SOL 190'], { background: '#26231f', widthPx: 900, aspect: 2.0 / 0.44 }),
   )
-  name.position.set(sx + sfx * 0.288, plaza + 0.67, sz + sfz * 0.288)
+  // 3 mm off the field's own face (0.344), the standoff every plate in this
+  // file uses; at 0.288 the plate would now be inside the panel it names.
+  name.position.set(sx + sfx * 0.347, plaza + 0.67, sz + sfz * 0.347)
   name.rotation.y = plateYaw(sfx, sfz)
   services.group.add(name)
   alignedBox(services, new Vector3(sx, plaza + 0.6, sz), new Vector3(2.7, 1.6, 0.6), stoneYaw)

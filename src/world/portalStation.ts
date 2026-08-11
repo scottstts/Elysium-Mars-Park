@@ -1,10 +1,20 @@
-import { Group, Mesh, PlaneGeometry, Quaternion, Vector2, Vector3 } from 'three'
+import {
+  CanvasTexture,
+  Group,
+  Mesh,
+  PlaneGeometry,
+  Quaternion,
+  SRGBColorSpace,
+  Vector2,
+  Vector3,
+} from 'three'
 import type { Material } from 'three'
+import { MeshStandardNodeMaterial } from 'three/webgpu'
 import { bench } from '../archkit/kit'
 import { SMOOTH, cleanMesh, loft, smoothShade, writeInto } from '../archkit/meshdata'
 import type { Vec3 as MVec3 } from '../archkit/meshdata'
 import { PartWriter } from '../archkit/writer'
-import { cabinGlass, kitMaterials, signageMaterial } from '../materials/library'
+import { cabinGlass, kitMaterials, tracked } from '../materials/library'
 import type { PhysicsSystem } from '../physics/physicsWorld'
 import type { InteractionSystem } from '../player/interaction'
 import type { PlayerSystem } from '../player/playerSystem'
@@ -656,14 +666,34 @@ function accessRamp(
     const top = Math.min(yAt(i / segments), yAt((i + 1) / segments))
     writer.slab(corners, Math.max(0.24, top - ground + 0.3), 'cast', 0.5)
   }
+  // Rail geometry, and why each number is what it is:
+  //  - the RETURN. A handrail may not stop in a raw cut, so the run turns down
+  //    90 mm inside each end (`archkit/kit.ts` handrail's own detail). It used
+  //    to be a flat capped disc hanging in air at the top AND the bottom.
+  //  - the POSTS. `dark` stanchions climbing to 0.95 ended ON the rail's axis:
+  //    26 mm of one material inside another. They stop 4 mm under its soffit
+  //    now — the shadow gap the guardrail shoe uses for the same joint.
+  //  - the END posts move in by RETURN_IN so they carry rail rather than stand
+  //    past its tip, and the pitch comes off the run (1.6 m, as the kit's).
+  const RETURN_IN = 0.11
+  const RAIL_H = 0.95
+  const posts = Math.max(4, Math.round(rampRun / 1.6))
   for (const v of [vNear + 0.06, vFar - 0.06]) {
+    const at = (t: number, lift: number): Vector3 =>
+      platformPoint(spec, u0 + rampRun * t, v, yAt(t) + lift)
     const kerb: Vector3[] = []
-    const rail: Vector3[] = []
+    const rail: Vector3[] = [at(0.02 / rampRun, RAIL_H - 0.09), at(RETURN_IN / rampRun, RAIL_H)]
     for (let i = 0; i <= segments * 2; i++) {
       const t = i / (segments * 2)
-      kerb.push(platformPoint(spec, u0 + rampRun * t, v, yAt(t) + 0.03))
-      rail.push(platformPoint(spec, u0 + rampRun * t, v, yAt(t) + 0.95))
+      // The kerb's two end stations sit BELOW the ramp top, so the run rises
+      // out of the pour it is bedded in instead of butting a capped disc on
+      // the open slab — the tram rails' feather, at kerb scale.
+      kerb.push(at(t, i === 0 || i === segments * 2 ? -0.06 : 0.03))
+      if (t > (RETURN_IN + 0.05) / rampRun && t < 1 - (RETURN_IN + 0.05) / rampRun) {
+        rail.push(at(t, RAIL_H))
+      }
     }
+    rail.push(at(1 - RETURN_IN / rampRun, RAIL_H), at(1 - 0.02 / rampRun, RAIL_H - 0.09))
     writer.tube({
       path: kerb,
       radius: 0.055,
@@ -680,11 +710,13 @@ function accessRamp(
       capStart: true,
       capEnd: true,
     })
-    for (let i = 0; i <= 3; i++) {
-      const t = i / 3
-      const foot = platformPoint(spec, u0 + rampRun * t, v, yAt(t) + 0.02)
+    for (let i = 0; i <= posts; i++) {
+      const t =
+        (RETURN_IN + ((rampRun - 2 * RETURN_IN) * i) / posts) / rampRun
+      const foot = at(t, 0.02)
       writer.tube({
-        path: [foot.clone(), foot.clone().setY(foot.y + 0.93)],
+        // 0.02 foot + 0.90 = the rail's soffit (0.95 − 0.026) less a 4 mm gap.
+        path: [foot.clone(), foot.clone().setY(foot.y + 0.9)],
         radius: 0.021,
         slot: 'dark',
         radialSegments: 8,
@@ -714,16 +746,21 @@ function departureBoard(
   const width = 2.3
   const height = 1.28
   const anchor = platformPoint(spec, u, v, y)
+  // Local +Z is `outward` under `placeYaw`, so local X is the board's WIDTH
+  // and local Z its depth. Swapped, the cabinet was 0.16 m wide and 2.46 m
+  // deep — a fin out of the middle of the board, hiding a third of the type
+  // from anyone standing in front of it.
   writer.box({
     center: anchor,
-    size: new Vector3(0.16, height + 0.16, width + 0.16),
+    size: new Vector3(width + 0.16, height + 0.16, 0.16),
     rotationY: yaw,
     slot: 'dark',
     chamfer: 0.016,
   })
+  // Backlit reveal: bedded 35 mm INTO the bezel, 15 mm proud of its face.
   writer.box({
-    center: anchor.clone().addScaledVector(outward, -0.062),
-    size: new Vector3(0.024, height, width),
+    center: anchor.clone().addScaledVector(outward, 0.07),
+    size: new Vector3(width, height, 0.05),
     rotationY: yaw,
     slot: 'signageGlow',
   })
@@ -750,23 +787,111 @@ function departureBoard(
   }
   const plate = new Mesh(
     new PlaneGeometry(width - 0.1, height - 0.1),
-    signageMaterial(
-      [
-        'DEPARTURES · THE LOOP',
-        'FARMSIDE      2 MIN',
-        'OVERLOOK W    9 MIN',
-        'PORTAL        22 MIN',
-      ],
-      {
-        background: '#171614',
-        accent: '#c94f1d',
-        widthPx: 768,
-        aspect: (width - 0.1) / (height - 0.1),
-      },
-    ),
+    departureFace(width - 0.1, height - 0.1),
   )
-  plate.position.copy(anchor.clone().addScaledVector(outward, 0.086))
+  // 25 mm clear of the lit reveal's face (0.095) — never on it.
+  plate.position.copy(anchor.clone().addScaledVector(outward, 0.12))
   plate.rotation.y = yaw
   plate.castShadow = false
   group.add(plate)
+}
+
+/** Destination and the minutes to it — one row of the board. */
+const DEPARTURES: Array<[string, string]> = [
+  ['FARMSIDE', '2 MIN'],
+  ['OVERLOOK WEST', '9 MIN'],
+  ['PORTAL', '22 MIN'],
+]
+
+/**
+ * The board draws its OWN canvas rather than going through `signageMaterial`.
+ *
+ * A departure board is a TABLE: destinations flush left, times flush right,
+ * on a shared baseline grid. `signageMaterial` centres every line, so the only
+ * way to fake columns through it was to pad each row with runs of spaces —
+ * which were counted for a monospace font. In the shipping face the time
+ * column landed 6.3 / 8.1 / 6.3 em from the row start, i.e. ragged by ~8 cm on
+ * a 2.2 m board, and the centring made the destination column ragged too.
+ * Owning the layout also lets the header sit on its own accent rule instead of
+ * being a fourth body line, so `OVERLOOK WEST` can be spelled out.
+ *
+ * Every measurement below is a fraction of the canvas, so the board reads the
+ * same whatever `widthPx` or plate aspect it is given.
+ */
+function departureFace(plateW: number, plateH: number): MeshStandardNodeMaterial {
+  const canvas = document.createElement('canvas')
+  canvas.width = 768
+  canvas.height = Math.round((canvas.width * plateH) / plateW)
+  const g = canvas.getContext('2d')
+  const w = canvas.width
+  const h = canvas.height
+  if (g) {
+    const ink = '#efe9dc'
+    g.fillStyle = '#171614'
+    g.fillRect(0, 0, w, h)
+    const short = Math.min(w, h)
+    const frameInset = Math.max(4, Math.round(short * 0.049))
+    const frameLine = Math.max(2, Math.round(short * 0.021))
+    const pad = frameInset + frameLine + Math.max(4, Math.round(short * 0.035))
+    g.globalAlpha = 0.25
+    g.strokeStyle = ink
+    g.lineWidth = frameLine
+    g.strokeRect(frameInset, frameInset, w - 2 * frameInset, h - 2 * frameInset)
+    g.globalAlpha = 1
+    g.textBaseline = 'middle'
+
+    // Header on its own rule. `fit` shrinks to the box rather than trusting a
+    // character count — the tracking is a hair-space pair, which measures at
+    // 0.015 em, so counted budgets are ~1.8x the ink actually drawn.
+    const fit = (text: string, maxWidth: number, start: number, weight: number): number => {
+      let size = start
+      for (; size > 8; size -= 1) {
+        g.font = `${weight} ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+        if (g.measureText(text).width <= maxWidth) break
+      }
+      return size
+    }
+    const headerY = pad + h * 0.1
+    g.textAlign = 'left'
+    g.fillStyle = ink
+    g.font = `700 ${fit(tracked('DEPARTURES'), w * 0.44, h * 0.13, 700)}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+    g.fillText(tracked('DEPARTURES'), pad, headerY)
+    g.textAlign = 'right'
+    g.fillStyle = '#c9b9a2'
+    g.font = `500 ${fit(tracked('THE LOOP'), w * 0.34, h * 0.095, 500)}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+    g.fillText(tracked('THE LOOP'), w - pad, headerY)
+    g.fillStyle = '#c94f1d'
+    const ruleY = Math.round(headerY + h * 0.085)
+    g.fillRect(pad, ruleY, w - 2 * pad, Math.max(3, Math.round(h * 0.018)))
+
+    // Body rows on a shared grid: ONE size for both columns of every row, so
+    // the destinations and the times each line up as a column.
+    const first = ruleY + h * 0.16
+    const pitch = (h - pad - first) / Math.max(1, DEPARTURES.length - 0.35)
+    const timeW = w * 0.26
+    let size = h * 0.115
+    for (const [name, time] of DEPARTURES) {
+      size = Math.min(size, fit(tracked(name), w - 2 * pad - timeW - w * 0.03, size, 700))
+      size = Math.min(size, fit(time, timeW, size, 500))
+    }
+    DEPARTURES.forEach(([name, time], index) => {
+      const y = first + pitch * index
+      g.textAlign = 'left'
+      g.fillStyle = ink
+      g.font = `700 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+      g.fillText(tracked(name), pad, y)
+      g.textAlign = 'right'
+      g.fillStyle = '#d8c8a6'
+      g.font = `500 ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+      g.fillText(time, w - pad, y)
+    })
+  }
+  const texture = new CanvasTexture(canvas)
+  texture.colorSpace = SRGBColorSpace
+  texture.anisotropy = 8
+  const material = new MeshStandardNodeMaterial()
+  material.map = texture
+  material.roughness = 0.6
+  material.metalness = 0.05
+  return material
 }

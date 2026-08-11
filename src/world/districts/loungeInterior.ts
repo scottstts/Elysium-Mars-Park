@@ -549,11 +549,15 @@ export function buildLoungeInterior(services: DistrictServices): void {
       2,
     ),
   ])
+  // The lens is recessed into the LID's soffit (2.24), 4 mm clear of it, just
+  // inboard of the opening's head. The penthouse is a U — its fourth side is
+  // the doorway — so at z 2.06…2.12 on the `pu − hu` line there was no wall
+  // behind this strip at all: it hung in the middle of the opening.
   const lamp = bevel(
     prism(
       roundedRect(0.09, 0.5, 0.02, 2).map(([x, z]) => [ux(pu - hu + 0.14) + x, vz(pv) + z] as Vec2),
-      shell.roofTop + 2.06,
-      shell.roofTop + 2.12,
+      shell.roofTop + 2.176,
+      shell.roofTop + 2.236,
     ),
     BEVEL.hardware,
     1,

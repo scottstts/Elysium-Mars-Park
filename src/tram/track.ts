@@ -5,7 +5,7 @@ import type { PartWriter } from '../archkit/writer'
 import { signageMaterial } from '../materials/library'
 import type { PhysicsSystem } from '../physics/physicsWorld'
 import { interiorHeight } from '../world/interiorHeight'
-import { LOOP } from '../world/parkPlan'
+import { ARRIVAL_SPINE, LOOP } from '../world/parkPlan'
 import { slabTop } from '../world/paving'
 import { GUIDEWAY_CHANNEL } from '../world/pavingPlan'
 
@@ -98,7 +98,26 @@ const EMBED_CLEARANCE = 0.36
 const JOINT = 0.02
 /** Station sampling along a curve. */
 const LOOP_STEP = 2.4
-const SPUR_STEP = 2.6
+/** 0.9 m, not the old 2.6: through the station hook (R ≈ 10 m) a 2.6 m chord
+ *  sags 84 mm — the apron edges read as a chain of straights (owner finding:
+ *  "pieced parts"). 0.9 m brings the sag under 11 mm. */
+const SPUR_STEP = 0.9
+/** Rails get their OWN alignments, finer than the cast: a specular steel
+ *  line shows every chord a matte pour hides. */
+const RAIL_STEP = 0.45
+const LOOP_RAIL_STEP = 1.2
+/**
+ * Turnout where the spur merges into the loop, keyed to the lateral offset
+ * `o` between the spur alignment and the loop's ring:
+ *   o ≥ MERGE_FULL  — full embedded section (the two aprons stay clear);
+ *   o ≥ MERGE_END   — merge wedge: the loop-side wing is clipped so its cut
+ *                     face tracks the loop apron at a joint's standoff;
+ *   o <  MERGE_END  — cast ends (battered cap against the loop apron); only
+ *                     the rails continue, let into the loop's own slab.
+ */
+const MERGE_FULL = APRON_HALF * 2 + 0.025
+const MERGE_END = APRON_HALF + BEAM_HALF + 0.06
+const MERGE_GAP = APRON_HALF + 0.025
 
 const UP = new Vector3(0, 1, 0)
 
@@ -139,6 +158,9 @@ export function buildTrackData(): TrackData {
     loopPoints.push(new Vector3(x, beamTopY(x, z), z))
   }
   const loop = new CatmullRomCurve3(loopPoints, true, 'centripetal', 0.5)
+  // Three's default 200-division arc-length LUT quantises getPointAt to
+  // ~1.7 m on curves this long — visible as jitter on 0.45 m rail stations.
+  loop.arcLengthDivisions = 2400
   const loopLength = loop.getLength()
 
   // Arrival spur. DEAD STRAIGHT on the tube axis (x = 0) for all z ≥ 121, so
@@ -154,25 +176,17 @@ export function buildTrackData(): TrackData {
   // this curve over z 132→168, and the portal bore is centred on y = 4.6.
   const portalStop = new Vector3(0, beamTopY(0, LOOP.radius), LOOP.radius)
   const street = portalStop.y
-  const arrivalPoints = [
-    new Vector3(0, 6.2, 420),
-    new Vector3(0, 5.6, 340),
-    new Vector3(0, 4.8, 268),
-    new Vector3(0, 4.0, 210),
-    new Vector3(0, 3.4, 168),
-    new Vector3(0, 2.78, 152),
-    new Vector3(0, 2.16, 138),
-    new Vector3(0, 1.72, 128),
-    new Vector3(-0.6, 1.4, 122.5),
-    new Vector3(-2.1, 1.06, 117),
-    new Vector3(-3.4, street + 0.18, 113.6),
-    new Vector3(-4.6, street, 109.5),
-    new Vector3(-5.05, street, 104),
-    new Vector3(-3.6, street, 99.4),
-    portalStop.clone().add(new Vector3(-1.5, 0, 0.3)),
-    portalStop.clone(),
+  // XZ comes from parkPlan's ARRIVAL_SPINE (shared with the paving corridor);
+  // this module owns only the vertical profile over those stations.
+  const spineHeights = [
+    6.2, 5.6, 4.8, 4.0, 3.4, 2.78, 2.16, 1.72, 1.4, 1.06,
+    street + 0.18, street, street, street, street, street,
   ]
+  const arrivalPoints = ARRIVAL_SPINE.map(
+    ([x, z], i) => new Vector3(x, spineHeights[i], z),
+  )
   const arrival = new CatmullRomCurve3(arrivalPoints, false, 'centripetal', 0.5)
+  arrival.arcLengthDivisions = 2400
 
   const stationS = new Map<string, number>()
   for (const station of LOOP.stations) {
@@ -350,6 +364,22 @@ const EMBEDDED_SECTION: Vec2[] = [
   [APRON_HALF, -APRON_ROOT],
 ]
 
+/**
+ * Embedded section with the loop-side wing clipped at half-width `w`: every
+ * point on that side is clamped to the cut line, so the wedge keeps the full
+ * section's point topology (one loft carries EMBEDDED_SECTION stations
+ * straight into merge stations) and the collapsed points build the battered
+ * cut face. `w` bottoms out at MERGE_END − MERGE_GAP = 0.71 > the 0.655
+ * crown edge, so the running surface is never touched.
+ */
+function mergeSection(w: number, innerPositive: boolean): Vec2[] {
+  return EMBEDDED_SECTION.map(([x, y]) => {
+    const clip = innerPositive ? x > 0 : x < 0
+    if (!clip) return [x, y] as Vec2
+    return [Math.sign(x) * Math.min(Math.abs(x), w), y] as Vec2
+  })
+}
+
 /** ELEVATED section: haunched box girder. `root` pushes the soffit down into
  *  the ground where the structure is too low to stand on piers, so the beam
  *  becomes a plinth wall instead of hovering. */
@@ -421,22 +451,76 @@ const RAIL_SECTION: Vec2[] = [
   [-0.112, -0.014],
 ]
 
-function railStations(centres: Station[], offset: number): Station[] {
-  const profile = RAIL_SECTION.map(([a, b]) => [a + offset, b] as Vec2)
-  return centres.map((station) => ({ p: station.p, profile }))
+function railProfile(offset: number, topClamp?: number): Vec2[] {
+  return RAIL_SECTION.map(
+    ([a, b]) => [a + offset, topClamp === undefined ? b : Math.min(b, topClamp)] as Vec2,
+  )
 }
 
-function emitRails(
-  writer: PartWriter,
-  centres: Station[],
-  options: { closed?: boolean } = {},
-): void {
+/** The Loop's wear rails: one closed sweep per rail on their own fine
+ *  alignment (a 2.4 m chord on R 97 sags 7 mm — enough to scallop a specular
+ *  head; 1.2 m keeps it under 2 mm). */
+function emitLoopRails(writer: PartWriter, track: TrackData): void {
+  const align = sampleCurve(track.loop, track.loopLength, LOOP_RAIL_STEP, true)
   for (const offset of [-RAIL_X, RAIL_X]) {
-    sweepRun(writer, 'steelEdge', railStations(centres, offset), {
-      closed: options.closed,
-      smooth: SMOOTH.moulded,
-      uvScale: 1.4,
+    const profile = railProfile(offset)
+    sweepRun(
+      writer,
+      'steelEdge',
+      align.stations.map((p) => ({ p, profile })),
+      { closed: true, smooth: SMOOTH.moulded, uvScale: 1.4 },
+    )
+  }
+}
+
+/** Rail-head proximity at which a spur rail has met the loop's rail family. */
+const TURNOUT_TOUCH = 0.3
+/** Switch-blade feather: the last stations sink the section into the slab. */
+const FEATHER_COUNT = 5
+
+/**
+ * The spur's wear rails: ONE continuous run per rail from the far end of the
+ * connector tube to the turnout — continuously-welded steel does not observe
+ * the concrete's movement joints, and sweeping the rails per cast structure
+ * left them reading as pieced-together fragments with a bare gap at the
+ * station throat (owner finding). Each rail terminates independently where it
+ * comes within TURNOUT_TOUCH of a loop rail circle, feathering down into the
+ * slab over its last stations like a switch blade; past the cast's own end
+ * the rails read as let into the loop's apron, which is how a street-tramway
+ * turnout actually looks.
+ */
+function emitSpurRails(writer: PartWriter, track: TrackData): void {
+  const align = sampleCurve(track.arrival, track.arrivalLength, RAIL_STEP, false)
+  const points = align.stations
+  if (points.length >= 2) {
+    // Mirror the tube deck's 5 m overrun so the rails never end inside frame.
+    const dir = new Vector3().subVectors(points[0], points[1]).normalize()
+    points.unshift(points[0].clone().addScaledVector(dir, 5))
+  }
+  const railCircles = [LOOP.radius - RAIL_X, LOOP.radius + RAIL_X]
+  for (const offset of [-RAIL_X, RAIL_X]) {
+    const kept: Vector3[] = []
+    for (let i = 0; i < points.length; i++) {
+      const { side } = stationFrame(points, i, false)
+      const q = new Vector3().copy(points[i]).addScaledVector(side, offset)
+      const rho = Math.hypot(q.x, q.z)
+      // Only the merge neighbourhood may terminate the run — the tube also
+      // crosses these radii, 300 m away and 5 m up.
+      if (rho < LOOP.radius + 6) {
+        const near = Math.min(...railCircles.map((r) => Math.abs(rho - r)))
+        if (near < TURNOUT_TOUCH) break
+      }
+      kept.push(points[i])
+    }
+    if (kept.length < FEATHER_COUNT + 2) continue
+    const stations: Station[] = kept.map((p, i) => {
+      const feather = i - (kept.length - 1 - FEATHER_COUNT)
+      if (feather <= 0) return { p, profile: railProfile(offset) }
+      const t = feather / FEATHER_COUNT
+      const top = RAIL_TOP + (-(REBATE_DEPTH + 0.004) - RAIL_TOP) * t * t
+      return { p, profile: railProfile(offset, top) }
     })
+    sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
   }
 }
 
@@ -470,7 +554,7 @@ function buildStreetTrack(writer: PartWriter, track: TrackData): void {
   const align = sampleCurve(track.loop, track.loopLength, LOOP_STEP, true)
   const centres: Station[] = align.stations.map((p) => ({ p, profile: EMBEDDED_SECTION }))
   sweepRun(writer, 'cast', centres, { closed: true, smooth: SMOOTH.cast, uvScale: 0.55 })
-  emitRails(writer, centres, { closed: true })
+  emitLoopRails(writer, track)
   emitTrackFurniture(writer, align, LOOP_STEP)
 }
 
@@ -567,8 +651,32 @@ function splitSpur(track: TrackData): SpurSplit {
   const embedded: Station[] = []
   const girderStations: Vector3[] = []
   const embeddedStations: Vector3[] = []
-  for (const p of align.stations) {
-    if (Math.abs(Math.hypot(p.x, p.z) - LOOP.radius) < APRON_HALF + 1.7) continue
+  const ringOffset = (p: Vector3): number => Math.abs(Math.hypot(p.x, p.z) - LOOP.radius)
+  // Which profile side faces the loop through the merge: constant over the
+  // hook, so it is read once where the wedge starts rather than per station
+  // (a per-station reading could flip on a near-radial frame and twist the
+  // loft).
+  let innerPositive: boolean | null = null
+  for (let i = 0; i < align.stations.length; i++) {
+    const p = align.stations[i]
+    const o = ringOffset(p)
+    if (o < MERGE_END) {
+      // Turnout slab joint. Refine the cap onto the exact offset so the cast
+      // ends a JOINT off the loop apron instead of up to a station short.
+      const previous = align.stations[i - 1]
+      if (previous && innerPositive !== null) {
+        let lo = 0
+        let hi = 1
+        for (let k = 0; k < 18; k++) {
+          const mid = (lo + hi) / 2
+          if (ringOffset(previous.clone().lerp(p, mid)) < MERGE_END) hi = mid
+          else lo = mid
+        }
+        const cap = previous.clone().lerp(p, lo)
+        embedded.push({ p: cap, profile: mergeSection(MERGE_END - MERGE_GAP, innerPositive) })
+      }
+      break
+    }
     if (p.z >= TUBE_START_Z) {
       tube.push({ p, profile: tubeSection(tubeAxisY(p.z, p.y) - p.y) })
       continue
@@ -577,9 +685,18 @@ function splitSpur(track: TrackData): SpurSplit {
     if (p.y - ground > EMBED_CLEARANCE) {
       girder.push({ p, profile: girderSection(Math.max(0, ground - 0.25 - p.y + BEAM_SOFFIT)) })
       girderStations.push(p)
-    } else {
+    } else if (o >= MERGE_FULL) {
       embedded.push({ p, profile: EMBEDDED_SECTION })
       embeddedStations.push(p)
+    } else {
+      if (innerPositive === null) {
+        const frame = stationFrame(align.stations, i, false)
+        const inward = new Vector3(-p.x, 0, -p.z).normalize()
+        innerPositive = frame.side.dot(inward) > 0
+      }
+      // Merge wedge; deliberately NOT in embeddedAlign — the joint/drain
+      // furniture assumes both apron wings exist.
+      embedded.push({ p, profile: mergeSection(o - MERGE_GAP, innerPositive) })
     }
   }
   // Run the deck a little past the car's spawn so the alignment never ends
@@ -701,32 +818,39 @@ export function buildGuideway(writer: PartWriter, track: TrackData): void {
   const spur = splitSpur(track)
   if (spur.tube.length > 1) {
     sweepRun(writer, 'cast', spur.tube, { smooth: SMOOTH.cast, uvScale: 0.4 })
-    emitRails(writer, spur.tube)
     const centres = spur.tube.map((station) => station.p)
-    for (let i = 2; i < spur.tube.length - 1; i += 3) {
+    // Struts every ~8 m of run, independent of the station step.
+    let sinceStrut = 8
+    for (let i = 1; i < spur.tube.length - 1; i++) {
+      sinceStrut += centres[i].distanceTo(centres[i - 1])
+      if (sinceStrut < 8) continue
+      sinceStrut = 0
       const p = centres[i]
       emitTubeStrut(writer, p, stationFrame(centres, i, false).side, tubeAxisY(p.z, p.y) - p.y)
     }
   }
   if (spur.girder.length > 1) {
     sweepRun(writer, 'cast', spur.girder, { smooth: SMOOTH.cast, uvScale: 0.5 })
-    emitRails(writer, spur.girder)
     const centres = spur.girderAlign.stations
-    // Every other station, starting at the bulkhead abutment. A station whose
-    // soffit is already into the grade needs no pier — the section's own root
-    // carries it there.
-    for (let i = 0; i < centres.length; i += 2) {
+    // A pier every ~5.2 m of run, starting at the bulkhead abutment. A
+    // station whose soffit is already into the grade needs no pier — the
+    // section's own root carries it there.
+    let sincePier = Infinity
+    for (let i = 0; i < centres.length; i++) {
       const p = centres[i]
+      if (i > 0) sincePier += p.distanceTo(centres[i - 1])
+      if (sincePier < 5.2) continue
       const ground = surfaceY(p.x, p.z)
       if (p.y - BEAM_SOFFIT - ground < 0.32) continue
+      sincePier = 0
       emitPier(writer, p, stationFrame(centres, i, false).side, ground)
     }
   }
   if (spur.embedded.length > 1) {
     sweepRun(writer, 'cast', spur.embedded, { smooth: SMOOTH.cast, uvScale: 0.55 })
-    emitRails(writer, spur.embedded)
     emitTrackFurniture(writer, spur.embeddedAlign, SPUR_STEP)
   }
+  emitSpurRails(writer, track)
 }
 
 export interface GuidewayCollider {
@@ -747,9 +871,11 @@ export interface GuidewayCollider {
 export function guidewayColliders(track: TrackData): GuidewayCollider[] {
   const out: GuidewayCollider[] = []
   const stations = splitSpur(track).girderAlign.stations
-  for (let i = 0; i < stations.length - 1; i++) {
+  // One box per ~2.7 m of girder: the 0.9 m visual stations would triple the
+  // collider count for no walkable difference.
+  for (let i = 0; i < stations.length - 1; i += 3) {
     const a = stations[i]
-    const b = stations[i + 1]
+    const b = stations[Math.min(i + 3, stations.length - 1)]
     const mid = a.clone().add(b).multiplyScalar(0.5)
     const ground = surfaceY(mid.x, mid.z)
     const bottom = Math.max(ground, mid.y - BEAM_SOFFIT)
@@ -911,7 +1037,7 @@ export function buildTube(writer: PartWriter, track: TrackData): void {
         slot: 'orange',
         chamfer: 0.006,
       })
-      if (i % 3 !== 0) continue
+      if (i % 9 !== 0) continue
       writer.tube({
         path: [
           new Vector3(sign * (reach - 0.06), y - 0.03, p.z),
@@ -1372,7 +1498,14 @@ function buildSidePlatform(
     leaningRail(writer, spec, u, back - 0.55)
   }
   litterBin(writer, platformPoint(spec, half - 1.8, back - 0.6, deckAt(half - 1.8)))
-  stationSign(writer, group, spec, 0, back, options.title)
+  // MID-BAY, not u 0. The name board stands at the BACK of the deck facing the
+  // platform edge, so every reader is on the far side of the canopy columns
+  // from it — and `emitPlatformCanopy` puts a column on each bay boundary of a
+  // 12.8 m run in 2 bays, i.e. at u −6.4, 0 and +6.4. At u 0 the column stood
+  // dead centre of the 3.2 m board and swallowed the station's own name from
+  // anywhere past 2.9 m. At −3.2 the board spans −4.8…−1.6, clear of both
+  // neighbouring columns by 1.6 m, and clear of the leaning rail at −5.4.
+  stationSign(writer, group, spec, -3.2, back, options.title)
 
   // --- access: an end flight each side, and a 1:14 ramp along the back. Riser
   // counts are DERIVED (target 155 mm) — the deck datum comes from the
@@ -1539,8 +1672,11 @@ export function leaningRail(
   const half = 0.78
   for (const sign of [-1, 1]) {
     const foot = platformPoint(spec, u + sign * half, v, platformDeckY(spec, u + sign * half))
+    // Posts stop 4 mm under the rail SOFFIT (0.78 − 0.032 − 0.004): run to
+    // the rail's axis they put 32 mm of dark tube inside the orange section
+    // (continuity-audit class, same as the portal ramp).
     writer.tube({
-      path: [foot.clone().setY(foot.y - 0.03), foot.clone().setY(foot.y + 0.78)],
+      path: [foot.clone().setY(foot.y - 0.03), foot.clone().setY(foot.y + 0.744)],
       radius: 0.028,
       slot: 'dark',
       radialSegments: 10,
@@ -1555,11 +1691,20 @@ export function leaningRail(
       chamfer: 0.008,
     })
   }
+  // The rail's 90 mm overhangs curl DOWN past the posts instead of ending on
+  // flat caps in the air — the free end of a leaning rail is a return, the
+  // run's own termination idiom.
+  const railAt = (du: number, dy: number): Vector3 =>
+    platformPoint(spec, u + du, v, platformDeckY(spec, u + du) + 0.78 + dy)
   writer.tube({
     path: [
-      platformPoint(spec, u - half - 0.09, v, platformDeckY(spec, u - half - 0.09) + 0.78),
-      platformPoint(spec, u, v, platformDeckY(spec, u) + 0.78),
-      platformPoint(spec, u + half + 0.09, v, platformDeckY(spec, u + half + 0.09) + 0.78),
+      railAt(-half - 0.135, -0.16),
+      railAt(-half - 0.125, -0.05),
+      railAt(-half - 0.09, 0),
+      railAt(0, 0),
+      railAt(half + 0.09, 0),
+      railAt(half + 0.125, -0.05),
+      railAt(half + 0.135, -0.16),
     ],
     radius: 0.032,
     slot: 'orangeTop',
@@ -1622,16 +1767,26 @@ export function stationSign(
   const outward = platformOutward(spec, u)
   const tangent = platformTangent(spec, u)
   const yaw = yawAlong(outward)
+  // `placeYaw` sends the box's LOCAL +Z to `yaw`, and `yawAlong(outward)`
+  // makes that the outward normal — so local X is the sign's width and local Z
+  // its depth. Written the other way round (0.1, h, width) the cabinet came
+  // out 0.1 m wide and `width` DEEP: a 3.2 m fin standing out of the middle of
+  // the plate, straight at the reader, on every station board in the park (the
+  // portal's 5.2 m one reached past the platform edge). The plate itself was
+  // always right, which is why only a raycast behind it — 1.62 m of "host" on
+  // a 3.2 m sign, i.e. half its width — showed the fin up.
   writer.box({
     center: anchor,
-    size: new Vector3(0.1, height + 0.14, width),
+    size: new Vector3(width, height + 0.14, 0.1),
     rotationY: yaw,
     slot: 'dark',
     chamfer: 0.014,
   })
+  // Backlit reveal: bedded 25 mm INTO the bezel and standing 15 mm proud of
+  // its face, so the plate reads on a lit band rather than on a coplanar pair.
   writer.box({
-    center: anchor.clone().addScaledVector(outward, -0.056),
-    size: new Vector3(0.02, height, width - 0.18),
+    center: anchor.clone().addScaledVector(outward, 0.045),
+    size: new Vector3(width - 0.18, height, 0.04),
     rotationY: yaw,
     slot: 'signageGlow',
   })
@@ -1658,7 +1813,8 @@ export function stationSign(
       aspect: (width - 0.24) / (height - 0.06),
     }),
   )
-  plate.position.copy(anchor.clone().addScaledVector(outward, 0.056))
+  // 25 mm clear of the lit reveal's face (0.065) — never on it.
+  plate.position.copy(anchor.clone().addScaledVector(outward, 0.09))
   plate.rotation.y = yaw
   plate.castShadow = false
   group.add(plate)

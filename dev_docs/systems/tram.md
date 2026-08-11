@@ -229,6 +229,45 @@ the beam FLANKS at x = ±0.675, 0.18–0.28 m below the running surface. So:
 The three runs meet at 20 mm movement joints — opposed capped faces, which is
 a real structural joint and mechanically a `backToBack` pair, never a `zfight`.
 
+## Rails are ONE member; the turnout is a real place (P-wave 3)
+
+- The wear rails sweep on their OWN alignments (`RAIL_STEP` 0.45 m spur,
+  `LOOP_RAIL_STEP` 1.2 m loop), independent of the cast's stations:
+  continuously-welded steel does not observe the concrete's movement joints,
+  and the old per-structure rail sweeps read as "pieced parts" (owner
+  defect). One unbroken run per rail from the tube overrun to the turnout.
+- The turnout, keyed to the lateral offset `o` from the loop ring: full
+  embedded section while the aprons stay clear (`MERGE_FULL`), then a merge
+  wedge whose loop-side wing is clamped to the loop apron at a joint's
+  standoff — `mergeSection` keeps the section's 24-point topology, so ONE
+  loft morphs from full sections into the wedge — and a battered cap at
+  `MERGE_END`. Each rail terminates independently where it comes within
+  `TURNOUT_TOUCH` of a loop-rail circle and feathers down into the slab over
+  `FEATHER_COUNT` stations like a switch blade.
+- The paving yields TWO spur cuttings (`pavingPlan` ribbon regions
+  `'spur-corridor'` through the boulevard throat and
+  `'spur-corridor-promenade'` across the rim walk, both priority 98): genuine
+  CUTTINGS — floor follows the trackbed crown − 10 mm (`interiorHeight.
+  spurTrackDatum`, level at the ring, descending across the promenade),
+  vertical cast walls up to the local slab top, floor and walls clipped
+  against the channel's own emitted n-gon so the floors butt exactly.
+  `interiorHeight` carries the cuts (walkable datum = apron top inside them,
+  ring band excluded); `groundGrade` digs a 70 mm trench under the WHOLE
+  embedded run — corridors and open ground alike — because the regolith
+  sheet has no hole-cutting and used to lap over the cast edges. The
+  corridor lines are resampled from the FULL `ARRIVAL_SPINE` (parkPlan owns
+  the plan alignment) — a Catmull over a tail subset bows metres off the
+  true curve.
+- Both curves get `arcLengthDivisions = 2400`: three's default 200-division
+  LUT quantises `getPointAt` to ~1.7 m, visible as jitter on 0.45 m stations.
+- Piers and tube struts are placed by RUN DISTANCE, not station index, so
+  sampling density can change without changing their cadence; girder
+  colliders decimate the 0.9 m stations 3:1.
+- DANGER: `groundGrade(0, LOOP.radius)` is the anchor every guideway datum
+  derives from. Any field modifier (the corridor's grade dip) must exclude
+  the ring band, or the whole trackbed sinks — it did, by 45 mm, until the
+  exclusion was added.
+
 ## Decisions that are not visible in the code
 
 - **APRON_HALF is 1.35, and the STATIONS set it, not the channel.** A side

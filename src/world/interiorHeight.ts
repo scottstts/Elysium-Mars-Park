@@ -1,5 +1,11 @@
-import { AMPHITHEATER, BOULEVARD, PADS } from './parkPlan'
-import { PAVE, pavedSignedDistance } from './pavingPlan'
+import { AMPHITHEATER, ARRIVAL_SPINE, BOULEVARD, LOOP, PADS } from './parkPlan'
+import {
+  GUIDEWAY_CHANNEL,
+  PAVE,
+  insideGuidewayChannel,
+  insideSpurCorridor,
+  pavedSignedDistance,
+} from './pavingPlan'
 
 /**
  * The park floor's two datums.
@@ -125,11 +131,109 @@ export function groundGrade(x: number, z: number): number {
   const open = (1 - flatness) * clearOfPaving
   if (open > 0) height += reliefDetail(x, z) * open
 
+  // The spur trench: the regolith sheet has no hole-cutting, so wherever the
+  // arrival trackbed runs embedded across open ground the grade itself dives
+  // 70 mm under the crown — otherwise the sheet laps over the cast edges
+  // (continuity-audit finding: the −x edge was swallowed outright for ~2 m).
+  // Full dip within 1.55 m of the alignment (apron half 1.35 + a shoulder),
+  // faded out by 2.5 m; never inside the ring band — (0, LOOP.radius) is the
+  // point every guideway datum derives from, and dipping it once sank the
+  // whole trackbed 45 mm. The clamp only ever DIGS: where the beam rides
+  // high (the girder ramp) the target sits above grade and nothing moves.
+  if (!initialisingStreet && !insideGuidewayChannel(x, z, 0.3)) {
+    const track = spurTrackDatum(x, z)
+    if (track && track.d < 2.5) {
+      const target = track.y - 0.07
+      if (target < height) {
+        const t = track.d < 1.55 ? 1 : 1 - (track.d - 1.55) / 0.95
+        const eased = t * t * (3 - 2 * t)
+        height += (target - height) * eased
+      }
+    }
+  }
+
   return height
+}
+
+// --- the arrival spur's ground truth ---------------------------------------
+
+/** Vertical profile over the tail of ARRIVAL_SPINE (indices 8…15): the two
+ *  authored descent heights, then street + lift — mirrors track.ts's
+ *  spineHeights, which owns the real curve. Linear interpolation between
+ *  nodes is within a few cm of the Catmull; the 70 mm trench margin and the
+ *  10 mm corridor-floor reveal both absorb that. */
+const SPUR_TAIL_FROM = 8
+const SPUR_TAIL_ABS = [1.4, 1.06]
+const SPUR_TAIL_LIFT = [0.18, 0, 0, 0, 0, 0]
+
+let initialisingStreet = false
+let streetCache: number | null = null
+
+/** The ring's street datum (channel floor level), guarded so the one
+ *  groundGrade call that establishes it cannot recurse into the trench dip. */
+function streetDatum(): number {
+  if (streetCache === null) {
+    initialisingStreet = true
+    streetCache = groundGrade(0, LOOP.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess
+    initialisingStreet = false
+  }
+  return streetCache
+}
+
+let spurBox: { minX: number; maxX: number; minZ: number; maxZ: number } | null = null
+
+/**
+ * Lateral distance to the arrival spur's plan alignment and the trackbed
+ * crown height there. Returns null outside the tail's bounding box (the hot
+ * paths — every floor vertex, heightfield sample and prop — reject in four
+ * compares).
+ */
+export function spurTrackDatum(x: number, z: number): { d: number; y: number } | null {
+  const tail = ARRIVAL_SPINE.slice(SPUR_TAIL_FROM)
+  if (!spurBox) {
+    const pad = 3.5
+    spurBox = {
+      minX: Math.min(...tail.map(([px]) => px)) - pad,
+      maxX: Math.max(...tail.map(([px]) => px)) + pad,
+      minZ: Math.min(...tail.map(([, pz]) => pz)) - pad,
+      maxZ: Math.max(...tail.map(([, pz]) => pz)) + pad,
+    }
+  }
+  if (x < spurBox.minX || x > spurBox.maxX || z < spurBox.minZ || z > spurBox.maxZ) return null
+  const nodeY = (k: number): number =>
+    k < SPUR_TAIL_ABS.length
+      ? SPUR_TAIL_ABS[k]
+      : streetDatum() + SPUR_TAIL_LIFT[k - SPUR_TAIL_ABS.length]
+  let best = Infinity
+  let bestY = 0
+  for (let i = 0; i < tail.length - 1; i++) {
+    const [ax, az] = tail[i]
+    const [bx, bz] = tail[i + 1]
+    const abx = bx - ax
+    const abz = bz - az
+    const lengthSq = abx * abx + abz * abz
+    const t = lengthSq === 0 ? 0 : clamp01(((x - ax) * abx + (z - az) * abz) / lengthSq)
+    const px = ax + abx * t
+    const pz = az + abz * t
+    const dSq = (x - px) * (x - px) + (z - pz) * (z - pz)
+    if (dSq < best) {
+      best = dSq
+      bestY = nodeY(i) + (nodeY(i + 1) - nodeY(i)) * t
+    }
+  }
+  return { d: Math.sqrt(best), y: bestY }
 }
 
 /** The walkable surface: regolith grade + the paved slab lift. */
 export function interiorHeight(x: number, z: number): number {
+  // Inside the spur-corridor cuttings (boulevard AND promenade crossings) the
+  // walkable surface is the trackbed apron, not a slab datum bridged over the
+  // cut. The ring band is excluded — the channel's own shallow contract
+  // applies there.
+  if (insideSpurCorridor(x, z, -0.12) && !insideGuidewayChannel(x, z, 0.3)) {
+    const track = spurTrackDatum(x, z)
+    if (track) return track.y + 0.018
+  }
   const sd = pavedSignedDistance(x, z)
   if (sd >= PAVE.edgeFade) return groundGrade(x, z)
   const coverage = sd <= 0 ? 1 : 1 - smooth(sd / PAVE.edgeFade)

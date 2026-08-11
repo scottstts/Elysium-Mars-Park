@@ -540,8 +540,11 @@ function buildConsole(slots: SlotMesh, end: 1 | -1): void {
   // Louvred vent. The frame is a REAL picture frame — four rings closed on
   // themselves — so the fins sit in an opening instead of inside a slab, and
   // the corners can neither cross nor gap (the "four bars in one plane" trap).
+  // Centre 0.575: the frame's top edge (+0.10) must clear the screen bezel's
+  // bottom edge (y 0.70, x reach ±0.32) — at the old 0.735 the two shared the
+  // face band x 0.14…0.32 / y 0.70…0.835 and interpenetrated.
   const ventX = 0.31
-  const ventY = 0.735
+  const ventY = 0.575
   const frameRings: Vec3[][] = [
     ...([
       [0.34, 0.2, 0.022, 0.226],
