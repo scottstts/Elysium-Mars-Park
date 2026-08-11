@@ -9,6 +9,8 @@ import type { GameSystem } from '../runtime/system'
 import { markDynamic } from '../render/layers'
 import { interiorHeight } from '../world/interiorHeight'
 import { LOOP } from '../world/parkPlan'
+import { buildPortalGate } from './portalGate'
+import type { PortalGate } from './portalGate'
 import { buildGuideway, buildStations, buildTrackData, buildTube, carFloorY } from './track'
 import type { TrackData } from './track'
 import { buildTramCar, CAR_LENGTH, CAR_WIDTH } from './vehicle'
@@ -23,10 +25,22 @@ import type RAPIER from '@dimforge/rapier3d-compat'
  */
 
 const CRUISE = 8
-const TUBE_SPEED = 11.5
+/**
+ * The arrival is a ten-second shot (owner spec): ~330 m of spur at an express
+ * 45 m/s, with one continuous 9 m/s² brake whose sqrt-profile the speed
+ * follower tracks. Braking distance is v²/2a ≈ 112 m, so the brake engages
+ * still inside the tube and the car is visibly shedding speed as it threads
+ * the gate, sweeping the hook at walking-pace into the platform stop:
+ * 220 m / 45 + 45 / 9 ≈ 9.9 s.
+ */
+const ARRIVAL_CRUISE = 45
+const ARRIVAL_BRAKE = 9
 const ACCEL = 1.05
 const DWELL_SECONDS = 22
 const CAR_GAP = 0.7
+/** Gate opens when the arrival has this much left to run: at 45 m/s the six
+ *  blades (1.6 s travel) are fully housed ~2.5 s before the car passes. */
+const GATE_OPEN_REMAINING = 190
 
 type Phase = 'waiting' | 'arrival' | 'dwell' | 'run'
 
@@ -61,7 +75,7 @@ export class TramSystem implements GameSystem {
   private readonly player: PlayerSystem | null
   private readonly interaction: InteractionSystem | null
   private readonly boardPosition = new Vector3()
-  private readonly irisPetals: Group[] = []
+  private gate: PortalGate | null = null
   private irisOpen = 0
 
   constructor(
@@ -85,31 +99,11 @@ export class TramSystem implements GameSystem {
     this.staticGroup.add(writer.build(kitMaterials()))
     ctx.scene.add(this.staticGroup)
 
-    // Portal iris: six sliding petals in a collar at the wall crossing.
-    const materials = kitMaterials()
-    const petalCount = 6
-    for (let i = 0; i < petalCount; i++) {
-      const angle = (i / petalCount) * Math.PI * 2 + Math.PI / 6
-      const petalWriter = new PartWriter()
-      petalWriter.box({
-        center: new Vector3(0, 0, 0),
-        size: new Vector3(2.6, 4.4, 0.22),
-        slot: 'dark',
-        chamfer: 0.03,
-      })
-      petalWriter.box({
-        center: new Vector3(0, -1.6, -0.14),
-        size: new Vector3(2.2, 0.5, 0.08),
-        slot: 'orange',
-        chamfer: 0.015,
-      })
-      const petal = new Group()
-      petal.add(petalWriter.build(materials))
-      petal.position.set(Math.cos(angle) * 2.1, 4.6 + Math.sin(angle) * 2.1, 128.4)
-      petal.rotation.z = angle + Math.PI / 2
-      this.staticGroup.add(petal)
-      this.irisPetals.push(petal)
-    }
+    // Portal pressure gate: the powered closure in the bulkhead collar,
+    // built and animated by its own module (tram/portalGate.ts).
+    const gate = buildPortalGate(kitMaterials())
+    this.staticGroup.add(gate.group)
+    this.gate = gate
 
     for (let i = 0; i < 2; i++) {
       const car = buildTramCar()
@@ -146,7 +140,7 @@ export class TramSystem implements GameSystem {
       // auditor finding) until the train has rolled clear.
       this.phase = 'arrival'
       this.arrivalS = (CAR_LENGTH + CAR_GAP) / 2 + 0.4
-      this.speed = TUBE_SPEED
+      this.speed = ARRIVAL_CRUISE
       this.riding = true
       // Place the cars FIRST: seatPose reads the car's world matrix, and
       // before the first placement the car sits at the origin facing +Z —
@@ -232,14 +226,18 @@ export class TramSystem implements GameSystem {
     if (this.phase === 'waiting') return
 
     if (this.phase === 'arrival') {
-      // Speed: fast in the tube, easing to cruise by the portal, then the
-      // station approach brake — one continuous shot, no cuts.
+      // Speed: express through the tube, one continuous sqrt-profile brake
+      // through the gate and the hook into the stop — no cuts. The follower's
+      // decel slew runs 1.45× the profile so it can catch the curve at onset.
       const remaining = track.arrivalLength - this.arrivalS
       const target = Math.min(
-        this.arrivalS > track.arrivalLength - 210 ? CRUISE : TUBE_SPEED,
-        Math.sqrt(2 * ACCEL * Math.max(0.01, remaining)) + 0.15,
+        ARRIVAL_CRUISE,
+        Math.sqrt(2 * ARRIVAL_BRAKE * Math.max(0.01, remaining)) + 0.15,
       )
-      this.speed += Math.max(-ACCEL * dt * 1.6, Math.min(ACCEL * dt, target - this.speed))
+      this.speed += Math.max(
+        -ARRIVAL_BRAKE * 1.45 * dt,
+        Math.min(ARRIVAL_BRAKE * dt, target - this.speed),
+      )
       this.arrivalS += this.speed * dt
       if (this.arrivalS >= track.arrivalLength - 0.02) {
         this.phase = 'dwell'
@@ -286,23 +284,19 @@ export class TramSystem implements GameSystem {
 
     this.placeCars()
 
-    // Iris: petals slide open ahead of the approaching tram, seal after.
+    // Gate: blades open ahead of the approaching tram, reseal once it has
+    // docked — a pressure closure stands closed, not parked open.
     const track2 = this.track
     if (track2) {
-      const nearPortal =
-        this.phase === 'arrival' && this.arrivalS > track2.arrivalLength - 105
-      const target = nearPortal || this.phase !== 'arrival' ? 1 : 0
-      this.irisOpen += Math.max(-dt / 2.4, Math.min(dt / 2.4, target - this.irisOpen))
-      const eased = this.irisOpen * this.irisOpen * (3 - 2 * this.irisOpen)
-      for (let i = 0; i < this.irisPetals.length; i++) {
-        const angle = (i / this.irisPetals.length) * Math.PI * 2 + Math.PI / 6
-        const radial = 2.1 + eased * 4.6
-        this.irisPetals[i].position.set(
-          Math.cos(angle) * radial,
-          4.6 + Math.sin(angle) * radial,
-          128.4,
-        )
+      let target = 0
+      if (this.phase === 'arrival') {
+        target = track2.arrivalLength - this.arrivalS < GATE_OPEN_REMAINING ? 1 : 0
+      } else if (this.phase === 'dwell' && this.dwellRemaining > DWELL_SECONDS + 2) {
+        target = 1 // just docked: hold while the car clears the throat
       }
+      this.irisOpen += Math.max(-dt / 2.2, Math.min(dt / 1.6, target - this.irisOpen))
+      const eased = this.irisOpen * this.irisOpen * (3 - 2 * this.irisOpen)
+      this.gate?.setOpen(eased)
     }
 
     // Riding controls: E alights at an open door; otherwise the press is

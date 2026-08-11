@@ -150,7 +150,12 @@ function yawAlong(dir: Vector3): number {
 /** Clockwise-from-above so the portal station departs eastward. */
 export function buildTrackData(): TrackData {
   const loopPoints: Vector3[] = []
-  const segments = 48
+  // 360 control points (1.7 m), not 48: `beamTopY` carries the boulevard's
+  // swales, whose 33 m component sampled every 12.7 m aliases — the curve ran
+  // up to ~0.2 m off the real crown datum between control points, and the
+  // channel floor (poured per-vertex from the same slabTop) rose OVER the
+  // trackbed and rails for whole stretches (owner finding: buried rails).
+  const segments = 360
   for (let i = 0; i < segments; i++) {
     const phi = Math.PI / 2 - (i / segments) * Math.PI * 2
     const x = Math.cos(phi) * LOOP.radius
@@ -365,15 +370,15 @@ const EMBEDDED_SECTION: Vec2[] = [
 ]
 
 /**
- * Embedded section with the loop-side wing clipped at half-width `w`: every
- * point on that side is clamped to the cut line, so the wedge keeps the full
- * section's point topology (one loft carries EMBEDDED_SECTION stations
- * straight into merge stations) and the collapsed points build the battered
- * cut face. `w` bottoms out at MERGE_END − MERGE_GAP = 0.71 > the 0.655
- * crown edge, so the running surface is never touched.
+ * Merge-wedge section: the flush special-work deck (`morphEmbedded(1)` — by
+ * the time the wedge starts the spur is deep inside the turnout zone) with
+ * the loop-side wing clipped at half-width `w`. Every point on that side is
+ * clamped to the cut line, so the wedge keeps the full section's point
+ * topology (one loft carries plain stations straight into merge stations)
+ * and the collapsed points build the battered cut face.
  */
 function mergeSection(w: number, innerPositive: boolean): Vec2[] {
-  return EMBEDDED_SECTION.map(([x, y]) => {
+  return morphEmbedded(1).map(([x, y]) => {
     const clip = innerPositive ? x > 0 : x < 0
     if (!clip) return [x, y] as Vec2
     return [Math.sign(x) * Math.min(Math.abs(x), w), y] as Vec2
@@ -457,39 +462,209 @@ function railProfile(offset: number, topClamp?: number): Vec2[] {
   )
 }
 
-/** The Loop's wear rails: one closed sweep per rail on their own fine
- *  alignment (a 2.4 m chord on R 97 sags 7 mm — enough to scallop a specular
- *  head; 1.2 m keeps it under 2 mm). */
-function emitLoopRails(writer: PartWriter, track: TrackData): void {
-  const align = sampleCurve(track.loop, track.loopLength, LOOP_RAIL_STEP, true)
-  for (const offset of [-RAIL_X, RAIL_X]) {
-    const profile = railProfile(offset)
-    sweepRun(
-      writer,
-      'steelEdge',
-      align.stations.map((p) => ({ p, profile })),
-      { closed: true, smooth: SMOOTH.moulded, uvScale: 1.4 },
-    )
+// ---------------------------------------------------------------- turnout --
+
+/** Rail half-foot — the widest part of the section, what merges must clear. */
+const RAIL_FOOT_HALF = 0.112
+/** Machined clearance beside a rail crossing another (the frog flangeway). */
+const FLANGEWAY = 0.03
+
+/**
+ * The turnout, computed from the spur's own alignment — where the arrival
+ * merges the loop, three real pieces of switchwork happen:
+ *
+ *   BLADES — each spur rail runs until its foot lies against the outer face
+ *   of its loop stock rail, the profile's loop-side edge clamped to that
+ *   face so the blade tapers to a point exactly at tangency (`emitSpurRails`).
+ *
+ *   FROG — the spur's inner rail must CROSS the loop's outer rail to reach
+ *   the inner circle. The outer loop rail carries a real gap (`gapLo..gapHi`,
+ *   the crossing envelope plus a flangeway each side) and the spur rail runs
+ *   continuous through it over a cast base plate — a movable-point frog, the
+ *   route the car actually rides.
+ *
+ *   SPECIAL WORK — over `zoneLo..zoneHi` (ramped by `rampLo/rampHi`) both
+ *   casts morph to one flush deck at APRON_TOP: guide grooves close up,
+ *   rail rebates fill, and every rail through the zone reads as let into a
+ *   solid panel — which is exactly what street-tramway special work is.
+ *
+ * All bearings are loop angles (atan2(z, x)); the zone sits just west of the
+ * portal tangency at π/2, so a clockwise walk of the ring meets it whole.
+ */
+interface Turnout {
+  zoneLo: number
+  zoneHi: number
+  rampLo: number
+  rampHi: number
+  gapLo: number
+  gapHi: number
+  frog: { p: Vector3; yaw: number } | null
+}
+
+function computeTurnout(track: TrackData): Turnout {
+  const R = LOOP.radius
+  const outerRail = R + RAIL_X
+  const reach = RAIL_FOOT_HALF * 2 + FLANGEWAY
+  let zoneLo = Math.PI / 2 - 0.8 / R
+  let zoneHi = Math.PI / 2 + 0.2 / R
+  let gapLo = Number.POSITIVE_INFINITY
+  let gapHi = Number.NEGATIVE_INFINITY
+  let frog: Turnout['frog'] = null
+  const length = track.arrivalLength
+  const p0 = new Vector3()
+  const p1 = new Vector3()
+  let previousInnerRho = Number.POSITIVE_INFINITY
+  const samples = 1400
+  for (let k = 0; k <= samples; k++) {
+    const s = length - 70 + (70 * k) / samples
+    track.arrival.getPointAt(Math.max(0, Math.min(1, s / length)), p0)
+    track.arrival.getPointAt(Math.max(0, Math.min(1, (s + 0.22) / length)), p1)
+    const tx = p1.x - p0.x
+    const tz = p1.z - p0.z
+    const tl = Math.hypot(tx, tz) || 1
+    const sideX = -tz / tl
+    const sideZ = tx / tl
+    for (const offset of [-RAIL_X, RAIL_X]) {
+      const qx = p0.x + sideX * offset
+      const qz = p0.z + sideZ * offset
+      const rho = Math.hypot(qx, qz)
+      if (rho > R + 6 || p0.z > 115) continue
+      const phi = Math.atan2(qz, qx)
+      // Any spur steel within the loop section's furniture (grooves reach
+      // R + 0.955) pulls the flush zone over itself, foot width included.
+      if (rho < R + 1.2) {
+        zoneHi = Math.max(zoneHi, phi)
+        zoneLo = Math.min(zoneLo, phi)
+      }
+      if (offset < 0) {
+        if (Math.abs(rho - outerRail) < reach) {
+          gapLo = Math.min(gapLo, phi)
+          gapHi = Math.max(gapHi, phi)
+        }
+        if (!frog && previousInnerRho > outerRail && rho <= outerRail) {
+          frog = { p: new Vector3(qx, 0, qz), yaw: Math.atan2(tx, tz) }
+        }
+        previousInnerRho = rho
+      }
+    }
+  }
+  if (!Number.isFinite(gapLo)) {
+    // Alignment never crosses the outer rail (would take a plan change) —
+    // degrade to a zero-width gap at the tangency rather than a bad sweep.
+    gapLo = Math.PI / 2
+    gapHi = Math.PI / 2
+  }
+  return {
+    zoneLo,
+    zoneHi,
+    rampLo: zoneLo - 2.2 / R,
+    rampHi: zoneHi + 2.2 / R,
+    gapLo: gapLo - 0.1 / R,
+    gapHi: gapHi + 0.1 / R,
+    frog,
   }
 }
 
-/** Rail-head proximity at which a spur rail has met the loop's rail family. */
-const TURNOUT_TOUCH = 0.3
-/** Switch-blade feather: the last stations sink the section into the slab. */
-const FEATHER_COUNT = 5
+/** 1 inside the flush special-work zone, eased to 0 across the ramps. */
+function zoneT(turnout: Turnout, phi: number): number {
+  if (phi <= turnout.rampLo || phi >= turnout.rampHi) return 0
+  if (phi < turnout.zoneLo) {
+    return smooth01((phi - turnout.rampLo) / (turnout.zoneLo - turnout.rampLo))
+  }
+  if (phi > turnout.zoneHi) {
+    return smooth01((turnout.rampHi - phi) / (turnout.rampHi - turnout.zoneHi))
+  }
+  return 1
+}
+
+/**
+ * EMBEDDED_SECTION morphed toward the flush special-work deck: everything
+ * between the aprons — grooves, rebates, crown — lifts to one plane at
+ * APRON_TOP while the buried root stays put. Point count is unchanged, so a
+ * single loft carries plain stations straight through the turnout.
+ */
+function morphEmbedded(t: number): Vec2[] {
+  if (t <= 0) return EMBEDDED_SECTION
+  return EMBEDDED_SECTION.map(
+    ([x, y]) => [x, y > -0.44 ? y + (APRON_TOP - y) * t : y] as Vec2,
+  )
+}
+
+/** A loop station on the analytic ring at bearing `phi`, crown on datum. */
+function loopStation(phi: number): Vector3 {
+  const x = Math.cos(phi) * LOOP.radius
+  const z = Math.sin(phi) * LOOP.radius
+  return new Vector3(x, beamTopY(x, z), z)
+}
+
+/**
+ * The Loop's wear rails, on the analytic ring (the 360-point curve deviates
+ * from the true circle by under a millimetre) with crowns snapped to
+ * beamTopY. Inner rail: one closed sweep. Outer rail: an OPEN sweep the long
+ * way round, capped at the frog gap where the spur's inner rail crosses.
+ * 1.2 m stations — a 2.4 m chord on R 97 sags 7 mm, enough to scallop a
+ * specular head.
+ */
+function emitLoopRails(writer: PartWriter, turnout: Turnout): void {
+  const R = LOOP.radius
+  // Profile +x points INWARD on a clockwise walk, so +RAIL_X is the inner
+  // rail (R − 0.42) and −RAIL_X the outer (R + 0.42).
+  {
+    const profile = railProfile(RAIL_X)
+    const count = Math.round((Math.PI * 2 * R) / LOOP_RAIL_STEP)
+    const stations: Station[] = []
+    for (let i = 0; i < count; i++) {
+      stations.push({ p: loopStation(Math.PI / 2 - (i * Math.PI * 2) / count), profile })
+    }
+    sweepRun(writer, 'steelEdge', stations, { closed: true, smooth: SMOOTH.moulded, uvScale: 1.4 })
+  }
+  {
+    const profile = railProfile(-RAIL_X)
+    const span = Math.PI * 2 - (turnout.gapHi - turnout.gapLo)
+    const count = Math.max(8, Math.round((span * R) / LOOP_RAIL_STEP))
+    const stations: Station[] = []
+    for (let i = 0; i <= count; i++) {
+      stations.push({ p: loopStation(turnout.gapLo - (span * i) / count), profile })
+    }
+    sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
+  }
+  // CHECK RAIL: the guard opposite the frog. While the outer rail is gapped,
+  // the inner stock rail carries a guard one flangeway inside the gauge —
+  // the piece of switchwork that keeps a wheelset tracking through the gap —
+  // with its ends flared toward the centreline. Head face at stock-head face
+  // (0.42 − 0.105) minus a 45 mm flangeway; feet bed into the special-work
+  // deck like every rail through the zone. Angularly clear of both the blade
+  // tapers (they die by the tangency, ~1.2 m before the gap) and the
+  // crossing spur rail (ρ 97.17+ against the guard's ρ ≤ 96.95).
+  if (turnout.gapHi - turnout.gapLo > 1e-4) {
+    const lo = turnout.gapLo - 0.9 / R
+    const hi = turnout.gapHi + 0.9 / R
+    const count = Math.max(8, Math.round(((hi - lo) * R) / 0.3))
+    const stations: Station[] = []
+    for (let i = 0; i <= count; i++) {
+      const ends = Math.min(1, Math.min(i, count - i) / (count * 0.25))
+      const flare = (1 - smooth01(ends)) * 0.07
+      stations.push({
+        p: loopStation(hi - ((hi - lo) * i) / count),
+        profile: railProfile(RAIL_X - 0.105 - 0.045 - 0.105 - flare),
+      })
+    }
+    sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
+  }
+}
 
 /**
  * The spur's wear rails: ONE continuous run per rail from the far end of the
- * connector tube to the turnout — continuously-welded steel does not observe
- * the concrete's movement joints, and sweeping the rails per cast structure
- * left them reading as pieced-together fragments with a bare gap at the
- * station throat (owner finding). Each rail terminates independently where it
- * comes within TURNOUT_TOUCH of a loop rail circle, feathering down into the
- * slab over its last stations like a switch blade; past the cast's own end
- * the rails read as let into the loop's apron, which is how a street-tramway
- * turnout actually looks.
+ * connector tube into the turnout — continuously-welded steel does not
+ * observe the concrete's movement joints. At the merge each rail becomes a
+ * switch BLADE: its loop-side edge is clamped to the outer face of its stock
+ * rail, so the section tapers against real steel and dies exactly at
+ * tangency — no feathering into slab, no bare gap (owner finding: the rails
+ * must reach the circle). The inner rail runs continuous through the frog
+ * gap in the outer loop rail; cast base plates ride under the blade taper
+ * and the crossing, the way real switchwork carries both.
  */
-function emitSpurRails(writer: PartWriter, track: TrackData): void {
+function emitSpurRails(writer: PartWriter, track: TrackData, turnout: Turnout): void {
   const align = sampleCurve(track.arrival, track.arrivalLength, RAIL_STEP, false)
   const points = align.stations
   if (points.length >= 2) {
@@ -497,30 +672,42 @@ function emitSpurRails(writer: PartWriter, track: TrackData): void {
     const dir = new Vector3().subVectors(points[0], points[1]).normalize()
     points.unshift(points[0].clone().addScaledVector(dir, 5))
   }
-  const railCircles = [LOOP.radius - RAIL_X, LOOP.radius + RAIL_X]
   for (const offset of [-RAIL_X, RAIL_X]) {
-    const kept: Vector3[] = []
+    // The stock rail this one merges with, and its outer (approach-side) face.
+    const clampFace = LOOP.radius + offset + RAIL_FOOT_HALF
+    const stations: Station[] = []
     for (let i = 0; i < points.length; i++) {
-      const { side } = stationFrame(points, i, false)
-      const q = new Vector3().copy(points[i]).addScaledVector(side, offset)
-      const rho = Math.hypot(q.x, q.z)
-      // Only the merge neighbourhood may terminate the run — the tube also
-      // crosses these radii, 300 m away and 5 m up.
-      if (rho < LOOP.radius + 6) {
-        const near = Math.min(...railCircles.map((r) => Math.abs(rho - r)))
-        if (near < TURNOUT_TOUCH) break
-      }
-      kept.push(points[i])
+      const p = points[i]
+      const rhoC = Math.hypot(p.x, p.z)
+      // Merge neighbourhood only — the tube crosses these radii 300 m out.
+      const near = rhoC < LOOP.radius + 6 && p.z < 115
+      const floor = near ? clampFace - rhoC : Number.NEGATIVE_INFINITY
+      if (floor > offset + RAIL_FOOT_HALF - 0.005) break // blade tip: done
+      const base = railProfile(offset)
+      const profile =
+        floor > offset - RAIL_FOOT_HALF
+          ? base.map(([x, y]) => [Math.max(x, floor), y] as Vec2)
+          : base
+      stations.push({ p, profile })
     }
-    if (kept.length < FEATHER_COUNT + 2) continue
-    const stations: Station[] = kept.map((p, i) => {
-      const feather = i - (kept.length - 1 - FEATHER_COUNT)
-      if (feather <= 0) return { p, profile: railProfile(offset) }
-      const t = feather / FEATHER_COUNT
-      const top = RAIL_TOP + (-(REBATE_DEPTH + 0.004) - RAIL_TOP) * t * t
-      return { p, profile: railProfile(offset, top) }
+    if (stations.length >= 2) {
+      sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
+    }
+  }
+  // Frog base plate: a slim casting under the crossing, 8 mm proud of the
+  // flush deck; both routes' feet bed into it — bury-and-cap, the house
+  // joint. (Blade tips need none: they lie against their stock rails on the
+  // special-work panel itself.) Centred ON the detected centre-crossing —
+  // measured, not eyeballed: two hand-nudges in a row put it off the X.
+  if (turnout.frog) {
+    const { p, yaw } = turnout.frog
+    writer.box({
+      center: new Vector3(p.x, beamTopY(p.x, p.z) + APRON_TOP - 0.004, p.z),
+      size: new Vector3(0.85, 0.024, 1.9),
+      rotationY: yaw,
+      slot: 'dark',
+      chamfer: 0.004,
     })
-    sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
   }
 }
 
@@ -549,13 +736,35 @@ function sampleCurve(
  * Street-running Loop: the trackbed laid into the paving agent's channel. Its
  * own top sits 18 mm over the channel floor (42 mm under the boulevard
  * paving), so nothing anywhere is coplanar with the pour.
+ *
+ * Stations march the analytic ring with crowns snapped straight to beamTopY
+ * — the pour reads the same datum per-vertex, so the trackbed can never dive
+ * under the channel floor between curve control points. The walk starts just
+ * past the turnout's morph ramp and runs clockwise, so the whole special-work
+ * zone is met in one contiguous, finely-sampled stretch at the start.
  */
-function buildStreetTrack(writer: PartWriter, track: TrackData): void {
-  const align = sampleCurve(track.loop, track.loopLength, LOOP_STEP, true)
-  const centres: Station[] = align.stations.map((p) => ({ p, profile: EMBEDDED_SECTION }))
+function buildStreetTrack(writer: PartWriter, turnout: Turnout): void {
+  const R = LOOP.radius
+  const start = turnout.rampHi + 0.4 / R
+  const angles: number[] = []
+  let phi = start
+  while (start - phi < Math.PI * 2 - 0.9 / R) {
+    angles.push(phi)
+    const fine = phi <= turnout.rampHi + 0.7 / R && phi >= turnout.rampLo - 0.7 / R
+    phi -= (fine ? 0.6 : LOOP_STEP) / R
+  }
+  const centres: Station[] = angles.map((a) => ({
+    p: loopStation(a),
+    profile: morphEmbedded(zoneT(turnout, a)),
+  }))
   sweepRun(writer, 'cast', centres, { closed: true, smooth: SMOOTH.cast, uvScale: 0.55 })
-  emitLoopRails(writer, track)
-  emitTrackFurniture(writer, align, LOOP_STEP)
+  emitLoopRails(writer, turnout)
+  // Furniture only on plain sections: joints stop at the special work (as on
+  // any real turnout) and drains need their grooves, which the zone fills.
+  const furnitureStations = angles
+    .filter((a) => zoneT(turnout, a) <= 0)
+    .map((a) => loopStation(a))
+  emitTrackFurniture(writer, { stations: furnitureStations, closed: true }, LOOP_STEP)
 }
 
 /**
@@ -686,8 +895,13 @@ function splitSpur(track: TrackData): SpurSplit {
       girder.push({ p, profile: girderSection(Math.max(0, ground - 0.25 - p.y + BEAM_SOFFIT)) })
       girderStations.push(p)
     } else if (o >= MERGE_FULL) {
-      embedded.push({ p, profile: EMBEDDED_SECTION })
-      embeddedStations.push(p)
+      // Approaching the turnout the section morphs to the flush special-work
+      // deck over ~2.2 m, well before the wedge starts clipping it. Furniture
+      // stations only where the section is still the plain one (drains need
+      // their grooves, joints their aprons).
+      const t = 1 - smooth01((o - MERGE_FULL) / 2.2)
+      embedded.push({ p, profile: morphEmbedded(t) })
+      if (t <= 0) embeddedStations.push(p)
     } else {
       if (innerPositive === null) {
         const frame = stationFrame(align.stations, i, false)
@@ -813,7 +1027,8 @@ function emitTubeStrut(writer: PartWriter, p: Vector3, side: Vector3, axisDrop: 
 
 /** Cast guideway: street-running through the boulevard, elevated on the spur. */
 export function buildGuideway(writer: PartWriter, track: TrackData): void {
-  buildStreetTrack(writer, track)
+  const turnout = computeTurnout(track)
+  buildStreetTrack(writer, turnout)
 
   const spur = splitSpur(track)
   if (spur.tube.length > 1) {
@@ -850,7 +1065,7 @@ export function buildGuideway(writer: PartWriter, track: TrackData): void {
     sweepRun(writer, 'cast', spur.embedded, { smooth: SMOOTH.cast, uvScale: 0.55 })
     emitTrackFurniture(writer, spur.embeddedAlign, SPUR_STEP)
   }
-  emitSpurRails(writer, track)
+  emitSpurRails(writer, track, turnout)
 }
 
 export interface GuidewayCollider {

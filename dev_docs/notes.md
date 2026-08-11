@@ -2141,3 +2141,100 @@ halfSection·sin(rake) — quote foot heights at the CAP (two agents hit this).
 Gates: tsc -b EXIT 0, eslint src --max-warnings=0 EXIT 0, fresh-server boot
 clean (no console errors), turnout/trench/crossing/yard/plaza verified live.
 Nothing committed (owner commits).
+
+## P-wave 4 (2026-08-11): turnout switchwork, ONE ground field split, 10 s ride
+
+Owner defects → root causes (all fixed + live-verified):
+- "Rails still not connected to the circle" → the feather-sink blade idiom.
+  Replaced with REAL switchwork: blades clamp their profile against the stock
+  rail's outer face (collapsed-topology clamp, same trick as the cast wedge)
+  and die at tangency; the outer loop rail carries a real FROG GAP (open
+  sweep + flangeways) the spur's inner rail crosses continuously; both casts
+  morph to one flush special-work deck (`morphEmbedded`) through the zone.
+  `computeTurnout(track)` derives zone/gap/frog from the alignment — nothing
+  hand-placed.
+- "Rails buried underneath the ground" (loop, west stretches) → the loop
+  curve carried Y from 48 control points (12.7 m spacing) while the channel
+  floor pours slabTop per-vertex; the 33 m swale component aliased and the
+  curve ran ~0.2 m low/high between controls. Loop control points 360 now,
+  AND the built loop (cast/rails/furniture) marches the analytic ring with
+  beamTopY per station. The CAR still rides the curve — with 360 points the
+  two agree to millimetres.
+- "Paved ground carved up" at the throat → the trench dip lived inside
+  groundGrade, so slabTop dug the neighbouring slabs. THE FIELD SPLIT:
+  groundGrade is now PURE (pours flat); `trenchDip` + `regolithSurface`
+  carry the trench for the SHEET + scatter + open-ground walkable only.
+  Beware the third failure mode found on the way: with the dip guarded by
+  `sd > 0.25` alone, the sheet's big triangles ROOFED the cuttings (vertices
+  under adjacent slabs held them at deck height, z-fighting the cast). And a
+  fourth: inside the RING BAND (trenchDip's mandatory exclusion) the sheet
+  breached the corridor-eased channel floor wherever a swale ran high —
+  regolithSurface clamps under `streetDatum() − 0.07` across the corridor
+  blend there. Lesson: a surface that is HIDDEN by design (sheet under
+  slabs) becomes a defect the moment a cutting removes its cover — check
+  what a new hole EXPOSES, not just what it cuts.
+- Corridor cut edges: raw 90° arris → wall stops 60 mm short + 90 mm
+  chamfered lip; corridor REGION halfWidth = width/2 + lip so pours trim to
+  the lip's outer arris (the channel-footprint move, reused).
+- Exterior flat "pattern shifts when camera moves" → the valley material's
+  band filter used the GEOMETRIC MEAN pixel footprint, which under-filters
+  the stretched axis at grazing (metres along-view vs cm across-view →
+  moiré that crawls). Filter by MAX footprint with a 0.15λ→0.7λ fade:
+  grazing bands fade (honest — one tap cannot aniso-filter), face-on slopes
+  (max ≈ mean) keep their detail. If a band has a hard threshold it needs
+  the same weight.
+- Intro ride: ARRIVAL_CRUISE 45, ARRIVAL_BRAKE 9 sqrt-profile → 9.47 s
+  measured board-to-stop; gate triggers at remaining 190 m, reseals after
+  dock (pressure closures stand closed). Gate is its own module now
+  (`tram/portalGate.ts`, `PortalGate.setOpen(eased01)`), rebuilt by a
+  dedicated agent; tramSystem only drives the openness scalar.
+
+Verification craft added this wave: `?debug&view=overview` + DevOrbit +
+`window.__cam(px,py,pz,tx,ty,tz)` (set camera + controls.target + step) is
+the fastest geometry-inspection rig — no player/seat state to fight. Board
+clicks from automation: dispatch `button.click()` via JS (synthetic
+computer-clicks miss the entry overlay), and remember the unpause lands on a
+microtask — step in a LATER eval. Background tabs rAF-throttle to ~1 fps:
+drive frames with `__elysium.step(n)` and measure in SIM time, never wall
+clock. A stale console error with a `?t=` timestamped URL is from a PREVIOUS
+load — verify `window.__elysium` before believing a boot failed.
+
+OWNER STANDARD (2026-08-11, learn this): the trackbed z-fight mush WAS visible
+in the orchestrator's own verification screenshots and got rationalised as
+"morph facets catching the light" — the owner had to point it out. The rule
+now: an anomaly in a verification frame is NEVER "probably fine". If you
+cannot fully explain a patch/edge/patttern from the code you just wrote,
+raycast/probe that exact spot before calling the frame verified. Corollary
+that caused it: two meshes snapped to THE SAME datum are coplanar by
+construction — "fixing" a burial by equalising datums just converts it into
+z-fighting; separation must exceed the two meshes' mutual sampling error
+(hence GUIDEWAY_CHANNEL.gutter = 0.07 under the crown for every cut floor).
+
+P-wave 4 closing additions:
+- Trackbed bed rebuild (owner's z-fight report): all cut floors now hang a
+  GUTTER (0.07) below the crown datum (`GUIDEWAY_CHANNEL.gutter`), except a
+  10 mm-shallow zone through the turnout mouth where the crossing rails run
+  past the cast's cap and need their feet bedded — verify bury margins at
+  the floor's TRIANGLES, not the formula: cell interpolation across a blend
+  ate 12 mm of a 15 mm nominal. Probe stacks (`__ray`-style vertical
+  raycasts listing surface@height) are the standard instrument now.
+- The frog base plate is centred on the DETECTED centre-crossing, no manual
+  offset: two eyeballed nudges in a row put it off the X. If a placement
+  looks wrong in a frame, measure the discrepancy before moving anything.
+- Check rail added opposite the frog (guard a flangeway inside the gauge,
+  flared ends) — the piece of switchwork that makes a gapped stock rail
+  read intentional.
+- PORTAL GATE: the dedicated agent failed twice (64k output-token cap while
+  studying; produced zero file output) — stopped and built by the
+  orchestrator. It is a TELESCOPING SEGMENT GATE (see systems/tram.md): a
+  true iris is geometrically impossible in a 3.3 m-deep slot around a 5.9 m
+  bore. The old stub's "open" petals never cleared the bore — visible in
+  ride frames as dark wedges in the aperture corners.
+- Dust devils REMOVED (owner: "moving beam of light outside the dome").
+  Unlit translucent billboard columns read as glowing beams whenever one
+  drifted near the glass; the aerial dust medium is the valley's weather.
+- Vite stale-transform gremlin struck twice more (CylinderGeometry /
+  spurCorridorDistance ReferenceErrors at boot with tsc green): ALWAYS
+  restart the dev server after any cross-module or import-list edit, and
+  judge console errors by their `?t=` timestamps — stale entries from prior
+  loads persist in the console tool's log.

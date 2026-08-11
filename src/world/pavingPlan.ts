@@ -82,8 +82,19 @@ export const PLANTER = {
 export const GUIDEWAY_CHANNEL = {
   radius: LOOP.radius,
   width: 3.2,
-  /** Channel floor below the boulevard paving surface. */
+  /** Trackbed crown below the boulevard paving surface. */
   recess: 0.06,
+  /**
+   * Gutter: the channel/corridor floors sit this far below the CROWN datum
+   * (crown = slabTop − recess on the ring, spurTrackDatum on the spur). This
+   * must stay LARGER than the mutual sampling error of the two meshes that
+   * meet here: the trackbed cast snaps its crown to the datum per sweep
+   * station, the floor pours per-vertex on its own grid, and at near-zero
+   * separation their interpolation differences z-fight as random patches
+   * (owner finding — the beige/grey mush). 70 mm also reads as a real drain
+   * gutter beside an embedded trackbed.
+   */
+  gutter: 0.07,
   /** Chamfered lip where the paving drops into the channel. */
   lip: 0.09,
 } as const
@@ -325,7 +336,11 @@ function buildRegions(): Region[] {
           id: 'spur-corridor',
           priority: 98,
           line,
-          halfWidth: GUIDEWAY_CHANNEL.width / 2,
+          // Width to the OUTSIDE of the chamfered lip: paving trims to the
+          // lip's arris, the cut's walls stand at width/2 and the 90 mm
+          // chamfer bridges between them (same move as the channel's
+          // footprint reaching past its plan by `lip`).
+          halfWidth: GUIDEWAY_CHANNEL.width / 2 + GUIDEWAY_CHANNEL.lip,
           curb: false,
         })
       }
@@ -357,7 +372,7 @@ function buildRegions(): Region[] {
           id: 'spur-corridor-promenade',
           priority: 98,
           line,
-          halfWidth: GUIDEWAY_CHANNEL.width / 2,
+          halfWidth: GUIDEWAY_CHANNEL.width / 2 + GUIDEWAY_CHANNEL.lip,
           curb: false,
         })
       }

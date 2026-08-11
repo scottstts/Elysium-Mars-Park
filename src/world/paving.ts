@@ -1330,20 +1330,30 @@ function emitGuidewayChannel(writer: GroundWriter): void {
   const rInner = GUIDEWAY_CHANNEL.radius - GUIDEWAY_CHANNEL.width / 2
   const rOuter = GUIDEWAY_CHANNEL.radius + GUIDEWAY_CHANNEL.width / 2
   const steps = Math.round((TAU * GUIDEWAY_CHANNEL.radius) / 1.4)
-  // The channel floor is radially dished (slabTop falls toward the ring). At
-  // the turnout mouth it eases down onto the corridor's constant level so the
-  // two floors meet without a step; elsewhere the dish is untouched.
+  // The channel floor runs a full GUTTER below the crown datum — see the
+  // constant: at smaller separations the cast's station-sampled crown and
+  // this per-vertex pour z-fight. Radially dished (slabTop falls toward the
+  // ring); at the turnout mouth it blends onto the corridor floor's constant
+  // level — a FULL blend, up or down, so the two floors meet with no step
+  // whichever side of the swale the junction lands on.
+  // 15 mm below the crown datum through the turnout mouth, NOT the full
+  // gutter: past the spur cast's cap the crossing rails run with no cast
+  // beneath them, and a deep floor leaves their feet hanging in air. The
+  // shallow zone cannot z-fight — the spine's tail nodes are all at street
+  // level so every datum agrees to millimetres there, the exposed margins
+  // carry no cast overhead, and under the cast the floor is inside the
+  // solid. It also matches `emitSpurCut`'s mouth depth so the floors meet.
   const corridorLevel =
     groundGrade(0, GUIDEWAY_CHANNEL.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess - 0.01
   const floorY = (x: number, z: number): number => {
-    const dished = slabTop(x, z) - GUIDEWAY_CHANNEL.recess
+    const dished = slabTop(x, z) - GUIDEWAY_CHANNEL.recess - GUIDEWAY_CHANNEL.gutter
     // Smooth by true corridor distance: a stepped blend tears the floor into
     // shards where adjacent vertices land on different levels.
     const d = spurCorridorDistance(x, z)
     if (d >= 0.9) return dished
     const t = Math.min(1, (0.9 - d) / 1.2)
     const eased = t * t * (3 - 2 * t)
-    return dished + (Math.min(dished, corridorLevel) - dished) * eased
+    return dished + (corridorLevel - dished) * eased
   }
   const point = (r: number, angle: number, y: (x: number, z: number) => number): GroundVertex => {
     const x = Math.cos(angle) * r
@@ -1443,17 +1453,34 @@ function emitSpurCut(writer: GroundWriter, id: string): void {
   const region = PAVED_REGIONS.find((entry) => entry.id === id)
   if (!region || region.kind !== 'ribbon') return
   const line = region.line
-  const half = region.halfWidth
-  // The crown datum comes from the spur's own ground truth; the fallback is
-  // the ring street level (only reachable if a ribbon strays past the tail's
-  // bounding box, which the plan construction prevents). 10 mm below the
-  // crown, so floor and crown are never coplanar.
-  const fallback = groundGrade(0, GUIDEWAY_CHANNEL.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess
-  const floorAt = (x: number, z: number): number => (spurTrackDatum(x, z)?.y ?? fallback) - 0.01
+  // The region reaches to the OUTSIDE of the lip (paving trims there); the
+  // cut's own walls stand at the channel width and the chamfer bridges.
+  const half = GUIDEWAY_CHANNEL.width / 2
   const steps = Math.round((TAU * GUIDEWAY_CHANNEL.radius) / 1.4)
   const rOuter = GUIDEWAY_CHANNEL.radius + GUIDEWAY_CHANNEL.width / 2
   // The corridor approaches the ring from outside: > 0 = clear of the channel.
   const clear = (x: number, z: number): number => ngonSigned(0, 0, rOuter, steps, x, z)
+  // The crown datum comes from the spur's own ground truth; the fallback is
+  // the ring street level (only reachable if a ribbon strays past the tail's
+  // bounding box, which the plan construction prevents). Depth is SPATIAL:
+  // a full GUTTER along the run — the cast sweeps a Catmull while this floor
+  // lerps the spine nodes, and their divergence reaches a few cm upstream,
+  // so anything shallower z-fights (owner finding) — rising to a 15 mm
+  // reveal through the turnout mouth, where the crossing rails run past the
+  // cast's cap with nothing beneath them and a deep floor left their feet
+  // hanging in air. The tail nodes are all at street level there, so the
+  // datums agree to millimetres and 15 mm can never fight.
+  const fallback = groundGrade(0, GUIDEWAY_CHANNEL.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess
+  const floorAt = (x: number, z: number): number => {
+    const crown = spurTrackDatum(x, z)?.y ?? fallback
+    // Shallow (10 mm) until PAST the cast's cap (clear ≈ 0.49): the crossing
+    // rails' feet sit at crown − 0.03 and must stay bedded at every floor
+    // TRIANGLE — the cells interpolate across this blend, and a 15 mm nominal
+    // measured only 3 mm at the worst cell. The deepening happens under the
+    // cast, where the floor is inside the solid anyway.
+    const t = clamp01((clear(x, z) - 0.55) / 1.05)
+    return crown - 0.01 - (GUIDEWAY_CHANNEL.gutter - 0.01) * (t * t * (3 - 2 * t))
+  }
   const run: number[] = [0]
   for (let i = 1; i < line.length; i++) run.push(run[i - 1] + line[i].distanceTo(line[i - 1]))
   const sideAt = (i: number): Vector2 => {
@@ -1498,21 +1525,43 @@ function emitSpurCut(writer: GroundWriter, id: string): void {
     for (const s of [-1, 1] as const) {
       const pa = at(i, s * half)
       const pb = at(i + 1, s * half)
+      const outer = s * (half + GUIDEWAY_CHANNEL.lip)
+      const qa = at(i, outer)
+      const qb = at(i + 1, outer)
       const floorA = floorAt(pa.x, pa.z)
       const floorB = floorAt(pb.x, pb.z)
-      const topA = Math.max(floorA, slabTop(pa.x, pa.z))
-      const topB = Math.max(floorB, slabTop(pb.x, pb.z))
+      // Vertical cast wall stops 60 mm short of the paving; the 90 mm
+      // chamfered lip carries the last drop, so the slab edge is a treated
+      // arris exactly as it is along the ring channel.
+      const brimA = Math.max(floorA, slabTop(pa.x, pa.z) - GUIDEWAY_CHANNEL.recess)
+      const brimB = Math.max(floorB, slabTop(pb.x, pb.z) - GUIDEWAY_CHANNEL.recess)
+      const topA = Math.max(brimA, slabTop(qa.x, qa.z))
+      const topB = Math.max(brimB, slabTop(qb.x, qb.z))
       if (topA - floorA < 0.012 && topB - floorB < 0.012) continue
-      const wall = clipGround(
-        [
-          wallVertex(i, s * half, floorA),
-          wallVertex(i + 1, s * half, floorB),
-          wallVertex(i + 1, s * half, topB),
-          wallVertex(i, s * half, topA),
-        ],
-        clear,
-      )
-      if (wall.length >= 3) writer.face('channel', s > 0 ? wall : [...wall].reverse())
+      if (brimA - floorA >= 0.004 || brimB - floorB >= 0.004) {
+        const wall = clipGround(
+          [
+            wallVertex(i, s * half, floorA),
+            wallVertex(i + 1, s * half, floorB),
+            wallVertex(i + 1, s * half, brimB),
+            wallVertex(i, s * half, brimA),
+          ],
+          clear,
+        )
+        if (wall.length >= 3) writer.face('channel', s > 0 ? wall : [...wall].reverse())
+      }
+      if (topA - brimA >= 0.004 || topB - brimB >= 0.004) {
+        const lip = clipGround(
+          [
+            wallVertex(i, s * half, brimA),
+            wallVertex(i + 1, s * half, brimB),
+            wallVertex(i + 1, outer, topB),
+            wallVertex(i, outer, topA),
+          ],
+          clear,
+        )
+        if (lip.length >= 3) writer.face('channel', s > 0 ? lip : [...lip].reverse())
+      }
     }
   }
 }

@@ -1,8 +1,6 @@
 import {
   BufferAttribute,
   BufferGeometry,
-  CylinderGeometry,
-  DoubleSide,
   Group,
   IcosahedronGeometry,
   InstancedMesh,
@@ -11,7 +9,7 @@ import {
   Quaternion,
   Vector3,
 } from 'three'
-import { MeshBasicNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu'
+import { MeshStandardNodeMaterial } from 'three/webgpu'
 import type { Node } from 'three/webgpu'
 import {
   dFdx,
@@ -29,7 +27,6 @@ import {
   sin,
   smoothstep,
   uniform,
-  uv,
   vec2,
   vec3,
   vec4,
@@ -42,9 +39,9 @@ import { TERRAIN_INNER_RADIUS, exteriorHeight, mountainMask } from './terrainHei
 
 /**
  * Everything beyond the glass: the valley floor and its mountain ring out to
- * ~13.5 km, boulder fields and mountain-foot talus, drifting dust devils, and
- * the screen-space Mars aerial medium wired into the pipeline. No colliders —
- * the dome wall is the physical boundary.
+ * ~13.5 km, boulder fields and mountain-foot talus, and the screen-space Mars
+ * aerial medium wired into the pipeline. No colliders — the dome wall is the
+ * physical boundary.
  *
  * The terrain is ONE radially-graded polar mesh, not a stack of concentric
  * ring meshes. Vertex density follows a spacing schedule (9 m at the dome
@@ -61,9 +58,6 @@ import { TERRAIN_INNER_RADIUS, exteriorHeight, mountainMask } from './terrainHei
 export class ExteriorSystem implements GameSystem {
   readonly id = 'exterior'
   private readonly group = new Group()
-  private readonly simTime = uniform(0)
-  private readonly devils: Mesh[] = []
-  private readonly devilSeeds: DustDevilSeed[] = []
   private readonly pipeline: RenderPipelineSystem
 
   constructor(pipeline: RenderPipelineSystem) {
@@ -106,39 +100,10 @@ export class ExteriorSystem implements GameSystem {
     // ---- Boulder fields: valley floor scatter + talus at the mountain feet.
     this.buildBoulders(ctx)
 
-    // ---- Dust devils: the valley's only weather.
-    const devilGeometry = new CylinderGeometry(30, 9, 560, 20, 26, true)
-    const devilSites: DustDevilSeed[] = [
-      // Coming up the south pass, straight down the arrival sightline.
-      { baseX: -70, baseZ: 2600, driftX: 30, driftZ: -2300, span: 210, speed: 3.4, scale: 1 },
-      // Crossing the east valley floor, read against the near foothills.
-      { baseX: 980, baseZ: -1150, driftX: -520, driftZ: 2100, span: 260, speed: 2.6, scale: 0.72 },
-      // Far NW, high on the range front where it silhouettes against sky.
-      { baseX: -2500, baseZ: -2450, driftX: 1900, driftZ: 900, span: 340, speed: 4.1, scale: 1.35 },
-    ]
-    for (let i = 0; i < devilSites.length; i++) {
-      const material = new MeshBasicNodeMaterial()
-      material.transparent = true
-      material.depthWrite = false
-      material.side = DoubleSide
-      material.colorNode = vec3(0.5, 0.345, 0.215).mul(1.15)
-      const swirl = mx_noise_float(
-        vec2(
-          uv().x.mul(3).add(float(i * 3.7)).add(this.simTime.mul(0.03)),
-          uv().y.mul(5.5).sub(this.simTime.mul(0.11)),
-        ),
-      )
-      // Dense skirt, wispy crown — and contrasty noise so it reads as
-      // whirling dust instead of a translucent tower.
-      const column = smoothstep(0.0, 0.09, uv().y).mul(oneMinus(smoothstep(0.22, 1.0, uv().y)).pow(1.7))
-      const swirl01 = swirl.mul(0.5).add(0.5)
-      material.opacityNode = swirl01.pow(1.9).mul(column).mul(0.3)
-      const devil = new Mesh(devilGeometry, material)
-      devil.scale.setScalar(devilSites[i].scale)
-      this.devils.push(devil)
-      this.devilSeeds.push(devilSites[i])
-      this.group.add(devil)
-    }
+    // No dust devils: the drifting translucent columns read as moving beams
+    // of light through the glass whenever one crossed the valley near the
+    // dome (owner report), and an unlit billboard tornado has no honest fix
+    // at that distance. The valley's weather is the aerial dust medium.
 
     scene.add(this.group)
   }
@@ -262,34 +227,9 @@ export class ExteriorSystem implements GameSystem {
     emit(far, 1, 3)
   }
 
-  update(ctx: GameContext): void {
-    this.simTime.value = ctx.time.sim
-    for (let i = 0; i < this.devils.length; i++) {
-      const devil = this.devils[i]
-      const seed = this.devilSeeds[i]
-      const t = ((ctx.time.sim * seed.speed) / seed.span + i * 0.37) % 1
-      const wander = Math.sin(t * 7.4 + i * 2.1) * 90
-      const x = seed.baseX + seed.driftX * t - wander * 0.4
-      const z = seed.baseZ + seed.driftZ * t + wander
-      devil.position.set(x, exteriorHeight(x, z) + 280 * seed.scale, z)
-      devil.rotation.y = ctx.time.sim * (0.5 + i * 0.2)
-    }
-  }
-
   dispose(ctx: GameContext): void {
     ctx.scene.remove(this.group)
   }
-}
-
-interface DustDevilSeed {
-  baseX: number
-  baseZ: number
-  driftX: number
-  driftZ: number
-  /** Seconds for one full traverse. */
-  span: number
-  speed: number
-  scale: number
 }
 
 /** Angular resolution of the whole valley mesh (one count = no seams). */
@@ -496,16 +436,23 @@ function createValleyMaterial(): MeshStandardNodeMaterial {
   // oneMinus(smoothstep(near, far, x)).
   const footprintX = dFdx(positionWorld).length()
   const footprintY = dFdy(positionWorld).length()
-  // Geometric mean = the side of a square with the pixel's ground AREA. The
-  // sum over-filters (grazing ground went smooth), the min under-filters (the
-  // stretched axis speckles); the area is the honest middle.
-  const footprint = footprintX.mul(footprintY).sqrt()
-  // Long, gentle ramps on purpose: `positionWorld` is linear across a
-  // triangle, so its derivative is a per-TRIANGLE constant. A tight fade
-  // makes the weight jump between neighbouring triangles and the surface
-  // breaks into stippled rows. Spread over a decade and the step vanishes.
+  // WORST axis, not the geometric mean. The mean is the pixel's ground AREA,
+  // and it knowingly under-filters the stretched axis — on the flat apron
+  // seen from eye height the along-view footprint is metres while the
+  // across-view is centimetres, so the metre-scale bands rendered far past
+  // Nyquist in one direction and crawled as moiré whenever the camera moved
+  // (owner finding). A single procedural tap cannot anisotropically filter,
+  // so the only honest answer at grazing is to fade the band out — which is
+  // what real anisotropic ground does to the eye anyway. Face-on slopes have
+  // max ≈ mean, so the mountains keep their detail exactly as before.
+  const footprint = footprintX.max(footprintY)
+  // The fade still spans a wide band (×4.7): `positionWorld`'s derivative is
+  // a per-TRIANGLE constant, and a hard cut makes the weight jump between
+  // neighbouring triangles as stippled rows. But it must be mostly closed by
+  // Nyquist (0.5λ) or the surviving contribution shimmers: 0.15λ → 0.7λ
+  // leaves 28% at Nyquist, gone entirely by 0.7λ.
   const bandWeight = (wavelength: number): Node<'float'> =>
-    oneMinus(smoothstep(wavelength * 0.16, wavelength * 2.4, footprint))
+    oneMinus(smoothstep(wavelength * 0.15, wavelength * 0.7, footprint))
   const weightMicro = bandWeight(1.55)
   const weightGravel = bandWeight(3.1)
   const weightFine = bandWeight(8.3)

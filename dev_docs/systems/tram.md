@@ -229,44 +229,91 @@ the beam FLANKS at x = ±0.675, 0.18–0.28 m below the running surface. So:
 The three runs meet at 20 mm movement joints — opposed capped faces, which is
 a real structural joint and mechanically a `backToBack` pair, never a `zfight`.
 
-## Rails are ONE member; the turnout is a real place (P-wave 3)
+## Rails are ONE member; the turnout is REAL switchwork (P-wave 4)
 
 - The wear rails sweep on their OWN alignments (`RAIL_STEP` 0.45 m spur,
   `LOOP_RAIL_STEP` 1.2 m loop), independent of the cast's stations:
   continuously-welded steel does not observe the concrete's movement joints,
   and the old per-structure rail sweeps read as "pieced parts" (owner
-  defect). One unbroken run per rail from the tube overrun to the turnout.
-- The turnout, keyed to the lateral offset `o` from the loop ring: full
-  embedded section while the aprons stay clear (`MERGE_FULL`), then a merge
-  wedge whose loop-side wing is clamped to the loop apron at a joint's
-  standoff — `mergeSection` keeps the section's 24-point topology, so ONE
-  loft morphs from full sections into the wedge — and a battered cap at
-  `MERGE_END`. Each rail terminates independently where it comes within
-  `TURNOUT_TOUCH` of a loop-rail circle and feathers down into the slab over
-  `FEATHER_COUNT` stations like a switch blade.
+  defect). One unbroken run per rail from the tube overrun into the turnout.
+- The turnout is computed from the alignment itself (`computeTurnout`) and
+  built as three pieces of real switchwork — the P-wave-3 "feather the rail
+  down into the slab" idiom is DEAD (owner: rails must reach the circle):
+  - **Blades**: each spur rail runs until its foot lies against the OUTER
+    face of its stock rail (profile clamped via `x = max(x, clampFace − ρ)`,
+    same collapsed-topology trick as the cast wedge), so the section tapers
+    against real steel and dies exactly at the tangency. The 7 mm head-flank
+    reveal that falls out of foot-to-foot contact IS the switch look.
+  - **Frog**: the spur's inner rail must CROSS the outer loop rail to reach
+    the inner circle. The outer loop rail is an OPEN sweep with a real gap
+    (crossing envelope + a `FLANGEWAY` each side); the spur rail runs
+    continuous through it over one slim `dark` base plate — a movable-point
+    frog, and the route the car actually rides.
+  - **Special work**: over the zone (plus 2.2 m morph ramps) BOTH casts
+    morph to one flush deck at `APRON_TOP` (`morphEmbedded`: grooves close,
+    rebates fill, crown rises; same point count, one loft). Rails through
+    the zone read as let into a solid panel — real street-tramway special
+    work. Joint/drain furniture stops at the zone (drains need grooves).
+- The LOOP's built geometry (cast, rails, furniture) marches the ANALYTIC
+  ring with `beamTopY` sampled per station — and `buildTrackData` carries
+  360 control points, not 48: the boulevard swales have a 33 m component
+  that a 12.7 m control spacing aliases, and the curve ran up to ~0.2 m off
+  the true crown — the channel floor (poured per-vertex from the same
+  slabTop) rose OVER the trackbed and buried whole stretches of rail (owner
+  defect, screenshot: "rails buried underneath the ground").
 - The paving yields TWO spur cuttings (`pavingPlan` ribbon regions
   `'spur-corridor'` through the boulevard throat and
   `'spur-corridor-promenade'` across the rim walk, both priority 98): genuine
   CUTTINGS — floor follows the trackbed crown − 10 mm (`interiorHeight.
-  spurTrackDatum`, level at the ring, descending across the promenade),
-  vertical cast walls up to the local slab top, floor and walls clipped
-  against the channel's own emitted n-gon so the floors butt exactly.
-  `interiorHeight` carries the cuts (walkable datum = apron top inside them,
-  ring band excluded); `groundGrade` digs a 70 mm trench under the WHOLE
-  embedded run — corridors and open ground alike — because the regolith
-  sheet has no hole-cutting and used to lap over the cast edges. The
-  corridor lines are resampled from the FULL `ARRIVAL_SPINE` (parkPlan owns
-  the plan alignment) — a Catmull over a tail subset bows metres off the
-  true curve.
+  spurTrackDatum`), vertical cast walls to 60 mm below the slab, then a
+  90 mm chamfered lip to the trimmed edge (region halfWidth reaches
+  `width/2 + lip`, the same move as the channel footprint) — the cut edge
+  is a treated arris exactly as along the ring channel.
+- THE FIELD SPLIT (the hard-won one): `groundGrade` is PURE — every pour
+  datum (slabTop and everything derived) reads undipped grade, so slabs
+  stay flat beside the cuttings. The spur trench lives in `trenchDip`, and
+  `regolithSurface = grade + dip (+ turnout lid clamp)` is what the
+  regolith SHEET and the ground scatter stand on. One (x,z) genuinely needs
+  two answers: dipping `groundGrade` warped 2.5 m of boulevard/terrace slab
+  along the throat; NOT dipping it left the sheet's triangles roofing the
+  cuttings at deck height. Near the turnout the sheet additionally clamps
+  under `streetDatum() − 0.07` across the corridor blend — the ring band is
+  excluded from `trenchDip` (see DANGER below) but the boulevard slab that
+  normally hides the sheet is cut away there, and high swales breached the
+  eased channel floor.
 - Both curves get `arcLengthDivisions = 2400`: three's default 200-division
   LUT quantises `getPointAt` to ~1.7 m, visible as jitter on 0.45 m stations.
 - Piers and tube struts are placed by RUN DISTANCE, not station index, so
   sampling density can change without changing their cadence; girder
   colliders decimate the 0.9 m stations 3:1.
 - DANGER: `groundGrade(0, LOOP.radius)` is the anchor every guideway datum
-  derives from. Any field modifier (the corridor's grade dip) must exclude
-  the ring band, or the whole trackbed sinks — it did, by 45 mm, until the
-  exclusion was added.
+  derives from. Any field modifier must exclude the ring band, or the whole
+  trackbed sinks — it did, by 45 mm, until the exclusion was added.
+
+## The arrival is a ten-second shot (P-wave 4)
+
+- `ARRIVAL_CRUISE` 45 m/s, one continuous `ARRIVAL_BRAKE` 9 m/s²
+  sqrt-profile: brake engages ~112 m out (still inside the tube), the car
+  threads the gate at ~25 m/s and glides the hook to the stop. Measured
+  board-to-stop: 9.47 s sim over the 326 m spur (owner spec: ~10 s).
+- The portal gate (its own module, `tram/portalGate.ts`, `setOpen(eased)`)
+  triggers at `GATE_OPEN_REMAINING` 190 m — 1.6 s blade travel is fully
+  housed ~2.5 s before the car passes — and RESEALS a few seconds after the
+  dock (a pressure closure stands closed; target 1 only during approach and
+  the first seconds of the portal dwell).
+- The gate is a TELESCOPING SEGMENT GATE, not an iris: a plain iris cannot
+  live in this collar — any rigid piece covering the centre must retreat
+  ≥ 5.9 m (the bore) and the blade slot is only 3.3 m deep (r ≤ 9.2). Six
+  64° sectors of TWO plates each (outer band r 3.00–6.15, inner wedge
+  r 0.05–3.24 nested behind it) telescope radially: outer travels 2.97 m,
+  inner 5.93 m, everything lands in r 5.95–9.17 at open. Sealing is by
+  Z-LAPS only (four 90 mm plate bands 20+ mm apart through the slot, 4° arc
+  laps between adjacent sectors, a 0.24 m ring lap between stages) — no two
+  plates ever share a plane, and the residual centre is a centimetre iris
+  dot. Fixed trim rings frame the slot mouth, buried 20 mm into the bore
+  wall. The original 6-box "petal" stub never actually cleared the bore at
+  open — check any full-open state against the swept envelope, not the rest
+  pose.
 
 ## Decisions that are not visible in the code
 

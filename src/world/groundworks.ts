@@ -4,7 +4,7 @@ import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import { createRegolithMaterial } from './groundMaterials'
 import { buildGroundScatter } from './groundScatter'
-import { groundGrade } from './interiorHeight'
+import { regolithSurface } from './interiorHeight'
 import { GARDENS, PATHS } from './parkPlan'
 import { buildPaving } from './paving'
 import { pavedSignedDistance } from './pavingPlan'
@@ -96,12 +96,15 @@ function buildFloorGeometry(): BufferGeometry {
       const angle = (angularIndex / angularSegments) * Math.PI * 2
       const x = Math.cos(angle) * r
       const z = Math.sin(angle) * r
-      const y = groundGrade(x, z)
+      // The SHEET follows regolithSurface (grade + the spur trench), never
+      // bare groundGrade: the trench dip lives outside the pour datum so the
+      // slabs stay flat, but the sheet itself must dive under the trackbed.
+      const y = regolithSurface(x, z)
       positions[vertex * 3] = x
       positions[vertex * 3 + 1] = y
       positions[vertex * 3 + 2] = z
-      const dx = groundGrade(x + eps, z) - y
-      const dz = groundGrade(x, z + eps) - y
+      const dx = regolithSurface(x + eps, z) - y
+      const dz = regolithSurface(x, z + eps) - y
       normal.set(-dx / eps, 1, -dz / eps).normalize()
       normals[vertex * 3] = normal.x
       normals[vertex * 3 + 1] = normal.y

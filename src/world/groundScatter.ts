@@ -1,7 +1,7 @@
 import { BufferAttribute, BufferGeometry, InstancedMesh, Matrix4, Quaternion, Vector3 } from 'three'
 import type { Rng } from '../core/prng'
 import { createClastMaterial } from './groundMaterials'
-import { groundGrade } from './interiorHeight'
+import { regolithSurface } from './interiorHeight'
 import { GARDENS, PADS, PATHS } from './parkPlan'
 import { pavedSignedDistance } from './pavingPlan'
 
@@ -346,7 +346,7 @@ export function buildGroundScatter(rng: Rng): ScatterBuild {
       const burial = BURIAL.min + (BURIAL.max - BURIAL.min) * hash2(ix, iz, 31)
       position.set(
         x,
-        groundGrade(x, z) - burial * variant.height * scale.y - variant.minY * scale.y,
+        regolithSurface(x, z) - burial * variant.height * scale.y - variant.minY * scale.y,
         z,
       )
       matrix.compose(position, quaternion, scale)
