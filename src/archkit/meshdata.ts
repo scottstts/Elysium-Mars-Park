@@ -1219,7 +1219,16 @@ export function tubeAlong(path: Vec3[], profile: Vec2[], opts: TubeOpts = {}): M
   const { closePath = false, up = [0, 0, 1] as Vec3, cap = true, miter = false, roll, scale } = opts
   const P = path
   const n = P.length
-  const rings: Vec3[][] = []
+  // Tangents first (central differences), then ROTATION-MINIMISING frames by
+  // double reflection. The old per-station `cross(t, up)` frame flipped or
+  // spun wherever the tangent swung past the up axis — on any path that curls
+  // (handrail returns, stair rails meeting landings) adjacent rings rotated
+  // against each other and the loft sheared into a pinched twist (owner
+  // defect: kinked rail elbows, ribbon-twisted stair rails). `up` now seeds
+  // only the FIRST frame; every later frame is the previous one transported
+  // along the path with zero twist, and a closed path distributes the wrap
+  // mismatch so the seam ring still matches.
+  const tangents: Vec3[] = []
   for (let i = 0; i < n; i++) {
     let t: Vec3
     if (i === 0) {
@@ -1234,12 +1243,49 @@ export function tubeAlong(path: Vec3[], profile: Vec2[], opts: TubeOpts = {}): M
       t = [P[i + 1][0] - P[i - 1][0], P[i + 1][1] - P[i - 1][1], P[i + 1][2] - P[i - 1][2]]
     }
     const tl = len(t) || 1
-    t = [t[0] / tl, t[1] / tl, t[2] / tl]
+    tangents.push([t[0] / tl, t[1] / tl, t[2] / tl])
+  }
+  const sides: Vec3[] = []
+  {
     let u: Vec3 = [...up] as Vec3
-    if (Math.abs(dot(t, u)) > 0.999) u = [1, 0, 0]
-    let s = norm(cross(t, u))
+    if (Math.abs(dot(tangents[0], u)) > 0.999) u = [1, 0, 0]
+    sides.push(norm(cross(tangents[0], u)))
+  }
+  const reflect = (v: Vec3, mirror: Vec3): Vec3 => {
+    const c = dot(mirror, mirror)
+    if (c < 1e-12) return v
+    const k = (2 / c) * dot(mirror, v)
+    return [v[0] - mirror[0] * k, v[1] - mirror[1] * k, v[2] - mirror[2] * k]
+  }
+  for (let i = 1; i < n; i++) {
+    const v1: Vec3 = [P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1], P[i][2] - P[i - 1][2]]
+    const sL = reflect(sides[i - 1], v1)
+    const tL = reflect(tangents[i - 1], v1)
+    const v2: Vec3 = [tangents[i][0] - tL[0], tangents[i][1] - tL[1], tangents[i][2] - tL[2]]
+    sides.push(norm(reflect(sL, v2)))
+  }
+  // Closed path: transport once more across the wrap; the angle between the
+  // transported frame and the start frame is the accumulated twist, unwound
+  // linearly so ring 0 and ring n meet exactly.
+  const twist: number[] = new Array(n).fill(0)
+  if (closePath && n > 2) {
+    const v1: Vec3 = [P[0][0] - P[n - 1][0], P[0][1] - P[n - 1][1], P[0][2] - P[n - 1][2]]
+    const sL = reflect(sides[n - 1], v1)
+    const tL = reflect(tangents[n - 1], v1)
+    const v2: Vec3 = [tangents[0][0] - tL[0], tangents[0][1] - tL[1], tangents[0][2] - tL[2]]
+    const sWrap = norm(reflect(sL, v2))
+    // Angle from sides[0] to the wrapped-around frame, about the start tangent.
+    const uRef = norm(cross(sides[0], tangents[0]))
+    const angle = Math.atan2(dot(sWrap, uRef), dot(sWrap, sides[0]))
+    for (let i = 0; i < n; i++) twist[i] = -angle * (i / n)
+  }
+  const rings: Vec3[][] = []
+  for (let i = 0; i < n; i++) {
+    const t = tangents[i]
+    let s = sides[i]
     let u2 = norm(cross(s, t))
-    const rl = typeof roll === 'number' ? roll : roll ? roll[Math.min(i, roll.length - 1)] : 0
+    const rl =
+      (typeof roll === 'number' ? roll : roll ? roll[Math.min(i, roll.length - 1)] : 0) + twist[i]
     if (rl) {
       const c = Math.cos(rl)
       const sn = Math.sin(rl)

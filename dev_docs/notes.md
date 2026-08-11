@@ -2238,3 +2238,152 @@ P-wave 4 closing additions:
   restart the dev server after any cross-module or import-list edit, and
   judge console errors by their `?t=` timestamps — stale entries from prior
   loads persist in the console tool's log.
+
+## P-wave 5 (corridor conform law + parallel platform agent)
+
+- ONE LAW BEATS N PATCHES. The rail-corridor dirt was governed by three
+  accreted patches (spur trenchDip, turnout lid clamp, ring-band guard) and
+  every patch BOUNDARY was a visible defect: the guard left the sheet at
+  grade across the ring band → dirt roofed the exposed channel margins by a
+  constant 55 mm (floors sit at grade + 0.075 − 0.13) everywhere the slab
+  didn't hide it; partial blend weights left ragged dirt wedges at the
+  turnout. Replaced by `corridorField/corridorDip` (interiorHeight.ts): dirt
+  = projected crown − 0.13 exactly, full to 2.2 m, gone by 3.3 m, dig-only.
+  When ground must "match at EVERY point", make the ground CONFORM to the
+  structure's datum; never chase the ground with the structure.
+- PROJECTED DATUM, NEVER LOCAL. Anything poured alongside a swept alignment
+  must key to the crown at the PROJECTED alignment point, not to
+  local-at-(x,z) fields: near pad skirts (Overlook) the radial cross-slope
+  is ±0.15 m across the 3.2 m channel and a locally-poured floor climbed
+  56 mm over the conformed sheet. Cross-slope belongs to ONE designated
+  absorber (the chamfered lip), not to every member a little.
+- Channel verge SKIRT: lip arris → crown − 0.45 at 0.42 m out; the
+  conformed sheet crosses it on one line, burying its outer edge by
+  construction. Seam-closure by construction > seam-closure by tuning.
+- Frog base plate DELETED (owner: "cheap ugly rectangle patch"). Real
+  special work carries crossings on the flush deck itself; if a joint needs
+  a cosmetic plate to read intentional, the joint is wrong.
+- Probe-rig economics: the 195k-tri regolith sheet has no BVH — a 1400-ray
+  sweep against it wedges the tab for MINUTES (evals queue behind it; even
+  `1+1` times out). Read the polar grid's position buffer analytically
+  (bilinear on the 641×153 grid) and raycast only the small pour meshes;
+  full-ring sweeps then run in seconds. Reload the tab to kill a runaway
+  eval.
+- Parallel-agent file protocol that worked: main agent owns the ground/track
+  files, platform agent owns portalStation.ts + a narrow named exception
+  (buildPlanters() in pavingPlan.ts), track.ts helpers are import-or-copy,
+  never edit; browser split = agent creates its own tab, never touches the
+  main instrument tab ("seed"); shared dev server, reload-and-rerun after
+  the other's HMR.
+
+## P-wave 5, second half (rails/joints/planters/side stations)
+
+- `tubeAlong` now uses ROTATION-MINIMISING frames (double reflection; `up`
+  seeds only the first frame; closed paths unwind the wrap mismatch). The
+  old per-station `cross(t, up)` frame spun wherever a path curled, and the
+  loft sheared into pinched ribbon twists — every kinked handrail elbow and
+  twisted stair rail was this one bug. Fix frames in the SWEEPER, not at
+  call sites.
+- ONE canonical rail builder: `kit.railRun` (filleted corners via quadratic
+  bezier, real returns curling out-and-down, twist-free tube) +
+  `kit.railPost` (stanchion to 4 mm under the soffit). kit.handrail,
+  stairFlight, track.leaningRail, stationSteps and the station ramps all
+  route through it — a rail is well-made in exactly one place. NEVER draw a
+  post and its rail as one tube (stationSteps did; the vertical start
+  segment is what twisted).
+- Turnout joins show ONLY running rails (owner sketch): no check rail, no
+  frog plate. If a joint needs an extra strip to read "engineered", the
+  owner reads it as clutter.
+- Planter rule: NOTHING of a planting shows outside its container. Absolute
+  wall margins (metres, not across-fractions — 6 % of a 1 m bed is 6 cm and
+  pokes tuft cards through a 0.2 m wall) + no outward rim drape at all. The
+  drape was tried twice: soil-rooted crosses THROUGH the wall (stem comb);
+  rim-rooted reads as flat dark ribbons pasted on the sunlit face. Break the
+  coping line with tall species silhouettes instead.
+- Sprites/particles live on PARTICLE_LAYER (3), enabled ONLY on the main
+  camera: any shadow/aux pass rasterizes a billboard as its full RECTANGLE.
+  The greenhouse-spray "rectangular silhouette shadows" the owner reported
+  could not be reproduced in the tool environment (six attempts, both
+  pipelines, live + stepped) — the layer confinement removes the whole
+  mechanism class; if it ever recurs, next suspects are the shadow-clipmap
+  tile cadence and the (deliberate, static) ridge-vent panes.
+- Side stations live in `world/sideStations.ts` (track.ts keeps only the
+  shared kit; tramSystem imports buildSideStations). Their ramp is DERIVED:
+  grade fixed 1:10, run solved by iterating the ground AT the foot across
+  the full width — the old emitPlatformRamp probed a proxy point and hung.
+- Regolith palette holds R/G ≈ 1.8–2.0 across the whole family (fines to
+  curb dust). The pale drift/dust fields at R/G 1.55 were what made the
+  floor read yellow-tan; shift the FAMILY, not one stop, and hold luminance
+  so the exposure/LUT chain stays untouched.
+
+## P-wave 5 — Portal Station circulation rebuild (2026-08-11)
+
+Owner's three defects were one disease (a look, not architecture) and every
+fix is now derived + asserted rather than typed. `src/world/stationArchitecture.ts`
+owns circulation/enclosure; `portalStation.ts` is the system only.
+
+- **`track.emitPlatformSlab` ships a BROKEN DECK and the mini-stations still
+  use it.** Its `loft(..., capStart/capEnd)` ear-clips the deck outline, which
+  on an 18 m annular sector with per-vertex heights (the deck falls with the
+  guideway) produced two triangles spanning the whole platform. Measured
+  in-engine, the walking surface stood up to **154 mm above `platformDeckY`**
+  in the middle — which buried the tactile corduroy and the edge lenses (both
+  correctly placed ON the datum) and made every flush claim meaningless. Fixed
+  by a copy (`emitDeckSlab`) whose caps are polar GRIDS and whose outline
+  carries the matching radial subdivision on its end edges. Overlook and
+  Farmside still carry the defect — an orchestrator job, `track.ts` is
+  read-only in a multi-agent wave.
+- **A cap grid appended to a loft must be `cleanMesh`d BEFORE `recalcNormals`.**
+  Un-welded, the tube and the two caps are three OPEN components, and
+  `recalcNormals` orients an open component by a majority keep-score — a coin
+  toss. It came up tails and the whole deck rendered back-facing (a downward
+  raycast passed straight through). Weld first, then orient: a closed
+  component gets the signed-volume flip and is deterministic.
+- **Fixing one datum exposes the next.** With the deck correct, `stationSteps`'
+  head plate (15 mm proud of the cast) became exactly coplanar with the deck
+  it lands on — 0.10 m² per flight. Solve the flight head for
+  `deckY − 0.009` so the plate stands 6 mm proud: a real alloy nosing, and
+  inside the 20 mm flush tolerance.
+- **Flushness idiom worth reusing: a cast CROSSES the ground, never butts it.**
+  `groundApron()` runs its outer edge 55 mm BELOW the local surface with a
+  SMOOTHSTEP blend (zero slope at the nosing, ~3° at the crossing) — contact is
+  a line, so there is no coplanar area, and the same pour absorbs a landing's
+  cross-fall. The station terrace falls 41 mm/m across the end flights; no
+  level tread can follow that, and no flight lands flush there without an
+  apron.
+- **The Meridian walk is KERBED (`CURB.reveal` 135 mm) and that decides the
+  ramp's line.** A step-free route landing outside a paved region lands against
+  a kerb. Parallel-to-the-back-edge is impossible (6.5 m of clear arc beside the
+  grand flight against a ~0.95 m drop = 1:6.8) and radial-beside-the-flight
+  lands off the 6 m walk, so the ramp SPLAYS: level head landing at the deck's
+  back-west corner, then one run converging onto the walk 9.5 m south at 1:10.5.
+  It bridges the walk's west kerb ~0.27 m clear, with the kerb buried in the
+  ramp's retained mass — the honest condition, not a defect.
+- **A splayed run needs a splayed landing.** Built arc-aligned it left a
+  triangular notch each side (the run leaves at 33° to the radial) — a visible
+  hole under the ramp. The pad, its kerbs and its handrails now share ONE warp
+  function (arc edge → the run's first section), so nothing can miss.
+- **`across = (−dir.z, dir.x)` is a coin toss too.** Left bare it pointed
+  against increasing u, and the kerbs AND handrails swapped sides at the
+  landing/run junction — an X across the ramp head. Force the sign against the
+  platform tangent.
+- **Name the collider's TOP FACE, never a centre + a lift.** The old
+  `centre + 0.08` with a 0.1 half-height put the grand flight's collider
+  **171 mm above the deck** (rapier ray, in-engine) — a step where the drawing
+  says flush. And level deck boxes tracked a falling deck to ±74 mm; six
+  PITCHED sixths hold it to ~5 mm.
+- **A radial ray cannot see a radial pane.** The screen-opening test shoots
+  across the screen line, so it is blind to the glazed RETURNS at the jambs
+  (which are radial by design). Check openings with both the crossing ray and a
+  vertical stack, and remember that a physics down-ray standing on a screen
+  reports the screen's top as "the floor" (that produced a phantom 1.735 m
+  headroom reading).
+- `tools/station-audit.mjs` is the regression gate: builds the station into a
+  bare `PartWriter` in node, runs `auditGeometry`, then asserts flush heads,
+  flush feet against the analytic ground AT THE ACTUAL FOOT POSITION, headroom,
+  egress envelopes (structure hits AND `insidePlanter` samples) and the screen
+  openings. Seconds per iteration, no browser, survives other agents' edits.
+- `pavingPlan.buildPlanters()` now takes a per-gap half-width: station bearings
+  open 0.148 rad instead of 0.115, which clears the end flight foot, its 2.2 m
+  apron and the 1.5 m egress envelope. Anything that grows a station platform
+  outward has to re-check that number.

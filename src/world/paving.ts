@@ -10,7 +10,7 @@ import {
 } from './groundMaterials'
 import { GroundWriter, sweepSection } from './groundWriter'
 import type { GroundVertex, SweepStation } from './groundWriter'
-import { groundGrade, spurTrackDatum } from './interiorHeight'
+import { corridorField, groundGrade, spurTrackDatum } from './interiorHeight'
 import {
   CURB,
   GUIDEWAY_CHANNEL,
@@ -18,6 +18,7 @@ import {
   PAVED_REGIONS,
   PLANTER,
   PLANTERS,
+  THROAT,
   coveringRegion,
   insideGuidewayChannel,
   insidePlanter,
@@ -1332,8 +1333,8 @@ function emitGuidewayChannel(writer: GroundWriter): void {
   const steps = Math.round((TAU * GUIDEWAY_CHANNEL.radius) / 1.4)
   // The channel floor runs a full GUTTER below the crown datum — see the
   // constant: at smaller separations the cast's station-sampled crown and
-  // this per-vertex pour z-fight. Radially dished (slabTop falls toward the
-  // ring); at the turnout mouth it blends onto the corridor floor's constant
+  // this per-vertex pour z-fight. Level across, crown-keyed (see floorY); at
+  // the turnout mouth it blends onto the corridor floor's constant
   // level — a FULL blend, up or down, so the two floors meet with no step
   // whichever side of the swale the junction lands on.
   // 15 mm below the crown datum through the turnout mouth, NOT the full
@@ -1346,7 +1347,17 @@ function emitGuidewayChannel(writer: GroundWriter): void {
   const corridorLevel =
     groundGrade(0, GUIDEWAY_CHANNEL.radius) + PAVE.rise - GUIDEWAY_CHANNEL.recess - 0.01
   const floorY = (x: number, z: number): number => {
-    const dished = slabTop(x, z) - GUIDEWAY_CHANNEL.recess - GUIDEWAY_CHANNEL.gutter
+    // LEVEL ACROSS: the floor keys to the crown at the PROJECTED ring point —
+    // one datum with the swept cast and the conformed sheet — never to the
+    // LOCAL slabTop. Near the pad skirts (Overlook) the radial cross-slope
+    // reaches ±0.15 m over the channel width; a locally-poured floor climbed
+    // 56 mm over the sheet on the high side (owner sweep finding). The
+    // chamfered lip is the piece that absorbs cross-slope, as on any trackbed
+    // cut through side-sloping ground.
+    const rr = Math.hypot(x, z) || 1
+    const px = (x / rr) * GUIDEWAY_CHANNEL.radius
+    const pz = (z / rr) * GUIDEWAY_CHANNEL.radius
+    const dished = slabTop(px, pz) - GUIDEWAY_CHANNEL.recess - GUIDEWAY_CHANNEL.gutter
     // Smooth by true corridor distance: a stepped blend tears the floor into
     // shards where adjacent vertices land on different levels.
     const d = spurCorridorDistance(x, z)
@@ -1368,6 +1379,9 @@ function emitGuidewayChannel(writer: GroundWriter): void {
   for (let i = 0; i < steps; i++) {
     const a0 = (i / steps) * TAU
     const a1 = ((i + 1) / steps) * TAU
+    // The turnout street owns its zone whole: no floors, no lips, no verge
+    // skirt there — emitThroatStreet pours the ground and the edging.
+    if (THROAT && (a0 + a1) / 2 > THROAT.phiLo && (a0 + a1) / 2 < THROAT.phiHi) continue
     for (let j = 0; j < radialSteps; j++) {
       const ra = rInner + ((rOuter - rInner) * j) / radialSteps
       const rb = rInner + ((rOuter - rInner) * (j + 1)) / radialSteps
@@ -1399,6 +1413,34 @@ function emitGuidewayChannel(writer: GroundWriter): void {
         { p: new Vector3(b.x, floorY(b.x, b.z), b.z), uv: new Vector2(a1 * radius, 0) },
       ]
       writer.face('channel', outward < 0 ? corners : [...corners].reverse())
+      // Verge skirt: from the lip arris down and outward to crown − 0.45.
+      // On open stretches the regolith sheet lies EXACTLY at crown − 0.13
+      // (interiorHeight's corridor conform law), so the skirt crosses under
+      // it on one clean line and its outer edge is buried by construction —
+      // the curb can never hover over dirt or drown in it again. Where the
+      // boulevard slab runs beyond the lip the skirt is inside the pour's
+      // shadow (deliberate hidden bury); the crown is evaluated at the
+      // PROJECTED ring point, same as every other corridor datum.
+      const skirtR = radius + (GUIDEWAY_CHANNEL.lip + 0.42) * outward
+      const crown0 =
+        slabTop(Math.cos(a0) * GUIDEWAY_CHANNEL.radius, Math.sin(a0) * GUIDEWAY_CHANNEL.radius) -
+        GUIDEWAY_CHANNEL.recess
+      const crown1 =
+        slabTop(Math.cos(a1) * GUIDEWAY_CHANNEL.radius, Math.sin(a1) * GUIDEWAY_CHANNEL.radius) -
+        GUIDEWAY_CHANNEL.recess
+      const skirt: GroundVertex[] = [
+        { p: new Vector3(d.x, slabTop(d.x, d.z), d.z), uv: new Vector2(a0 * radius, 0.09) },
+        {
+          p: new Vector3(Math.cos(a0) * skirtR, crown0 - 0.45, Math.sin(a0) * skirtR),
+          uv: new Vector2(a0 * radius, 0.51),
+        },
+        {
+          p: new Vector3(Math.cos(a1) * skirtR, crown1 - 0.45, Math.sin(a1) * skirtR),
+          uv: new Vector2(a1 * radius, 0.51),
+        },
+        { p: new Vector3(c.x, slabTop(c.x, c.z), c.z), uv: new Vector2(a1 * radius, 0.09) },
+      ]
+      writer.face('channel', outward < 0 ? skirt : [...skirt].reverse())
     }
   }
 }
@@ -1446,7 +1488,9 @@ function clipGround(
  * regolith trench stay open (the trackbed apron crosses them).
  */
 function emitSpurCorridor(writer: GroundWriter): void {
-  for (const id of ['spur-corridor', 'spur-corridor-promenade']) emitSpurCut(writer, id)
+  // Only the rim-promenade crossing keeps the recessed-cut treatment; the
+  // boulevard throat is the turnout street now (emitThroatStreet).
+  for (const id of ['spur-corridor-promenade']) emitSpurCut(writer, id)
 }
 
 function emitSpurCut(writer: GroundWriter, id: string): void {
@@ -1566,6 +1610,260 @@ function emitSpurCut(writer: GroundWriter, id: string): void {
   }
 }
 
+/**
+ * THE TURNOUT STREET — the owner's reference image: one clean pavement
+ * through the whole merge with the track riding on top. In the throat zone
+ * this REPLACES the recessed channel, the spur cutting, their chamfered
+ * lips, the verge skirt and every slab margin — the only lines left are the
+ * street's own edging strips and the rails.
+ *
+ *   surface   projected crown + 0.014 — 4 mm under the trackbed aprons, so
+ *             the panels read as overlays let into the street and the two
+ *             pours are never coplanar
+ *   strips    ONE concrete edging band per boundary (0.18 m), swept
+ *             continuously, crown 6 mm proud of the neighbouring tiles,
+ *             feathered down dead where the other leg's way opens through
+ *   ends      ring ends ease down onto the resuming channel-margin level
+ *             behind a radial joint; the spur end eases toward the open
+ *             trench and closes with a buried skirt
+ *
+ * The two legs PARTITION the plan (ring leg owns |ρ−R| ≤ 2.67, spur leg the
+ * rest of its band) so nothing is poured twice, and both leave the casts'
+ * 1.36 m slots open — the sweep tucks 10 mm over the street's cut edge.
+ */
+function emitThroatStreet(writer: GroundWriter): void {
+  const throat = THROAT
+  if (!throat) return
+  const R = GUIDEWAY_CHANNEL.radius
+  const half = throat.half
+  const STRIP = 0.18
+  const inner = half - STRIP
+  const SLOT = 1.36
+  const fallback = groundGrade(0, R) + PAVE.rise - GUIDEWAY_CHANNEL.recess
+  const crownAt = (x: number, z: number): number => corridorField(x, z)?.crown ?? fallback
+  const dRing = (x: number, z: number): number => Math.abs(Math.hypot(x, z) - R)
+  const dSpur = (x: number, z: number): number => spurTrackDatum(x, z)?.d ?? 1e4
+  const up = new Vector3(0, 1, 0)
+
+  // Ring-end easing: the last 1.6 m before each zone end drops the surface
+  // onto the channel-margin level (crown − gutter) so the resuming
+  // treatment meets it behind a clean radial joint.
+  const BLEND = 1.6
+  const ease = (along: number): number => {
+    if (along >= BLEND) return 0
+    const t = 1 - Math.max(0, along) / BLEND
+    const s = t * t * (3 - 2 * t)
+    return (-GUIDEWAY_CHANNEL.gutter - 0.014) * s
+  }
+  const vert = (x: number, z: number, y: number, u: number, v: number): GroundVertex => ({
+    p: new Vector3(x, y, z),
+    n: new Vector3(0, 1, 0),
+    uv: new Vector2(u, v),
+  })
+  const face = (slot: string, corners: GroundVertex[]): void => {
+    if (corners.length >= 3) writer.face(slot, corners)
+  }
+  // Quads whose winding is decided by the surface they should face — the
+  // strips wrap over a crown, so a fixed order would backface one side.
+  const oriented = (slot: string, quad: GroundVertex[], prefer: Vector3): void => {
+    const [a, b, c] = quad
+    const n = new Vector3().subVectors(b.p, a.p).cross(new Vector3().subVectors(c.p, a.p))
+    face(slot, n.dot(prefer) >= 0 ? quad : [...quad].reverse())
+  }
+
+  // ---- ring leg: radial bands each side of the cast slot, cells clipped
+  //      where the spur's own way crosses (the merging band opening).
+  const steps = Math.max(8, Math.round(((throat.phiHi - throat.phiLo) * R) / 1.1))
+  for (let i = 0; i < steps; i++) {
+    const a0 = throat.phiLo + ((throat.phiHi - throat.phiLo) * i) / steps
+    const a1 = throat.phiLo + ((throat.phiHi - throat.phiLo) * (i + 1)) / steps
+    const eased = (a: number): number =>
+      ease(Math.min(a - throat.phiLo, throat.phiHi - a) * R)
+    for (const [b0, b1] of [
+      [-inner, -SLOT],
+      [SLOT, inner],
+    ] as const) {
+      for (let j = 0; j < 2; j++) {
+        const r0 = R + b0 + ((b1 - b0) * j) / 2
+        const r1 = R + b0 + ((b1 - b0) * (j + 1)) / 2
+        const c = (a: number, r: number): GroundVertex => {
+          const x = Math.cos(a) * r
+          const z = Math.sin(a) * r
+          return vert(x, z, crownAt(x, z) + 0.014 + eased(a), a * R, r - R)
+        }
+        // Along-first corner order — the channel floors' up-facing winding.
+        // Radial-first came out reversed and the whole ring leg back-face
+        // culled (invisible AND ray-transparent: the probe lesson).
+        face(
+          'paving',
+          clipGround(
+            [c(a0, r0), c(a1, r0), c(a1, r1), c(a0, r1)],
+            (x, z) => dSpur(x, z) - SLOT,
+          ),
+        )
+      }
+    }
+  }
+
+  // ---- spur leg: everything in its band OUTSIDE the ring leg's territory
+  //      and outside its own cast slot.
+  const line = throat.spurLine
+  const side = (i: number): Vector2 => {
+    const a = line[Math.max(0, i - 1)]
+    const b = line[Math.min(line.length - 1, i + 1)]
+    const t = b.clone().sub(a)
+    const l = t.length() || 1
+    return new Vector2(t.y / l, -t.x / l)
+  }
+  const run: number[] = [0]
+  for (let i = 1; i < line.length; i++) run.push(run[i - 1] + line[i].distanceTo(line[i - 1]))
+  const spurEase = (i: number): number => ease(run[i])
+  for (let i = 0; i < line.length - 1; i++) {
+    for (const [b0, b1] of [
+      [-inner, -SLOT],
+      [SLOT, inner],
+    ] as const) {
+      for (let j = 0; j < 2; j++) {
+        const c0 = b0 + ((b1 - b0) * j) / 2
+        const c1 = b0 + ((b1 - b0) * (j + 1)) / 2
+        const c = (k: number, across: number): GroundVertex => {
+          const s = side(k)
+          const x = line[k].x + s.x * across
+          const z = line[k].y + s.y * across
+          return vert(x, z, crownAt(x, z) + 0.014 + spurEase(k), run[k], across)
+        }
+        // Yield only to ground the ring leg ACTUALLY poured (its band AND
+        // its bearing range) — clipping on the band alone left a bare wedge
+        // where the spur hugs the ring beyond phiHi (owner-visible hole).
+        face(
+          'paving',
+          clipGround([c(i, c0), c(i + 1, c0), c(i + 1, c1), c(i, c1)], (x, z) => {
+            const phi = Math.atan2(z, x)
+            if (phi <= throat.phiLo || phi >= throat.phiHi) return 1
+            return dRing(x, z) - inner
+          }),
+        )
+      }
+    }
+  }
+  // Spur mouth: a buried skirt across the band, closing the pour into the
+  // trench the conform law digs (dirt at crown − 0.13; skirt dives past it).
+  {
+    const s = side(0)
+    const p = line[0]
+    const drop = (across: number, dy: number): GroundVertex => {
+      const x = p.x + s.x * across
+      const z = p.y + s.y * across
+      return vert(x, z, crownAt(x, z) + 0.014 + spurEase(0) + dy, across, dy)
+    }
+    for (const [c0, c1] of [
+      [-inner, -SLOT],
+      [SLOT, inner],
+    ] as const) {
+      oriented('paving', [drop(c0, 0), drop(c1, 0), drop(c1, -0.34), drop(c0, -0.34)], up)
+    }
+  }
+
+  // ---- edging strips. Profile across [−0.09, +0.09] about the strip
+  //      centreline (|lateral| = half − 0.09): buried foot in the street,
+  //      chamfered crown 6 mm proud of the tiles, outer leg diving 0.24 —
+  //      under the tiles where tiles flank, under the conform dirt where not.
+  type StripStation = { x: number; z: number; out: Vector2; feather: number; run: number }
+  const emitStrip = (stations: StripStation[]): void => {
+    const profile = (st: StripStation): Vector3[] => {
+      const innerPt = { x: st.x - st.out.x * 0.09, z: st.z - st.out.y * 0.09 }
+      const outerPt = { x: st.x + st.out.x * 0.09, z: st.z + st.out.y * 0.09 }
+      const street = crownAt(innerPt.x, innerPt.z) + 0.014
+      const slabOut = slabTop(outerPt.x, outerPt.z)
+      const top = (slabOut + 0.006) * (1 - st.feather) + (street - 0.02) * st.feather
+      const shoulder = top - 0.024
+      const pt = (lateral: number, y: number): Vector3 =>
+        new Vector3(st.x + st.out.x * lateral, y, st.z + st.out.y * lateral)
+      return [
+        pt(-0.09, street - 0.055),
+        pt(-0.09, Math.max(street - 0.05, shoulder)),
+        pt(-0.052, top),
+        pt(0.052, top),
+        pt(0.09, Math.max(slabOut - 0.23, shoulder)),
+        pt(0.09, slabOut - 0.24),
+      ]
+    }
+    let previous: Vector3[] | null = null
+    let previousStation: StripStation | null = null
+    for (const st of stations) {
+      const points = profile(st)
+      if (previous && previousStation) {
+        const outward = new Vector3(
+          (previousStation.out.x + st.out.x) / 2,
+          1.2,
+          (previousStation.out.y + st.out.y) / 2,
+        )
+        for (let k = 0; k < points.length - 1; k++) {
+          oriented(
+            'concrete',
+            [
+              vert(previous[k].x, previous[k].z, previous[k].y, previousStation.run, k),
+              vert(points[k].x, points[k].z, points[k].y, st.run, k),
+              vert(points[k + 1].x, points[k + 1].z, points[k + 1].y, st.run, k + 1),
+              vert(previous[k + 1].x, previous[k + 1].z, previous[k + 1].y, previousStation.run, k + 1),
+            ],
+            outward,
+          )
+        }
+      }
+      previous = points
+      previousStation = st
+    }
+  }
+  // Feathering: 1 where the OTHER leg's way passes through this strip
+  // (the strip sinks 20 mm under the street and the way opens), easing over
+  // 0.9 m — plus a feathered nose at every run end.
+  const featherOf = (clearance: number): number => {
+    if (clearance >= 0.9) return 0
+    const t = 1 - Math.max(0, clearance) / 0.9
+    return t * t * (3 - 2 * t)
+  }
+  // Arc strips, both sides of the ring leg.
+  for (const sgn of [-1, 1] as const) {
+    const rs = R + sgn * (half - 0.09)
+    const stations: StripStation[] = []
+    const count = Math.max(8, Math.round(((throat.phiHi - throat.phiLo) * rs) / 0.9))
+    for (let i = 0; i <= count; i++) {
+      const a = throat.phiLo + ((throat.phiHi - throat.phiLo) * i) / count
+      const x = Math.cos(a) * rs
+      const z = Math.sin(a) * rs
+      const endIn = Math.min(a - throat.phiLo, throat.phiHi - a) * rs
+      const feather = Math.max(
+        featherOf(dSpur(x, z) - half),
+        featherOf(endIn - 0.15),
+      )
+      stations.push({ x, z, out: new Vector2(Math.cos(a) * sgn, Math.sin(a) * sgn), feather, run: a * rs })
+    }
+    emitStrip(stations)
+  }
+  // Spur strips, both sides — TRUNCATED where they reach the arc strip's
+  // line (a feather ramp that kept running crossed the street as a dying
+  // sliver, owner-visible): the run stops one station past first contact
+  // and dives dead there.
+  for (const sgn of [-1, 1] as const) {
+    const stations: StripStation[] = []
+    for (let i = 0; i < line.length; i++) {
+      const s = side(i)
+      const x = line[i].x + s.x * sgn * (half - 0.09)
+      const z = line[i].y + s.y * sgn * (half - 0.09)
+      if (dRing(x, z) < half + 0.05) {
+        if (stations.length >= 2) {
+          stations.push({ x, z, out: new Vector2(s.x * sgn, s.y * sgn), feather: 1, run: run[i] })
+        }
+        break
+      }
+      const feather = featherOf(Math.min(dRing(x, z) - half - 0.05, run[i] - 0.15))
+      stations.push({ x, z, out: new Vector2(s.x * sgn, s.y * sgn), feather, run: run[i] })
+    }
+    emitStrip(stations)
+  }
+}
+
 // ----------------------------------------------------------------- build ---
 
 export function buildPaving(): PavingBuild {
@@ -1574,7 +1872,13 @@ export function buildPaving(): PavingBuild {
   const lightRuns: BoundaryStation[][] = []
 
   for (const region of PAVED_REGIONS) {
-    if (region.id === 'guideway-channel' || region.id.startsWith('spur-corridor')) continue
+    if (
+      region.id === 'guideway-channel' ||
+      region.id.startsWith('spur-corridor') ||
+      region.id.startsWith('turnout-street')
+    ) {
+      continue
+    }
     switch (region.kind) {
       case 'disc':
         emitPolarSurface(writer, region, region.cx, region.cz, 0, region.radius)
@@ -1598,6 +1902,7 @@ export function buildPaving(): PavingBuild {
 
   emitGuidewayChannel(writer)
   emitSpurCorridor(writer)
+  emitThroatStreet(writer)
   emitFloorLights(writer, lightRuns)
   emitPlanters(writer, colliders)
 

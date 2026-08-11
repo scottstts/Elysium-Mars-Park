@@ -247,8 +247,12 @@ a real structural joint and mechanically a `backToBack` pair, never a `zfight`.
   - **Frog**: the spur's inner rail must CROSS the outer loop rail to reach
     the inner circle. The outer loop rail is an OPEN sweep with a real gap
     (crossing envelope + a `FLANGEWAY` each side); the spur rail runs
-    continuous through it over one slim `dark` base plate — a movable-point
-    frog, and the route the car actually rides.
+    continuous through it, feet bedded on the flush special-work deck. NO
+    base plate under the crossing — the plate box read as a loose grey patch
+    from above (owner defect, P-wave 5); the deck itself is the bearing
+    surface. NO check rail either: the flared guard read as a loose strip
+    beside the crossing (owner sketch: only smooth curves joining the main
+    rails). The joint is exactly four running rails and the flangeway gap.
   - **Special work**: over the zone (plus 2.2 m morph ramps) BOTH casts
     morph to one flush deck at `APRON_TOP` (`morphEmbedded`: grooves close,
     rebates fill, crown rises; same point count, one loft). Rails through
@@ -269,26 +273,45 @@ a real structural joint and mechanically a `backToBack` pair, never a `zfight`.
   90 mm chamfered lip to the trimmed edge (region halfWidth reaches
   `width/2 + lip`, the same move as the channel footprint) — the cut edge
   is a treated arris exactly as along the ring channel.
-- THE FIELD SPLIT (the hard-won one): `groundGrade` is PURE — every pour
-  datum (slabTop and everything derived) reads undipped grade, so slabs
-  stay flat beside the cuttings. The spur trench lives in `trenchDip`, and
-  `regolithSurface = grade + dip (+ turnout lid clamp)` is what the
-  regolith SHEET and the ground scatter stand on. One (x,z) genuinely needs
-  two answers: dipping `groundGrade` warped 2.5 m of boulevard/terrace slab
-  along the throat; NOT dipping it left the sheet's triangles roofing the
-  cuttings at deck height. Near the turnout the sheet additionally clamps
-  under `streetDatum() − 0.07` across the corridor blend — the ring band is
-  excluded from `trenchDip` (see DANGER below) but the boulevard slab that
-  normally hides the sheet is cut away there, and high swales breached the
-  eased channel floor.
+- THE CORRIDOR CONFORM LAW (P-wave 5, replaces the old trenchDip/lid-clamp
+  patchwork): `groundGrade` stays PURE (every pour datum reads undipped
+  grade, slabs stay flat), and ONE law shapes the dirt near the whole
+  embedded Loop — `interiorHeight.corridorField(x,z)` returns lateral
+  distance to the nearest alignment (ring analytic + arrival tail) and the
+  crown AT THE PROJECTED POINT; `corridorDip` digs the sheet to EXACTLY
+  crown − 0.13 within 2.2 m, fading to nothing by 3.3 m, dig-only. Because
+  every pour/cast datum derives from the same projected crown, the sheet's
+  offset to each is CONSTANT at every point: floors +60 mm over it, lips
+  +190 mm (the curb reveal), trackbed apron +148 mm on the open trench. The
+  old patchwork (spur-only dig + turnout lid + ring-band guard) left the
+  sheet AT GRADE across the ring band — 55 mm ABOVE the exposed channel
+  margins everywhere (floors sit at grade + rise − 0.13, rise is 0.075) —
+  and partial blend weights made ragged wedges at the turnout.
+- DATUMS ARE PROJECTED, NEVER LOCAL: the channel floor used to pour from
+  the LOCAL slabTop per vertex; near the Overlook pad skirt the radial
+  cross-slope reaches ±0.15 m ACROSS the 3.2 m channel, and the locally
+  poured floor climbed 56 mm over the conformed sheet (5° ring sweep
+  finding). The floor now keys to the crown at the projected ring point —
+  level across, like the cast and the sheet — and the chamfered LIP is the
+  member that absorbs cross-slope, which is what a lip is for. Curb reveal
+  then varies 91–308 mm around the ring purely with real cross-slope, and
+  never goes negative.
+- The channel gains a VERGE SKIRT (`emitGuidewayChannel`): lip arris down
+  and outward to projected crown − 0.45 at 0.42 m beyond the lip. The
+  conformed sheet (crown − 0.13) crosses over it on one clean line, so the
+  skirt's outer edge is buried by construction on open stretches and hides
+  under the boulevard slab on paved ones — the seam between curb and dirt
+  cannot open anywhere.
 - Both curves get `arcLengthDivisions = 2400`: three's default 200-division
   LUT quantises `getPointAt` to ~1.7 m, visible as jitter on 0.45 m stations.
 - Piers and tube struts are placed by RUN DISTANCE, not station index, so
   sampling density can change without changing their cadence; girder
   colliders decimate the 0.9 m stations 3:1.
 - DANGER: `groundGrade(0, LOOP.radius)` is the anchor every guideway datum
-  derives from. Any field modifier must exclude the ring band, or the whole
-  trackbed sinks — it did, by 45 mm, until the exclusion was added.
+  derives from. Any modifier must live OUTSIDE `groundGrade` (that purity is
+  why the conform law may dig the ring band freely: `corridorDip` shapes
+  only the sheet, never the pour datums). Putting a dip INSIDE groundGrade
+  sank the whole trackbed by 45 mm once — never again.
 
 ## The arrival is a ten-second shot (P-wave 4)
 
@@ -383,8 +406,16 @@ the fix is `clashAllow` pairs on slot names, not thinner joints.
   currently does. **The street-running channel is deliberately unwalled** —
   crossing the tracks is the point of a street tramway.
 - `ArcPlatform` + `platformPoint/Tangent/Outward/DeckY/GroundY`,
-  `emitPlatformSlab/Edge/Canopy/Ramp`, `stationSteps`, `stationSign`,
-  `leaningRail`, `litterBin` — the station kit `portalStation.ts` reuses.
+  `emitPlatformSlab/Edge/Canopy`, `stationSteps`, `stationSign`,
+  `leaningRail`, `litterBin` — the shared platform kit. The Portal terminus
+  builds through `world/stationArchitecture.ts` (see
+  `systems/portal-station.md`); the SIDE stations build through
+  `world/sideStations.ts` (planFlight flights, derived 1:10 ramp, canonical
+  rails — `tramSystem` calls its `buildSideStations`). `emitPlatformSlab`
+  carries the grid-cap fix (P-wave 5: ear-clipped caps bridged the falling
+  deck by up to 154 mm); `emitPlatformRamp` and the old in-file side
+  stations are deleted. All handrails everywhere are `kit.railRun`/`railPost`
+  on `tubeAlong`'s rotation-minimising frames.
 
 `track.ts` uses ONLY slots that already exist in `kitMaterials()`, because
 `tramSystem` builds its writer with a bare `kitMaterials()` and an unbound slot

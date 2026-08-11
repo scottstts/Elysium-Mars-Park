@@ -2,10 +2,8 @@ import { AMPHITHEATER, ARRIVAL_SPINE, BOULEVARD, LOOP, PADS } from './parkPlan'
 import {
   GUIDEWAY_CHANNEL,
   PAVE,
-  insideGuidewayChannel,
   insideSpurCorridor,
   pavedSignedDistance,
-  spurCorridorDistance,
 } from './pavingPlan'
 
 /**
@@ -136,50 +134,79 @@ export function groundGrade(x: number, z: number): number {
 }
 
 /**
- * The spur trench, as a SEPARATE term rather than part of groundGrade — one
- * (x,z) genuinely needs two answers here. The regolith SHEET must dive 70 mm
- * under the trackbed crown wherever the arrival runs embedded (the sheet has
- * no hole-cutting; without the dive its triangles straddle the corridor
- * cuttings and roof them at deck height). But every POUR DATUM (slabTop and
- * everything derived from it) must NOT see that dive, or the boulevard and
- * terrace slabs warp into the trench for 2.5 m alongside the cut — the owner
- * finding that split this field. `groundGrade` stays pure for the pours;
- * `regolithSurface` (grade + dip) is what the floor mesh and the scatter
- * actually stand on. Only ever DIGS, and never inside the ring band —
- * (0, LOOP.radius) is the point every guideway datum derives from.
+ * THE CORRIDOR CONFORM LAW — one field, every dirt consumer.
+ *
+ * Wherever the Loop runs embedded (the ring channel and the arrival tail),
+ * three independently-sampled meshes meet: the swept trackbed cast, the
+ * per-vertex channel/corridor floors, and the regolith sheet. The first two
+ * share the crown datum and are separated by the GUTTER; the sheet used to be
+ * patched near them case-by-case (a spur dig here, a turnout lid there, a
+ * ring-band guard around all of it), and every patch boundary was a place
+ * where dirt could poke above the bed (owner finding: dirt roofing the
+ * channel margins by exactly rise − 0.13 = 55 mm all around the ring, ragged
+ * partial-weight wedges at the turnout). One law replaces the patches:
+ *
+ *   within CORRIDOR_FULL of the alignment the sheet lies EXACTLY at
+ *   crown − CORRIDOR_DROP; the weight fades to zero by CORRIDOR_FADE;
+ *   it only ever digs (an elevated crown never raises a berm).
+ *
+ * crown is evaluated at the PROJECTED alignment point, so lateral position
+ * never tilts the target, and every pour/cast datum derives from that same
+ * projected crown — the sheet's offset to each of them is therefore a
+ * CONSTANT at every point of the corridor:
+ *   channel floors  crown − 0.07   → sheet 60 mm under the exposed gutters
+ *   channel lips    crown + 0.06   → 190 mm of constant curb reveal
+ *   trackbed apron  crown + 0.018  → 148 mm of trackbed reveal on the trench
+ * The verge skirt (paving.ts emitGuidewayChannel) dives to crown − 0.45 and
+ * is therefore buried under the conformed sheet by construction. The ring
+ * band needs no guard: the dig lives OUTSIDE groundGrade, so the pour datums
+ * that derive from (0, LOOP.radius) never see it.
  */
-export function trenchDip(x: number, z: number, grade = groundGrade(x, z)): number {
-  if (insideGuidewayChannel(x, z, 0.3)) return 0
-  const track = spurTrackDatum(x, z)
-  if (!track || track.d >= 2.5) return 0
-  // Crown − gutter (0.07, the corridor floors' depth) − 0.06 of clearance so
-  // the sheet can never fight the cut floors it passes under.
-  const target = track.y - 0.13
-  if (target >= grade) return 0
-  const t = track.d < 1.55 ? 1 : 1 - (track.d - 1.55) / 0.95
-  const eased = t * t * (3 - 2 * t)
-  return (target - grade) * eased
+const CORRIDOR_DROP = 0.13
+const CORRIDOR_FULL = 2.2
+const CORRIDOR_FADE = 3.3
+
+/** Lateral distance to the nearest embedded Loop alignment and the trackbed
+ *  crown AT THE PROJECTED POINT. Null beyond CORRIDOR_FADE of both. */
+export function corridorField(x: number, z: number): { d: number; crown: number } | null {
+  let d = Infinity
+  let crown = 0
+  const r = Math.hypot(x, z)
+  const dRing = Math.abs(r - LOOP.radius)
+  if (dRing < CORRIDOR_FADE && r > 1e-6) {
+    const px = (x / r) * LOOP.radius
+    const pz = (z / r) * LOOP.radius
+    d = dRing
+    // The ring crown: slabTop − recess at the projected ring point, the same
+    // number beamTopY carries (street branch) and the channel floors pour from.
+    crown = groundGrade(px, pz) + PAVE.rise - GUIDEWAY_CHANNEL.recess
+  }
+  const spur = spurTrackDatum(x, z)
+  if (spur && spur.d < CORRIDOR_FADE && spur.d < d) {
+    d = spur.d
+    crown = spur.y
+  }
+  return d < CORRIDOR_FADE ? { d, crown } : null
 }
 
-/** What the regolith floor mesh draws: the grade plus the spur trench. */
+/** The conform dig at a point: ≤ 0, exactly (crown − DROP) − grade in the
+ *  full band. Pass a precomputed grade on hot paths. */
+export function corridorDip(x: number, z: number, grade = groundGrade(x, z)): number {
+  const field = corridorField(x, z)
+  if (!field) return 0
+  const target = field.crown - CORRIDOR_DROP
+  if (target >= grade) return 0
+  const w =
+    field.d <= CORRIDOR_FULL
+      ? 1
+      : 1 - smooth((field.d - CORRIDOR_FULL) / (CORRIDOR_FADE - CORRIDOR_FULL))
+  return (target - grade) * w
+}
+
+/** What the regolith floor mesh draws: the grade conformed to the corridor. */
 export function regolithSurface(x: number, z: number): number {
   const grade = groundGrade(x, z)
-  let height = grade + trenchDip(x, z, grade)
-  // At the turnout the channel and corridor floors ease down onto one
-  // constant datum, and the boulevard slab that normally hides the sheet is
-  // cut away — trenchDip's ring-band guard leaves the sheet at natural grade
-  // there, BREACHING the recessed floors wherever a swale runs high (the
-  // brown "roof" over the merge). Pull the sheet under the turnout's floor
-  // datum across the same blend distance the floors use.
-  const d = spurCorridorDistance(x, z)
-  if (d < 2.1) {
-    const lid = streetDatum() - 0.13
-    if (height > lid) {
-      const w = d <= 0.9 ? 1 : smooth(1 - (d - 0.9) / 1.2)
-      height += (lid - height) * w
-    }
-  }
-  return height
+  return grade + corridorDip(x, z, grade)
 }
 
 // --- the arrival spur's ground truth ---------------------------------------
@@ -249,20 +276,23 @@ export function spurTrackDatum(x: number, z: number): { d: number; y: number } |
 }
 
 /** The walkable surface: regolith grade + the paved slab lift. On open
- *  ground it follows the SHEET (grade + trench dip); on paving it follows
- *  the slab datum (pure grade + rise); the edge fade blends the two. */
+ *  ground it follows the SHEET (grade + corridor conform); on paving it
+ *  follows the slab datum (pure grade + rise); the edge fade blends the two. */
 export function interiorHeight(x: number, z: number): number {
-  // Inside the spur-corridor cuttings (boulevard AND promenade crossings) the
-  // walkable surface is the trackbed apron, not a slab datum bridged over the
-  // cut. The ring band is excluded — the channel's own shallow contract
-  // applies there.
-  if (insideSpurCorridor(x, z, -0.12) && !insideGuidewayChannel(x, z, 0.3)) {
+  // Inside the track ground bands (the turnout street and the promenade
+  // crossing) the walkable surface follows the trackbed crown, not a slab
+  // datum bridged over it. The street covers its stretch of the ring band
+  // too, so no ring exclusion here — outside those regions the channel's own
+  // shallow contract still applies via the coverage path below.
+  if (insideSpurCorridor(x, z, -0.12)) {
+    const field = corridorField(x, z)
+    if (field && field.d < 3.0) return field.crown + 0.02
     const track = spurTrackDatum(x, z)
     if (track) return track.y + 0.018
   }
   const sd = pavedSignedDistance(x, z)
   const grade = groundGrade(x, z)
-  if (sd >= PAVE.edgeFade) return grade + trenchDip(x, z, grade)
+  if (sd >= PAVE.edgeFade) return grade + corridorDip(x, z, grade)
   const coverage = sd <= 0 ? 1 : 1 - smooth(sd / PAVE.edgeFade)
-  return grade + trenchDip(x, z, grade) * (1 - coverage) + PAVE.rise * coverage
+  return grade + corridorDip(x, z, grade) * (1 - coverage) + PAVE.rise * coverage
 }

@@ -337,37 +337,27 @@ export function handrail(
   const height = options?.height ?? 1.02
   const postEvery = options?.postEvery ?? 1.55
   const soups = handrailPost()
+  // ONE continuous rail over the whole polyline (per-segment rails put a
+  // pair of returns at every interior joint — a broken run of separate
+  // sticks), with returns only at the genuinely free ends.
+  railRun(
+    writer,
+    path.map((p) => p.clone().setY(p.y + height)),
+    { radius: 0.021 },
+  )
   for (let i = 0; i < path.length - 1; i++) {
     const a = path[i]
     const b = path[i + 1]
-    const segment = new Vector3().subVectors(b, a)
-    const length = segment.length()
+    const length = a.distanceTo(b)
     if (length < 0.05) continue
-    const direction = segment.clone().normalize()
-    const yaw = Math.atan2(direction.x, direction.z)
-    // The rail turns down 90 mm at each free end (a real return, code-correct).
-    const railPath = [
-      a.clone().setY(a.y + height - 0.09).addScaledVector(direction, 0.02),
-      a.clone().setY(a.y + height).addScaledVector(direction, 0.11),
-      b.clone().setY(b.y + height).addScaledVector(direction, -0.11),
-      b.clone().setY(b.y + height - 0.09).addScaledVector(direction, -0.02),
-    ]
-    writer.tube({ path: railPath, radius: 0.021, slot: 'orangeTop', radialSegments: 12, capStart: true, capEnd: true })
     const posts = Math.max(1, Math.round(length / postEvery))
     for (let p = 0; p <= posts; p++) {
-      if (i > 0 && p === 0) continue
+      if (i > 0 && p === 0) continue // shared joint post already written
       const position = a.clone().lerp(b, p / posts)
-      placeParts(writer, soups, position.clone().setY(position.y), yaw)
-      // Stanchion foot lands on the shoe's cup floor (0.04) and is capped. It
-      // shares the rail's slot so its head can bury into the tube rather than
-      // pierce a second material.
-      writer.tube({
-        path: [position.clone().setY(position.y + 0.043), position.clone().setY(position.y + height)],
-        radius: 0.0185,
-        slot: 'orangeTop',
-        radialSegments: 10,
-        capStart: true,
-      })
+      placeParts(writer, soups, position, 0)
+      // Stanchion foot lands on the shoe's cup floor (0.04); its head stops
+      // under the rail soffit — never tube-in-tube.
+      railPost(writer, position, position.y + height, { slot: 'orangeTop' })
     }
   }
 }
@@ -393,6 +383,122 @@ function handrailPost(): PartSoup[] {
   )
   HANDRAIL_POST = bakeParts({ steelEdge: shoe })
   return HANDRAIL_POST
+}
+
+// ---------------------------------------------------------------- railRun --
+
+export interface RailRunOpts {
+  /** Tube radius (42 mm rail by default). */
+  radius?: number
+  slot?: string
+  /** Fillet radius at interior corners of the axis polyline. */
+  cornerRadius?: number
+  /** 'return' curls each free end outward and down; 'cap' just caps it. */
+  ends?: 'return' | 'cap'
+  /** How far a return hangs below the rail axis. */
+  returnDrop?: number
+}
+
+/**
+ * Round a polyline's interior corners with quadratic-bezier fillets, so a
+ * swept tube shows smooth elbows instead of pinched polyline kinks. The
+ * tangent take-off distance is clamped to 44 % of each adjacent edge, so
+ * fillets never eat past a short segment's midpoint.
+ */
+export function filletPath(points: Vector3[], radius = 0.085, seg = 5): Vector3[] {
+  if (points.length < 3) return points.map((p) => p.clone())
+  const out: Vector3[] = [points[0].clone()]
+  for (let i = 1; i < points.length - 1; i++) {
+    const a = points[i - 1]
+    const b = points[i]
+    const c = points[i + 1]
+    const ab = new Vector3().subVectors(b, a)
+    const bc = new Vector3().subVectors(c, b)
+    const l1 = ab.length()
+    const l2 = bc.length()
+    if (l1 < 1e-6 || l2 < 1e-6) continue
+    ab.divideScalar(l1)
+    bc.divideScalar(l2)
+    if (ab.dot(bc) > 0.9995) {
+      out.push(b.clone())
+      continue
+    }
+    const take = Math.min(radius, 0.44 * l1, 0.44 * l2)
+    const t1 = b.clone().addScaledVector(ab, -take)
+    const t2 = b.clone().addScaledVector(bc, take)
+    for (let k = 0; k <= seg; k++) {
+      const t = k / seg
+      out.push(
+        new Vector3()
+          .addScaledVector(t1, (1 - t) * (1 - t))
+          .addScaledVector(b, 2 * (1 - t) * t)
+          .addScaledVector(t2, t * t),
+      )
+    }
+  }
+  out.push(points[points.length - 1].clone())
+  return out
+}
+
+/**
+ * THE rail tube — every handrail run in the park is this one builder, so a
+ * rail is well-made in exactly one place. `axis` is the rail's centreline at
+ * rail height; corners may be sharp (filleted here), ends get real returns
+ * (curl outward-and-down, capped tip) unless 'cap' is asked for. Sweeping is
+ * `tubeAlong`, whose rotation-minimising frames keep the tube twist-free
+ * through any curl.
+ */
+export function railRun(writer: PartWriter, axis: Vector3[], opts: RailRunOpts = {}): void {
+  if (axis.length < 2) return
+  const radius = opts.radius ?? 0.021
+  const path = axis.map((p) => p.clone())
+  if ((opts.ends ?? 'return') === 'return') {
+    const drop = opts.returnDrop ?? 0.14
+    const curl = (end: Vector3, inner: Vector3): Vector3[] | null => {
+      const t = new Vector3().subVectors(end, inner)
+      t.y = 0
+      if (t.lengthSq() < 1e-8) return null
+      t.normalize()
+      const elbow = end.clone().addScaledVector(t, 0.06)
+      return [elbow.clone().setY(elbow.y - drop), elbow]
+    }
+    const head = curl(path[0], path[1])
+    if (head) path.unshift(head[0], head[1])
+    const tail = curl(path[path.length - 1], path[path.length - 2])
+    if (tail) path.push(tail[1], tail[0])
+  }
+  writer.tube({
+    path: filletPath(path, opts.cornerRadius ?? 0.085, 5),
+    radius,
+    slot: opts.slot ?? 'orangeTop',
+    radialSegments: 12,
+    capStart: true,
+    capEnd: true,
+  })
+}
+
+/**
+ * A rail stanchion under a `railRun`: capped tube from the foot to 4 mm under
+ * the rail's soffit (the guardrail shoe's shadow gap — never tube-in-tube).
+ */
+export function railPost(
+  writer: PartWriter,
+  foot: Vector3,
+  railY: number,
+  opts: { radius?: number; slot?: string; railRadius?: number; buried?: boolean } = {},
+): void {
+  const railRadius = opts.railRadius ?? 0.021
+  writer.tube({
+    path: [
+      foot.clone().setY(foot.y + (opts.buried ? -0.03 : 0.043)),
+      foot.clone().setY(railY - railRadius - 0.004),
+    ],
+    radius: opts.radius ?? 0.0185,
+    slot: opts.slot ?? 'orangeTop',
+    radialSegments: 10,
+    capStart: true,
+    capEnd: true,
+  })
 }
 
 export interface StairSpec {
@@ -468,37 +574,26 @@ export function stairFlight(writer: PartWriter, spec: StairSpec): { top: Vector3
     )
   }
 
-  // Handrails following the slope.
+  // Handrails following the slope — the canonical builder, so the sloped run
+  // gets real returns at both free ends and balusters stop 4 mm under the
+  // rail soffit instead of running to its axis.
   for (const s of [-1, 1]) {
     const bottom = spec.origin
       .clone()
       .addScaledVector(side, (spec.width / 2 - 0.06) * s)
     const top = bottom.clone().add(total).setY(bottom.y + spec.steps * rise)
-    const railPath = [
-      bottom.clone().setY(bottom.y + 1.02),
-      top.clone().setY(top.y + 1.02),
-    ]
-    // Caps ON (the default is off — every flight shipped with open hollow
-    // rail ends), and balusters stop 4 mm under the rail soffit instead of
-    // running to its axis: 20 mm of one tube inside another reads as a weld
-    // blob at every post.
-    writer.tube({
-      path: railPath,
-      radius: 0.028,
-      slot: 'orangeTop',
-      radialSegments: 10,
-      capStart: true,
-      capEnd: true,
-    })
+    railRun(
+      writer,
+      [bottom.clone().setY(bottom.y + 1.02), top.clone().setY(top.y + 1.02)],
+      { radius: 0.028 },
+    )
     for (const t of [0.12, 0.5, 0.88]) {
       const foot = bottom.clone().lerp(top, t)
-      writer.tube({
-        path: [foot.clone(), foot.clone().setY(foot.y + 1.02 - 0.028 - 0.004)],
+      railPost(writer, foot, foot.y + 1.02, {
         radius: 0.02,
         slot: 'orange',
-        radialSegments: 8,
-        capStart: true,
-        capEnd: true,
+        railRadius: 0.028,
+        buried: true,
       })
     }
   }

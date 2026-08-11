@@ -11,7 +11,8 @@ import { interiorHeight } from '../world/interiorHeight'
 import { LOOP } from '../world/parkPlan'
 import { buildPortalGate } from './portalGate'
 import type { PortalGate } from './portalGate'
-import { buildGuideway, buildStations, buildTrackData, buildTube, carFloorY } from './track'
+import { buildSideStations } from '../world/sideStations'
+import { buildGuideway, buildTrackData, buildTube, carFloorY } from './track'
 import type { TrackData } from './track'
 import { buildTramCar, CAR_LENGTH, CAR_WIDTH } from './vehicle'
 import type { TramCar } from './vehicle'
@@ -95,7 +96,7 @@ export class TramSystem implements GameSystem {
     const writer = new PartWriter()
     buildGuideway(writer, track)
     buildTube(writer, track)
-    buildStations(writer, this.staticGroup, this.physics)
+    buildSideStations(writer, this.staticGroup, this.physics)
     this.staticGroup.add(writer.build(kitMaterials()))
     ctx.scene.add(this.staticGroup)
 

@@ -3,6 +3,7 @@ import type { InstancedMesh, Object3D } from 'three'
 import { SpriteNodeMaterial } from 'three/webgpu'
 import { float, mix, smoothstep, uniform, uv, vec2, vec3 } from 'three/tsl'
 import type { Rng } from '../core/prng'
+import { markParticle } from '../render/layers'
 import {
   CROP_TRAY_SURFACES,
   CROP_TRAY_TIER_PITCH,
@@ -249,6 +250,13 @@ export class MistSystem {
       sprite.position.set(nozzle[0], nozzle[1], nozzle[2])
       sprite.scale.setScalar(2.1)
       sprite.visible = false
+      // Main-camera ONLY (PARTICLE_LAYER): in any shadow or auxiliary pass a
+      // sprite rasterizes as its full QUAD — the owner saw rectangular
+      // silhouette "shadows" growing and vanishing with the puff lifecycle
+      // during bursts. Explicit flags as belt-and-braces.
+      sprite.castShadow = false
+      sprite.receiveShadow = false
+      markParticle(sprite)
       // The glazing is `transparent` with `depthWrite: false` at renderOrder
       // 12, so at the default order the panes composited OVER the puffs — the
       // mist was attenuated by glass BEHIND it whenever the camera was inside

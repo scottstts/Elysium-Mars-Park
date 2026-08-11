@@ -1,9 +1,17 @@
-import { CatmullRomCurve3, Group, Mesh, PlaneGeometry, Quaternion, Vector2, Vector3 } from 'three'
-import { SMOOTH, cleanMesh, loft, roundedRect, smoothShade, writeInto } from '../archkit/meshdata'
+import { CatmullRomCurve3, Group, Mesh, PlaneGeometry, Vector2, Vector3 } from 'three'
+import { railPost, railRun } from '../archkit/kit'
+import {
+  SMOOTH,
+  cleanMesh,
+  loft,
+  recalcNormals,
+  roundedRect,
+  smoothShade,
+  writeInto,
+} from '../archkit/meshdata'
 import type { Vec2, Vec3 as MVec3 } from '../archkit/meshdata'
 import type { PartWriter } from '../archkit/writer'
 import { signageMaterial } from '../materials/library'
-import type { PhysicsSystem } from '../physics/physicsWorld'
 import { interiorHeight } from '../world/interiorHeight'
 import { ARRIVAL_SPINE, LOOP } from '../world/parkPlan'
 import { slabTop } from '../world/paving'
@@ -480,7 +488,7 @@ const FLANGEWAY = 0.03
  *   FROG — the spur's inner rail must CROSS the loop's outer rail to reach
  *   the inner circle. The outer loop rail carries a real gap (`gapLo..gapHi`,
  *   the crossing envelope plus a flangeway each side) and the spur rail runs
- *   continuous through it over a cast base plate — a movable-point frog, the
+ *   continuous through it, feet bedded on the flush special-work deck — the
  *   route the car actually rides.
  *
  *   SPECIAL WORK — over `zoneLo..zoneHi` (ramped by `rampLo/rampHi`) both
@@ -498,7 +506,6 @@ interface Turnout {
   rampHi: number
   gapLo: number
   gapHi: number
-  frog: { p: Vector3; yaw: number } | null
 }
 
 function computeTurnout(track: TrackData): Turnout {
@@ -509,11 +516,9 @@ function computeTurnout(track: TrackData): Turnout {
   let zoneHi = Math.PI / 2 + 0.2 / R
   let gapLo = Number.POSITIVE_INFINITY
   let gapHi = Number.NEGATIVE_INFINITY
-  let frog: Turnout['frog'] = null
   const length = track.arrivalLength
   const p0 = new Vector3()
   const p1 = new Vector3()
-  let previousInnerRho = Number.POSITIVE_INFINITY
   const samples = 1400
   for (let k = 0; k <= samples; k++) {
     const s = length - 70 + (70 * k) / samples
@@ -536,15 +541,9 @@ function computeTurnout(track: TrackData): Turnout {
         zoneHi = Math.max(zoneHi, phi)
         zoneLo = Math.min(zoneLo, phi)
       }
-      if (offset < 0) {
-        if (Math.abs(rho - outerRail) < reach) {
-          gapLo = Math.min(gapLo, phi)
-          gapHi = Math.max(gapHi, phi)
-        }
-        if (!frog && previousInnerRho > outerRail && rho <= outerRail) {
-          frog = { p: new Vector3(qx, 0, qz), yaw: Math.atan2(tx, tz) }
-        }
-        previousInnerRho = rho
+      if (offset < 0 && Math.abs(rho - outerRail) < reach) {
+        gapLo = Math.min(gapLo, phi)
+        gapHi = Math.max(gapHi, phi)
       }
     }
   }
@@ -561,7 +560,6 @@ function computeTurnout(track: TrackData): Turnout {
     rampHi: zoneHi + 2.2 / R,
     gapLo: gapLo - 0.1 / R,
     gapHi: gapHi + 0.1 / R,
-    frog,
   }
 }
 
@@ -628,29 +626,10 @@ function emitLoopRails(writer: PartWriter, turnout: Turnout): void {
     }
     sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
   }
-  // CHECK RAIL: the guard opposite the frog. While the outer rail is gapped,
-  // the inner stock rail carries a guard one flangeway inside the gauge —
-  // the piece of switchwork that keeps a wheelset tracking through the gap —
-  // with its ends flared toward the centreline. Head face at stock-head face
-  // (0.42 − 0.105) minus a 45 mm flangeway; feet bed into the special-work
-  // deck like every rail through the zone. Angularly clear of both the blade
-  // tapers (they die by the tangency, ~1.2 m before the gap) and the
-  // crossing spur rail (ρ 97.17+ against the guard's ρ ≤ 96.95).
-  if (turnout.gapHi - turnout.gapLo > 1e-4) {
-    const lo = turnout.gapLo - 0.9 / R
-    const hi = turnout.gapHi + 0.9 / R
-    const count = Math.max(8, Math.round(((hi - lo) * R) / 0.3))
-    const stations: Station[] = []
-    for (let i = 0; i <= count; i++) {
-      const ends = Math.min(1, Math.min(i, count - i) / (count * 0.25))
-      const flare = (1 - smooth01(ends)) * 0.07
-      stations.push({
-        p: loopStation(hi - ((hi - lo) * i) / count),
-        profile: railProfile(RAIL_X - 0.105 - 0.045 - 0.105 - flare),
-      })
-    }
-    sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
-  }
+  // NO check rail: the flared guard read as a loose strip that "doesn't
+  // belong" beside the crossing (owner finding, P-wave 5 sketch). The joint
+  // shows only the running steel — two loop rails, two spur rails tapering
+  // in, and the flangeway gap — smooth curves joining the main rails.
 }
 
 /**
@@ -664,7 +643,7 @@ function emitLoopRails(writer: PartWriter, turnout: Turnout): void {
  * gap in the outer loop rail; cast base plates ride under the blade taper
  * and the crossing, the way real switchwork carries both.
  */
-function emitSpurRails(writer: PartWriter, track: TrackData, turnout: Turnout): void {
+function emitSpurRails(writer: PartWriter, track: TrackData): void {
   const align = sampleCurve(track.arrival, track.arrivalLength, RAIL_STEP, false)
   const points = align.stations
   if (points.length >= 2) {
@@ -694,21 +673,11 @@ function emitSpurRails(writer: PartWriter, track: TrackData, turnout: Turnout): 
       sweepRun(writer, 'steelEdge', stations, { smooth: SMOOTH.moulded, uvScale: 1.4 })
     }
   }
-  // Frog base plate: a slim casting under the crossing, 8 mm proud of the
-  // flush deck; both routes' feet bed into it — bury-and-cap, the house
-  // joint. (Blade tips need none: they lie against their stock rails on the
-  // special-work panel itself.) Centred ON the detected centre-crossing —
-  // measured, not eyeballed: two hand-nudges in a row put it off the X.
-  if (turnout.frog) {
-    const { p, yaw } = turnout.frog
-    writer.box({
-      center: new Vector3(p.x, beamTopY(p.x, p.z) + APRON_TOP - 0.004, p.z),
-      size: new Vector3(0.85, 0.024, 1.9),
-      rotationY: yaw,
-      slot: 'dark',
-      chamfer: 0.004,
-    })
-  }
+  // No base plate under the crossing: the special-work deck IS the bearing
+  // surface (every rail through the zone beds its feet on the flush panel),
+  // and a plate box over the X read as a loose grey patch from above (owner
+  // finding). The crossing shows exactly what carries it: the gapped stock
+  // rail and the spur rail running through.
 }
 
 // --------------------------------------------------------------- guideway --
@@ -1065,7 +1034,7 @@ export function buildGuideway(writer: PartWriter, track: TrackData): void {
     sweepRun(writer, 'cast', spur.embedded, { smooth: SMOOTH.cast, uvScale: 0.55 })
     emitTrackFurniture(writer, spur.embeddedAlign, SPUR_STEP)
   }
-  emitSpurRails(writer, track, turnout)
+  emitSpurRails(writer, track)
 }
 
 export interface GuidewayCollider {
@@ -1414,23 +1383,35 @@ export function platformOutward(spec: ArcPlatform, u: number): Vector3 {
   return new Vector3(Math.cos(angle), 0, Math.sin(angle))
 }
 
-function sectorRing(
+function slabGrid(
   spec: ArcPlatform,
   shrink: number,
   y: (u: number) => number,
-  segments: number,
-): MVec3[] {
+  segs: number,
+  rad: number,
+): { pts: MVec3[][]; outline: MVec3[] } {
   const rOuter = spec.rEdge - shrink
   const rInner = spec.rEdge - spec.depth + shrink
   const halfU = spec.arcLength / 2 - shrink
-  const pts: MVec3[] = []
+  const uAt = (i: number): number => -halfU + (2 * halfU * i) / segs
   const point = (u: number, r: number): MVec3 => {
     const angle = spec.centreAngle + u / spec.rEdge
     return [Math.cos(angle) * r, y(u), Math.sin(angle) * r]
   }
-  for (let i = 0; i <= segments; i++) pts.push(point(-halfU + (2 * halfU * i) / segments, rOuter))
-  for (let i = segments; i >= 0; i--) pts.push(point(-halfU + (2 * halfU * i) / segments, rInner))
-  return pts
+  const pts: MVec3[][] = []
+  for (let i = 0; i <= segs; i++) {
+    const row: MVec3[] = []
+    for (let j = 0; j <= rad; j++) row.push(point(uAt(i), rOuter + ((rInner - rOuter) * j) / rad))
+    pts.push(row)
+  }
+  // The outline walks outer arc → far end edge → inner arc → near end edge,
+  // sharing every grid boundary vertex so the caps weld to the loft.
+  const outline: MVec3[] = []
+  for (let i = 0; i <= segs; i++) outline.push(pts[i][0])
+  for (let j = 1; j < rad; j++) outline.push(pts[segs][j])
+  for (let i = segs; i >= 0; i--) outline.push(pts[i][rad])
+  for (let j = rad - 1; j >= 1; j--) outline.push(pts[0][j])
+  return { pts, outline }
 }
 
 /**
@@ -1438,11 +1419,23 @@ function sectorRing(
  * fascia → chamfered nosing → deck, as seven offset levels of one loft. The
  * edge is moulded rather than sawn, the 120 mm plinth set-back lays a shadow
  * line at the paving, and BOTH the top and the bottom track their own datum —
- * the deck the guideway, the footing the ground — so the slab can neither
- * float at one end nor lose the car floor at the other.
+ * the deck the guideway, the footing the ground.
+ *
+ * The caps are polar GRIDS, never ear-clipped n-gons (station-agent finding):
+ * on an 18 m annular sector whose vertices carry different heights, ear
+ * clipping bridged the outline with two platform-wide triangles and the
+ * walking surface stood up to 154 mm above `platformDeckY` — burying the
+ * tactile strip and making every "flush" stair head claim meaningless. The
+ * outline carries the caps' radial subdivision on its end edges so grid and
+ * loft share every boundary vertex (one welded shell, no T-junctions), and
+ * 1.1 m arc segments hold the datum to under a millimetre. WELD BEFORE
+ * ORIENTING: until `cleanMesh` merges the rims, the tube and the two caps are
+ * three open components and `recalcNormals` orients each by coin toss (the
+ * whole deck once rendered back-facing).
  */
 export function emitPlatformSlab(writer: PartWriter, spec: ArcPlatform, slot = 'cast'): void {
-  const segments = Math.max(6, Math.round(spec.arcLength / 2.2))
+  const segs = Math.max(12, Math.round(spec.arcLength / 1.1))
+  const rad = 4
   const deck = (u: number): number => platformDeckY(spec, u)
   const footing = (u: number): number => platformGroundY(spec, u) - 0.42
   const levels: Array<[number, (u: number) => number]> = [
@@ -1454,13 +1447,25 @@ export function emitPlatformSlab(writer: PartWriter, spec: ArcPlatform, slot = '
     [0.028, (u) => deck(u) - 0.008],
     [0.05, deck],
   ]
+  const grids = levels.map(([shrink, y]) => slabGrid(spec, shrink, y, segs, rad))
   const md = loft(
-    levels.map(([shrink, y]) => sectorRing(spec, shrink, y, segments)),
-    { closeV: true, capStart: true, capEnd: true },
+    grids.map((g) => g.outline),
+    { closeV: true },
   )
+  for (const grid of [grids[0], grids[grids.length - 1]]) {
+    const base = md.verts.length
+    const index = (i: number, j: number): number => base + i * (rad + 1) + j
+    for (const row of grid.pts) for (const p of row) md.verts.push([...p] as MVec3)
+    for (let i = 0; i < segs; i++) {
+      for (let j = 0; j < rad; j++) {
+        md.faces.push([index(i, j), index(i + 1, j), index(i + 1, j + 1), index(i, j + 1)])
+      }
+    }
+  }
   md.frame = 'y-up'
-  smoothShade(md, SMOOTH.cast)
   cleanMesh(md)
+  recalcNormals(md)
+  smoothShade(md, SMOOTH.cast)
   writeInto(writer, slot, md, { uvScale: 0.5 })
 }
 
@@ -1657,225 +1662,9 @@ export function emitPlatformCanopy(
   }
 }
 
-/**
- * Overlook West and Farmside: side platforms inside the Loop, decked at the
- * cabin-floor datum. Portal is its own hero terminus
- * (`world/portalStation.ts`), which reuses every helper above.
- *
- * Signature kept exactly as `tramSystem` calls it: geometry into the writer,
- * canvas text plates into the group, colliders into the physics world.
- */
-export function buildStations(writer: PartWriter, group: Group, physics: PhysicsSystem): void {
-  for (const station of LOOP.stations) {
-    if (station.id === 'portal') continue
-    const point = new Vector3(
-      Math.cos(station.angle) * LOOP.radius,
-      0,
-      Math.sin(station.angle) * LOOP.radius,
-    )
-    // Platform side = LEFT of travel = inside the loop (`tramSystem` doors).
-    // 18 m of deck for a 16.7 m train: the boulevard planters resume at
-    // ±0.115 rad from every station bearing (`pavingPlan` arcRun), and the end
-    // flights have to land inside that gap.
-    const spec: ArcPlatform = {
-      centreAngle: station.angle,
-      arcLength: 18,
-      rEdge: LOOP.radius - PLATFORM_EDGE_OFFSET,
-      depth: 5.2,
-      deckY: carFloorY(point.x, point.z) - 0.02,
-      baseY: slabTop(point.x, point.z),
-    }
-    buildSidePlatform(writer, group, physics, spec, {
-      title: station.id === 'overlook' ? 'OVERLOOK WEST' : 'FARMSIDE',
-    })
-  }
-}
-
-function buildSidePlatform(
-  writer: PartWriter,
-  group: Group,
-  physics: PhysicsSystem,
-  spec: ArcPlatform,
-  options: { title: string },
-): void {
-  const half = spec.arcLength / 2
-  const back = spec.depth - 0.22
-  const deckAt = (u: number): number => platformDeckY(spec, u)
-
-  emitPlatformSlab(writer, spec)
-  emitPlatformEdge(writer, spec)
-  emitPlatformCanopy(writer, spec, {
-    arcLength: spec.arcLength - 5.2,
-    reach: 4.6,
-    columnV: spec.depth * 0.55,
-  })
-  for (const u of [-half + 3.6, half - 3.6]) {
-    leaningRail(writer, spec, u, back - 0.55)
-  }
-  litterBin(writer, platformPoint(spec, half - 1.8, back - 0.6, deckAt(half - 1.8)))
-  // MID-BAY, not u 0. The name board stands at the BACK of the deck facing the
-  // platform edge, so every reader is on the far side of the canopy columns
-  // from it — and `emitPlatformCanopy` puts a column on each bay boundary of a
-  // 12.8 m run in 2 bays, i.e. at u −6.4, 0 and +6.4. At u 0 the column stood
-  // dead centre of the 3.2 m board and swallowed the station's own name from
-  // anywhere past 2.9 m. At −3.2 the board spans −4.8…−1.6, clear of both
-  // neighbouring columns by 1.6 m, and clear of the leaning rail at −5.4.
-  stationSign(writer, group, spec, -3.2, back, options.title)
-
-  // --- access: an end flight each side, and a 1:14 ramp along the back. Riser
-  // counts are DERIVED (target 155 mm) — the deck datum comes from the
-  // guideway and the apron from the pour, so neither drop is a round number.
-  const run = 0.32
-  const ends: Array<{ u: number; steps: number; rise: number; drop: number }> = []
-  for (const sign of [-1, 1]) {
-    const uEdge = sign * (half + 0.08)
-    const tangent = platformTangent(spec, uEdge)
-    const deck = deckAt(uEdge)
-    const probe = platformPoint(spec, uEdge, spec.depth / 2, 0).addScaledVector(tangent, sign * 1)
-    const steps = Math.max(2, Math.min(5, Math.round((deck - slabTop(probe.x, probe.z)) / 0.155)))
-    const foot = platformPoint(spec, uEdge, spec.depth / 2, 0).addScaledVector(
-      tangent,
-      sign * steps * run,
-    )
-    const footY = slabTop(foot.x, foot.z)
-    stationSteps(writer, {
-      foot: foot.setY(footY),
-      climb: tangent.clone().multiplyScalar(-sign),
-      across: platformOutward(spec, uEdge),
-      steps,
-      rise: (deck - footY) / steps,
-      run,
-      width: 3.0,
-    })
-    ends.push({
-      u: uEdge + (sign * steps * run) / 2,
-      steps,
-      rise: (deck - footY) / steps,
-      drop: deck - footY,
-    })
-  }
-  const rampHead = -half + 1.2
-  const rampProbe = platformPoint(spec, rampHead, spec.depth + 0.9, 0)
-  const rampFootY = surfaceY(rampProbe.x, rampProbe.z)
-  // Clamp the run: behind Overlook the grade falls into a swale, and a true
-  // 1:14 there would be a 17 m tongue across the whole back of the platform.
-  const rampRun = Math.min(13, Math.max(4, (deckAt(rampHead) - rampFootY) * 14))
-  emitPlatformRamp(writer, spec, rampHead, rampRun, rampFootY)
-
-  // --- colliders. The deck is three boxes along the arc; one cuboid over an
-  // 18 m arc would stand 0.4 m proud of the slab at its ends.
-  const world = physics.world
-  const api = physics.api
-  if (!world || !api) return
-  const body = world.createRigidBody(api.RigidBodyDesc.fixed())
-  for (let i = 0; i < 3; i++) {
-    const u = -half + (spec.arcLength * (i + 0.5)) / 3
-    const deck = deckAt(u)
-    const bottom = platformGroundY(spec, u) - 0.4
-    const centre = platformPoint(spec, u, spec.depth / 2, (deck + bottom) / 2)
-    world.createCollider(
-      // `yawAlong(d)` puts local +Z on `d`. The three boxes' CENTRES march
-      // along the arc, so the arc half-chunk (`arcLength / 6`) is the local +Z
-      // extent and the depth is local +X — i.e. the frame is the TANGENT, not
-      // the outward radial. Under `platformOutward` the deck came out 90 deg
-      // round: `arcLength / 3` deep, `depth` long, which left a hole in the
-      // deck at each of the two seams (measured 0.6 m at Overlook, 1.0 m at
-      // Farmside) that a player drops straight through.
-      api.ColliderDesc.cuboid(spec.depth / 2, (deck - bottom) / 2, spec.arcLength / 6)
-        .setTranslation(centre.x, centre.y, centre.z)
-        .setRotation(pitchYaw(0, yawAlong(platformTangent(spec, u)))),
-      body,
-    )
-  }
-  const rampPitch = Math.atan2(deckAt(rampHead) - rampFootY, rampRun)
-  const rampMid = platformPoint(
-    spec,
-    rampHead + rampRun / 2,
-    spec.depth + 0.87,
-    (deckAt(rampHead) + rampFootY) / 2,
-  )
-  world.createCollider(
-    api.ColliderDesc.cuboid(0.85, 0.1, rampRun / 2)
-      .setTranslation(rampMid.x, rampMid.y + 0.08, rampMid.z)
-      .setRotation(pitchYaw(rampPitch, yawAlong(platformTangent(spec, rampHead)))),
-    body,
-  )
-  for (const end of ends) {
-    const sign = Math.sign(end.u) || 1
-    const stairMid = platformPoint(spec, end.u, spec.depth / 2, deckAt(end.u) - end.drop / 2)
-    world.createCollider(
-      // The flight CLIMBS along the tangent (see `emitPlatformStair`'s
-      // `climb`) and is 3.0 m wide across it, so local +Z is the tangent —
-      // same frame as the access ramp below. It also puts the pitch on the
-      // outward axis, which is the only axis a flight can tilt about.
-      api.ColliderDesc.cuboid(1.5, 0.1, (end.steps * run) / 2 + 0.1)
-        .setTranslation(stairMid.x, stairMid.y + 0.08, stairMid.z)
-        .setRotation(
-          pitchYaw(
-            -sign * Math.atan2(end.drop, end.steps * run),
-            yawAlong(platformTangent(spec, end.u)),
-          ),
-        ),
-      body,
-    )
-  }
-}
-
-/**
- * 1:14 access ramp behind the platform, with kerbs both sides. Built as a
- * RETAINED solid, not a floating deck: each segment's thickness runs down to
- * 0.3 m below the local grade, so the ramp is an embankment wall wherever the
- * ground falls away instead of a plate hovering over it.
- */
-export function emitPlatformRamp(
-  writer: PartWriter,
-  spec: ArcPlatform,
-  u0: number,
-  rampRun: number,
-  footY = spec.baseY,
-): void {
-  const vNear = spec.depth + 0.02
-  const vFar = spec.depth + 1.72
-  const segments = 5
-  const headY = platformDeckY(spec, u0)
-  const yAt = (t: number): number => headY + 0.006 - (headY - footY - 0.014) * t
-  for (let i = 0; i < segments; i++) {
-    const ua = u0 + (rampRun * i) / segments
-    const ub = u0 + (rampRun * (i + 1)) / segments
-    const ya = yAt(i / segments)
-    const yb = yAt((i + 1) / segments)
-    const corners: [Vector3, Vector3, Vector3, Vector3] = [
-      platformPoint(spec, ua, vNear, ya),
-      platformPoint(spec, ub, vNear, yb),
-      platformPoint(spec, ub, vFar, yb),
-      platformPoint(spec, ua, vFar, ya),
-    ]
-    let ground = Infinity
-    for (const corner of corners) ground = Math.min(ground, surfaceY(corner.x, corner.z))
-    writer.slab(corners, Math.max(0.2, Math.min(ya, yb) - ground + 0.3), 'cast', 0.5)
-  }
-  for (const v of [vNear + 0.05, vFar - 0.05]) {
-    const kerb: Vector3[] = []
-    for (let i = 0; i <= segments * 2; i++) {
-      const t = i / (segments * 2)
-      kerb.push(platformPoint(spec, u0 + rampRun * t, v, yAt(t) + 0.024))
-    }
-    writer.tube({
-      path: kerb,
-      radius: 0.05,
-      slot: 'dark',
-      radialSegments: 8,
-      capStart: true,
-      capEnd: true,
-    })
-  }
-}
-
-function pitchYaw(pitch: number, yaw: number): { x: number; y: number; z: number; w: number } {
-  const q = new Quaternion().setFromAxisAngle(UP, yaw)
-  q.multiply(new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), pitch))
-  return { x: q.x, y: q.y, z: q.z, w: q.w }
-}
+// Side stations (Overlook West + Farmside) now live in world/sideStations.ts,
+// built on the portal wave's stationArchitecture pieces — this module keeps
+// only the shared platform kit.
 
 /** Leaning rail: a polished tube on two legs with real base plates. */
 export function leaningRail(
@@ -1906,26 +1695,14 @@ export function leaningRail(
       chamfer: 0.008,
     })
   }
-  // The rail's 90 mm overhangs curl DOWN past the posts instead of ending on
-  // flat caps in the air — the free end of a leaning rail is a return, the
-  // run's own termination idiom.
-  const railAt = (du: number, dy: number): Vector3 =>
-    platformPoint(spec, u + du, v, platformDeckY(spec, u + du) + 0.78 + dy)
-  writer.tube({
-    path: [
-      railAt(-half - 0.135, -0.16),
-      railAt(-half - 0.125, -0.05),
-      railAt(-half - 0.09, 0),
-      railAt(0, 0),
-      railAt(half + 0.09, 0),
-      railAt(half + 0.125, -0.05),
-      railAt(half + 0.135, -0.16),
-    ],
+  // The rail: one canonical run along the arc; `railRun` supplies the
+  // returns (curl out and down past the posts, capped) and twist-free elbows.
+  const railAt = (du: number): Vector3 =>
+    platformPoint(spec, u + du, v, platformDeckY(spec, u + du) + 0.78)
+  railRun(writer, [railAt(-half - 0.06), railAt(0), railAt(half + 0.06)], {
     radius: 0.032,
-    slot: 'orangeTop',
-    radialSegments: 12,
-    capStart: true,
-    capEnd: true,
+    returnDrop: 0.16,
+    cornerRadius: 0.12,
   })
 }
 
@@ -2102,26 +1879,38 @@ export function stationSteps(writer: PartWriter, spec: StairSpec): void {
     slot: 'steelEdge',
     chamfer: 0.004,
   })
+  // Flight rails: the RAIL is the canonical run (sloped line + level overrun
+  // onto the deck, returns at both free ends); the POSTS are stanchions under
+  // it. The old form drew post and rail as ONE tube rising vertically out of
+  // the bottom tread — with per-station frames it sheared into a ribbon
+  // twist at the kink (owner defect, screenshot).
   for (const sign of [-1, 1]) {
     const post = foot.clone().addScaledVector(across, (sign * spec.width) / 2 - sign * 0.09)
-    writer.tube({
-      path: [
-        post.clone().setY(post.y - 0.03),
-        post.clone().setY(post.y + 0.98),
-        post
-          .clone()
-          .addScaledVector(climb, steps * run)
-          .setY(post.y + steps * rise + 0.98),
-        post
-          .clone()
-          .addScaledVector(climb, steps * run + 0.28)
-          .setY(post.y + steps * rise + 0.98),
-      ],
-      radius: 0.026,
-      slot: 'orangeTop',
-      radialSegments: 10,
-      capStart: true,
-      capEnd: true,
+    const railBottom = post.clone().setY(post.y + 0.98)
+    const railTop = post
+      .clone()
+      .addScaledVector(climb, steps * run)
+      .setY(post.y + steps * rise + 0.98)
+    const overrun = post
+      .clone()
+      .addScaledVector(climb, steps * run + 0.28)
+      .setY(post.y + steps * rise + 0.98)
+    railRun(writer, [railBottom, railTop, overrun], { radius: 0.026, cornerRadius: 0.13 })
+    railPost(writer, post, post.y + 0.98, {
+      radius: 0.021,
+      slot: 'dark',
+      railRadius: 0.026,
+      buried: true,
+    })
+    const headFoot = post
+      .clone()
+      .addScaledVector(climb, steps * run + 0.2)
+      .setY(post.y + steps * rise)
+    railPost(writer, headFoot, post.y + steps * rise + 0.98, {
+      radius: 0.021,
+      slot: 'dark',
+      railRadius: 0.026,
+      buried: true,
     })
   }
 }

@@ -351,22 +351,31 @@ function sampleSector(
   acrossMin: number,
   acrossMax: number,
   clump = 0.45,
+  margin = 0.15,
 ): SectorSample[] {
   const out: SectorSample[] = []
   if (count <= 0) return out
   const { inner, outer } = fillBounds(planter)
   const width = Math.max(0.001, outer - inner)
+  // ABSOLUTE wall margin, not a fraction: on a 1 m bed a 6 % inset is 6 cm,
+  // and a tuft rooted 6 cm off the wall pushes its lower cards straight
+  // through the 0.2 m concrete — the "roots outside the container" comb
+  // (owner defect). The fractional ranges still layer the species; this
+  // clamp guarantees no root sits closer to a wall than its foliage needs.
+  const marginFrac = Math.min(0.45, margin / width)
+  const lo = Math.max(acrossMin, marginFrac)
+  const hi = Math.max(lo, Math.min(acrossMax, 1 - marginFrac))
   const mid = (planter.rInner + planter.rOuter) * 0.5
   const arcLength = Math.max(0.001, (planter.a1 - planter.a0) * mid)
   const parents = Math.max(1, Math.round(count / 3))
   for (let p = 0; p < parents; p++) {
-    const acrossParent = rng.range(acrossMin, acrossMax)
+    const acrossParent = rng.range(lo, hi)
     const alongParent = rng.float()
     const children = Math.max(1, Math.round(count / parents))
     for (let c = 0; c < children && out.length < count; c++) {
       const jitterAcross = c === 0 ? 0 : rng.range(-clump, clump) / width
       const jitterAlong = c === 0 ? 0 : rng.range(-clump, clump) / arcLength
-      const across = Math.min(acrossMax, Math.max(acrossMin, acrossParent + jitterAcross))
+      const across = Math.min(hi, Math.max(lo, acrossParent + jitterAcross))
       const along = Math.min(0.985, Math.max(0.015, alongParent + jitterAlong))
       out.push(place(planter, across, along))
     }
@@ -400,7 +409,6 @@ export function plantPlanters(
 
     // Tall planting keeps clear of the tram side entirely.
     const outerLimit = planter.rOuter + 0.4 < TRAM_SWEPT_INNER ? 0.9 : 0.6
-    const canSpillOutward = planter.rOuter + 0.55 < TRAM_SWEPT_INNER
 
     for (const sample of sampleSector(planter, rng, Math.round(area * recipe.sedge * lush), 0.06, 0.94, 0.5)) {
       palette.sedge.add(
@@ -429,7 +437,9 @@ export function plantPlanters(
         rng.range(-0.08, 0.08),
       )
     }
-    for (const sample of sampleSector(planter, rng, Math.round(area * recipe.cover * lush), 0.02, 0.98, 0.55)) {
+    // Groundcover is low and small — it may hug the walls far closer than
+    // the tall species without ever reaching through them.
+    for (const sample of sampleSector(planter, rng, Math.round(area * recipe.cover * lush), 0.02, 0.98, 0.55, 0.05)) {
       palette.cover.add(
         new Vector3(sample.x, sample.y - 0.02, sample.z),
         rng.range(0, Math.PI * 2),
@@ -447,33 +457,22 @@ export function plantPlanters(
       )
     }
 
-    // Trailing spill over the coping. `yaw` aims the sprig's fan outward; the
-    // cards are pitched past horizontal so the tips fall 10–20 cm down the
-    // wall face. On the boulevard this happens on the PARK side only.
-    const midRadius = (planter.rInner + planter.rOuter) * 0.5
-    const spillRuns = canSpillOutward ? [0, 1] : [0]
-    for (const side of spillRuns) {
-      // Rooted hard against the wall: from mid-bed the sprig cannot reach
-        // past 0.2 m of wall plus its overhang, and the coping line survives.
-        const across = side === 0 ? 0.02 : 0.98
-      const spacing = 0.42
-      const arcLength = (planter.a1 - planter.a0) * midRadius
-      const count = Math.max(2, Math.floor(arcLength / spacing))
-      for (let i = 0; i < count; i++) {
-        if (rng.float() > 0.93) continue
-        const along = (i + rng.range(0.15, 0.85)) / count
-        const sample = place(planter, across, along)
-        const angle = planter.a0 + along * (planter.a1 - planter.a0)
-        // Outward normal of the wall the sprig drapes over.
-        const outward = side === 0 ? angle + Math.PI : angle
-        palette.trailing.add(
-          new Vector3(sample.x, sample.y - 0.02, sample.z),
-          spillYaw(outward),
-          rng.range(0.92, 1.38),
-          0,
-          rng.range(-0.12, 0.12),
-        )
-      }
+    // NO trailing spill down the outer face. The sprig cards can only reach
+    // the wall's far side by crossing the concrete (soil-rooted: stems poke
+    // through mid-wall — the owner's "roots outside the container" comb) or
+    // by draping from the rim (rim-rooted: flat dark ribbons pasted on the
+    // sunlit face — tried, read as dirt streaks). Nothing of a planting
+    // shows outside its container; the beds break the coping line with the
+    // tall species' silhouettes instead. Trailing sprigs now live INSIDE
+    // the bed at its edges, arching over soil rather than concrete.
+    for (const sample of sampleSector(planter, rng, Math.round(area * 0.5), 0.06, 0.94, 0.5, 0.12)) {
+      palette.trailing.add(
+        new Vector3(sample.x, sample.y - 0.02, sample.z),
+        rng.range(0, Math.PI * 2),
+        rng.range(0.6, 0.9),
+        0,
+        rng.range(-0.12, 0.12),
+      )
     }
 
     // Accent stones: two or three per bed, half-buried. They read as design

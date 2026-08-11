@@ -8,10 +8,23 @@ export const MAIN_DETAIL_LAYER = 1
 /** Moving sun-shadow casters rendered by the lightweight dynamic maps
  * (robots, the tram) instead of the cached static clipmaps. */
 export const DYNAMIC_SHADOW_LAYER = 2
+/** Camera-facing particles (mist puffs). ONLY the main camera enables this
+ * layer, so no shadow, clipmap or auxiliary pass can ever rasterize a
+ * particle quad — a billboard in any depth/shadow path renders as its full
+ * RECTANGLE and walks across the ground as a growing silhouette (owner
+ * defect class, greenhouse spray). */
+export const PARTICLE_LAYER = 3
 
 export function enableMainDetailLayer(camera: Camera): void {
   camera.layers.enable(MAIN_DETAIL_LAYER)
   camera.layers.enable(DYNAMIC_SHADOW_LAYER)
+  camera.layers.enable(PARTICLE_LAYER)
+}
+
+/** Confine a particle object to the main camera's render, out of every
+ * shadow/aux pass. */
+export function markParticle(object: Object3D): void {
+  object.layers.set(PARTICLE_LAYER)
 }
 
 export function markMainDetail(object: Object3D): void {

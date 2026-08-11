@@ -361,12 +361,18 @@ export function createRegolithMaterial(): MeshStandardNodeMaterial {
   // this the hard way ("first pass at 0.45 rendered the mountains brighter
   // than the sky") and the interior floor obeys the same physics. Fines sit
   // BELOW the paving stops so the civic floor reads as the finished surface.
-  const fines = vec3(0.242, 0.136, 0.078)
-  const gravel = vec3(0.158, 0.092, 0.06)
-  const driftColor = vec3(0.305, 0.198, 0.118)
-  const clastColor = vec3(0.138, 0.108, 0.09)
-  const compacted = vec3(0.148, 0.088, 0.058)
-  const dust = vec3(0.285, 0.182, 0.108)
+  // P-wave 5 hue trim (owner: "a bit more red than yellow"): green pulled
+  // ~12 % and blue ~10 % across the family, red nudged up — the pale drift
+  // and curb-dust fields carried R/G ≈ 1.55 and read tan-yellow over any
+  // area they dominated. R/G now sits at 1.8–2.0 everywhere so the floor
+  // keeps one rust identity from fines to dust. Luminance is held, so the
+  // exposure/LUT chain is untouched.
+  const fines = vec3(0.248, 0.124, 0.072)
+  const gravel = vec3(0.162, 0.084, 0.056)
+  const driftColor = vec3(0.312, 0.176, 0.104)
+  const clastColor = vec3(0.14, 0.1, 0.082)
+  const compacted = vec3(0.15, 0.08, 0.052)
+  const dust = vec3(0.292, 0.163, 0.095)
 
   let color = mix(fines, gravel, gravelZone) as unknown as V3
   color = mix(color, driftColor, drift.mul(0.62)) as unknown as V3

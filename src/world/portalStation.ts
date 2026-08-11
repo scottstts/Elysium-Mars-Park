@@ -5,14 +5,11 @@ import {
   PlaneGeometry,
   Quaternion,
   SRGBColorSpace,
-  Vector2,
   Vector3,
 } from 'three'
 import type { Material } from 'three'
 import { MeshStandardNodeMaterial } from 'three/webgpu'
 import { bench } from '../archkit/kit'
-import { SMOOTH, cleanMesh, loft, smoothShade, writeInto } from '../archkit/meshdata'
-import type { Vec3 as MVec3 } from '../archkit/meshdata'
 import { PartWriter } from '../archkit/writer'
 import { cabinGlass, kitMaterials, tracked } from '../materials/library'
 import type { PhysicsSystem } from '../physics/physicsWorld'
@@ -24,7 +21,6 @@ import {
   buildTrackData,
   carFloorY,
   emitPlatformEdge,
-  emitPlatformSlab,
   guidewayColliders,
   leaningRail,
   litterBin,
@@ -33,69 +29,63 @@ import {
   platformPoint,
   platformTangent,
   stationSign,
-  stationSteps,
   PLATFORM_EDGE_OFFSET,
 } from '../tram/track'
 import type { ArcPlatform } from '../tram/track'
-import { interiorHeight } from './interiorHeight'
 import { slabTop } from './paving'
 import { LOOP, PORTAL_STATION } from './parkPlan'
+import {
+  CANOPY_ARC,
+  CANOPY_BAYS,
+  CANOPY_HEIGHT,
+  DECK_ARC,
+  DECK_DEPTH,
+  RAMP,
+  RAMP_OPENING,
+  SCREEN_H,
+  SCREEN_V,
+  V_CANOPY_BACK,
+  V_COLUMN,
+  V_FRONT,
+  buildFlight,
+  buildRamp,
+  buildWindbreak,
+  emitDeckSlab,
+  flightApron,
+  glazedCanopy,
+  planEndFlight,
+  planGrandFlight,
+  planRamp,
+  rafterSoffit,
+  screenRuns,
+  yawOf,
+} from './stationArchitecture'
+import type { FlightPlan, RampPlan } from './stationArchitecture'
 
 /**
  * PORTAL STATION — the terminus the player arrives at, and the one piece of
  * architecture they stand on before they stand on anything else.
  *
  * DATUM STACK, all derived, nothing hardcoded:
- *   channel floor   slabTop(0,97) − 0.06   (the paving agent's guideway channel)
- *   cabin floor     channel floor + 0.62   (`track.carFloorY`)
- *   platform deck   cabin floor − 0.02     the 20 mm step down a real platform has
- *   terrace         slabTop(0,97)          the poured forecourt, 0.54 below the deck
- *   station foot    slabTop(0,87)          the 0.45 m apron on the Meridian walk
+ *   channel floor   slabTop(0,97) − recess    (the paving agent's channel)
+ *   cabin floor     channel floor + 0.62      (`track.carFloorY`)
+ *   platform deck   cabin floor − 0.02        the 20 mm step a platform has
+ *   terrace         slabTop                   the poured forecourt
+ *   Meridian walk   slabTop                   the 6 m kerbed spine south
  *
- * The deck is an ARC concentric with the Loop: a straight 20 m platform edge
- * held 1.4 m off a 97 m radius reaches r = 96.2 at its ends, which is inside
- * the 2.60 m car. Everything here — canopy, screens, signage, benches, stairs
- * — is placed in the platform's (arc offset u, inward v) frame so it cannot
- * drift off the curve.
+ * Circulation, enclosure and the reasons behind their geometry live in
+ * `stationArchitecture.ts`; this file is the SYSTEM — it assembles, dresses
+ * and collides them.
  *
- * Access, in the order a passenger meets it: step off the car onto the deck;
- * a grand flight descends off the back edge to the station-foot apron and the
- * Meridian walk (0.80 m of drop → 5 risers at 160 mm — the going is 300, and
- * the riser count is DERIVED against the code rise rather than assumed, since
- * every datum here comes out of the terrain); shorter flights at both ends
- * drop to the terrace; a 1:14 ramp behind the west end does it without steps.
- *
- * The deck is not level. `groundGrade` moves under the boulevard, the guideway
- * follows it, and the deck follows the guideway — 0.17 m over 18 m here, and
- * 0.48 m at Overlook. Every element is therefore placed at `platformDeckY(u)`,
- * never at one stored number.
+ * The deck is not level: `groundGrade` moves under the boulevard, the guideway
+ * follows it, and the deck follows the guideway. Every element is placed at
+ * `platformDeckY(u)`, never at one stored number.
  */
 
-/** Deck depth. `PORTAL_STATION.depth` (13 m) is the TERRACE footprint — the
- *  paving agent pours that as `station-terrace`; a 13 m deck centred on the
- *  alignment would straddle the track. */
-const DECK_DEPTH = 6.6
-/** 18 m of deck: the boulevard planters resume ±0.115 rad off the station
- *  bearing (`pavingPlan` arcRun), and the end flights must land inside that. */
-const DECK_ARC = 18
-const CANOPY_ARC = 17.2
-const CANOPY_HEIGHT = 3.4
-/** Canopy plan: rafters run from `V_FRONT` to `V_BACK`, columns at `V_COLUMN`. */
-const V_FRONT = 0.9
-const V_BACK = 6.0
-const V_COLUMN = 3.6
-const CANOPY_BAYS = 4
-/** Roof falls toward the track so the gutter is over the trackbed, not the seats. */
-const ROOF_FALL = 0.05
-/**
- * Access-ramp anchor (arc u). The back band has only ±11.2 m of clear arc
- * (boulevard planters resume beyond) and the grand flight owns the middle
- * 5 m — the old 13 m 1:14 run from u −7.6 ran STRAIGHT OVER the flight and
- * entombed the signposted Meridian route (traversal-audit find). At 0.38 g
- * a 1:8 grade is gentler than Earth's 1:14, so the ramp fits east of the
- * flight: u 2.7 → ~10, clear of both flight and planters.
- */
-const RAMP_U0 = 2.7
+/** Bearing where the station name board hangs, and how big it may be: the
+ *  soffit has to clear 2.30 m over the front walk line AND tuck under the
+ *  rafters (which is why `CANOPY_HEIGHT` went to 3.6). */
+const SIGN = { v: V_FRONT + 0.35, width: 4.6, height: 0.72, lift: 2.76 }
 
 export class PortalStationSystem implements GameSystem {
   readonly id = 'archkit'
@@ -125,16 +115,32 @@ export class PortalStationSystem implements GameSystem {
       deckY,
       baseY: slabTop(PORTAL_STATION.x, PORTAL_STATION.z),
     }
-    const half = DECK_ARC / 2
 
-    emitPlatformSlab(writer, spec)
+    emitDeckSlab(writer, spec)
     emitPlatformEdge(writer, spec)
     glazedCanopy(writer, spec)
-    windbreak(writer, spec)
+    buildWindbreak(writer, spec)
 
-    // ---- seating under the canopy, facing the arriving car.
+    // ---- circulation. Every leg is PLANNED first (so its numbers can be
+    // asserted) and only then built.
+    const grand = planGrandFlight(spec)
+    buildFlight(writer, grand)
+    flightApron(writer, grand, 1.6)
+
+    const ends: FlightPlan[] = []
+    for (const sign of [-1, 1]) {
+      const plan = planEndFlight(spec, sign)
+      ends.push(plan)
+      buildFlight(writer, plan)
+      flightApron(writer, plan, 2.2)
+    }
+
+    const ramp = planRamp(spec)
+    buildRamp(writer, spec, ramp)
+
+    // ---- dressing, all of it clear of the routes above.
     const benchSeats: Array<{ seat: Vector3; yaw: number }> = []
-    for (const u of [-6.6, -2.2, 2.2, 6.6]) {
+    for (const u of [-6.4, -4.0, 4.7]) {
       const outward = platformOutward(spec, u)
       benchSeats.push(
         bench(
@@ -144,68 +150,25 @@ export class PortalStationSystem implements GameSystem {
         ),
       )
     }
-    for (const u of [-8.2, 8.2]) {
-      litterBin(writer, platformPoint(spec, u, 5.4, platformDeckY(spec, u)))
+    // Bins hard against the screen (r 0.285 → they reach v 5.57–6.14), so the
+    // back walk line at v ≈ 4.9 stays clear along the whole deck.
+    for (const u of [-8.4, 3.4]) {
+      litterBin(writer, platformPoint(spec, u, 5.85, platformDeckY(spec, u)))
     }
     for (const u of [-5.0, 5.0]) leaningRail(writer, spec, u, 1.5)
 
-    // ---- signage + departure board.
-    stationSign(writer, this.group, spec, 0, V_FRONT + 0.25, 'PORTAL STATION', {
-      width: 5.2,
-      height: 0.82,
+    // ---- signage. The board hangs from the rafters; its soffit is solved
+    // against the 2.30 m headroom rule, not eyeballed.
+    const signY = platformDeckY(spec, 0) + SIGN.lift
+    const hang = rafterSoffit(spec, 0, SIGN.v) - 0.02 - (signY + SIGN.height / 2 + 0.07)
+    stationSign(writer, this.group, spec, 0, SIGN.v, 'PORTAL STATION', {
+      width: SIGN.width,
+      height: SIGN.height,
       lines: ['PORTAL STATION', 'GATE S · ELYSIUM COMMONS'],
-      y: platformDeckY(spec, 0) + 2.62,
-      hang: CANOPY_HEIGHT - 2.62 - 0.34,
+      y: signY,
+      hang: Math.max(0.12, hang),
     })
-    departureBoard(writer, this.group, spec, -7.4)
-
-    // ---- stairs. The grand flight descends off the back edge to the
-    // station-foot apron; end flights drop to the terrace.
-    const backR = spec.rEdge - DECK_DEPTH
-    // Riser counts are DERIVED against the code rise (165 grand / 155 end):
-    // the deck datum comes from the guideway and the aprons from the pour, so
-    // neither drop is ever a round number. 0.80 m here → 5 × 160 mm.
-    const grandSteps = Math.max(3, Math.min(8, Math.round((deckY - slabTop(0, backR - 2)) / 0.165)))
-    const footZ = backR - 0.08 - grandSteps * 0.3
-    const footY = slabTop(0, footZ)
-    stationSteps(writer, {
-      foot: new Vector3(0, footY, footZ),
-      climb: new Vector3(0, 0, 1),
-      across: new Vector3(1, 0, 0),
-      steps: grandSteps,
-      rise: (deckY - footY) / grandSteps,
-      run: 0.3,
-      width: 5.0,
-    })
-    const endRise: number[] = []
-    const endSteps: number[] = []
-    for (const sign of [-1, 1]) {
-      const u = sign * (half + 0.08)
-      const tangent = platformTangent(spec, u)
-      const head = platformDeckY(spec, u)
-      const probe = platformPoint(spec, u, DECK_DEPTH / 2, 0).addScaledVector(tangent, sign * 1.0)
-      const steps = Math.max(2, Math.min(5, Math.round((head - slabTop(probe.x, probe.z)) / 0.145)))
-      const foot = platformPoint(spec, u, DECK_DEPTH / 2, 0).addScaledVector(
-        tangent,
-        sign * steps * 0.32,
-      )
-      const y = slabTop(foot.x, foot.z)
-      endRise.push((head - y) / steps)
-      endSteps.push(steps)
-      stationSteps(writer, {
-        foot: foot.setY(y),
-        climb: tangent.clone().multiplyScalar(-sign),
-        across: platformOutward(spec, u),
-        steps,
-        rise: (head - y) / steps,
-        run: 0.32,
-        width: 3.2,
-      })
-    }
-    // ---- 1:8 ramp behind the east half (see RAMP_U0 for why not 1:14 west).
-    const rampFootY = slabTop(0, backR - 1)
-    const rampRun = Math.min(8.2, (platformDeckY(spec, RAMP_U0) - rampFootY) * 8)
-    accessRamp(writer, spec, RAMP_U0, rampRun, rampFootY)
+    departureBoard(writer, this.group, spec, -7.6)
 
     const materials: Record<string, Material> = {
       ...(kitMaterials() as unknown as Record<string, Material>),
@@ -214,15 +177,7 @@ export class PortalStationSystem implements GameSystem {
     this.group.add(writer.build(materials))
     ctx.scene.add(this.group)
 
-    this.buildColliders(spec, {
-      footZ,
-      footY,
-      grandSteps,
-      endRise,
-      endSteps,
-      rampRun,
-      rampFootY,
-    })
+    this.buildColliders(spec, grand, ends, ramp)
 
     if (this.player && this.interaction) {
       const player = this.player
@@ -241,37 +196,27 @@ export class PortalStationSystem implements GameSystem {
   }
 
   /**
-   * Colliders. The deck is three boxes along the arc (one cuboid over a 20 m
-   * arc stands 0.5 m proud of the slab at its ends), the flights are pitched
-   * ramps, and the elevated arrival girder gets the boxes `track.ts` derives
-   * from its own alignment — `buildGuideway` has no physics handle, so the
-   * owner of a world asks for them here.
+   * Colliders. They MIRROR the visual build: deck, three flights and their
+   * aprons, the ramp's landing and run, the screen RUNS (with the openings —
+   * the old five-box wall sealed both egresses), canopy columns, and the
+   * arrival girder's own boxes from `track.ts`.
+   *
+   * Frame note that cost a rebuild once: `box`'s yaw sends LOCAL +Z to the
+   * given direction, so anything marching along the arc has the TANGENT as
+   * local +Z and its depth as local +X.
    */
   private buildColliders(
     spec: ArcPlatform,
-    access: {
-      footZ: number
-      footY: number
-      grandSteps: number
-      endRise: number[]
-      endSteps: number[]
-      rampRun: number
-      rampFootY: number
-    },
+    grand: FlightPlan,
+    ends: FlightPlan[],
+    ramp: RampPlan,
   ): void {
-    const { footZ, footY, grandSteps, endRise, endSteps, rampRun, rampFootY } = access
     const world = this.physics.world
     const api = this.physics.api
     if (!world || !api) return
     const body = world.createRigidBody(api.RigidBodyDesc.fixed())
     const half = DECK_ARC / 2
-    const deckY = spec.deckY
-    const box = (
-      centre: Vector3,
-      halfExtents: Vector3,
-      pitch: number,
-      yaw: number,
-    ): void => {
+    const box = (centre: Vector3, halfExtents: Vector3, pitch: number, yaw: number): void => {
       const q = new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), yaw)
       q.multiply(new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), pitch))
       world.createCollider(
@@ -281,67 +226,112 @@ export class PortalStationSystem implements GameSystem {
         body,
       )
     }
-    for (let i = 0; i < 3; i++) {
-      const u = -half + (DECK_ARC * (i + 0.5)) / 3
-      // `box`'s yaw sends local +Z to the given direction. These three boxes'
-      // centres march along the ARC, so the arc half-chunk is local +Z and the
-      // depth is local +X — the frame is the tangent. Built on `outward` the
-      // deck came out 90 deg round (6 m deep, 13.2 m long instead of 6.6 x 18)
-      // and left a fall-through hole at each of the two seams.
-      const along = platformTangent(spec, u)
-      const top = platformDeckY(spec, u)
+    /**
+     * A collider whose TOP FACE is exactly the segment `a → b`, `halfAcross`
+     * wide, extended `back` metres beyond `a` so it laps its neighbour.
+     *
+     * The old form took a centre plus a half-height and a hand-tuned lift, and
+     * measured (rapier ray, in-engine) 171 mm ABOVE the deck at the grand
+     * flight's head — a step the player had to climb where the drawing says
+     * flush. Naming the surface removes the whole class.
+     */
+    const surface = (a: Vector3, b: Vector3, halfAcross: number, back = 0.12): void => {
+      const along = new Vector3(b.x - a.x, 0, b.z - a.z)
+      const run = along.length()
+      if (run < 1e-4) return
+      along.multiplyScalar(1 / run)
+      const rise = b.y - a.y
+      const start = a.clone().addScaledVector(along, -back).setY(a.y - back * (rise / run))
+      const mid = start.clone().lerp(b, 0.5)
+      const thick = 0.3
+      box(
+        mid.setY(mid.y - thick / 2),
+        new Vector3(halfAcross, thick / 2, Math.hypot(run + back, rise * (1 + back / run)) / 2),
+        -Math.atan2(rise, run),
+        yawOf(along),
+      )
+    }
+
+    // The deck: SIX pitched slabs, not three level ones. The deck falls 0.171 m
+    // over 9 m and level boxes tracked it to ±74 mm; pitched sixths hold it to
+    // ~5 mm (the residual is the arc's own curvature).
+    const DECK_BOXES = 6
+    for (let i = 0; i < DECK_BOXES; i++) {
+      const u0 = -half + (DECK_ARC * i) / DECK_BOXES
+      const u1 = -half + (DECK_ARC * (i + 1)) / DECK_BOXES
+      const uc = (u0 + u1) / 2
+      const y0 = platformDeckY(spec, u0)
+      const y1 = platformDeckY(spec, u1)
       const bottom = spec.baseY - 0.9
-      const centre = platformPoint(spec, u, DECK_DEPTH / 2, (top + bottom) / 2)
+      const thick = (y0 + y1) / 2 - bottom
+      const centre = platformPoint(spec, uc, DECK_DEPTH / 2, (y0 + y1) / 2 - thick / 2)
       box(
         centre,
-        new Vector3(DECK_DEPTH / 2, (top - bottom) / 2, DECK_ARC / 6),
-        0,
-        Math.atan2(along.x, along.z),
+        new Vector3(DECK_DEPTH / 2, thick / 2, DECK_ARC / DECK_BOXES / 2 + 0.06),
+        -Math.atan2(y1 - y0, DECK_ARC / DECK_BOXES),
+        yawOf(platformTangent(spec, uc)),
       )
     }
-    // Grand flight: one pitched slab.
-    const grandRun = grandSteps * 0.3
-    const grandRise = deckY - footY
-    box(
-      new Vector3(0, (deckY + footY) / 2 + 0.08, footZ + grandRun / 2),
-      new Vector3(2.5, 0.1, Math.hypot(grandRun, grandRise) / 2),
-      -Math.atan2(grandRise, grandRun),
-      0,
-    )
-    // End flights.
-    for (let i = 0; i < 2; i++) {
-      const sign = i === 0 ? -1 : 1
-      const steps = endSteps[i]
-      const u = sign * (half + 0.08 + (steps * 0.32) / 2)
-      // The flight runs off the END of the deck, i.e. along the tangent, and
-      // is 3.2 m wide across it — same frame as the access ramp below, and the
-      // only frame whose local +X (outward) is a legal pitch axis for it.
-      const along = platformTangent(spec, u)
-      const drop = steps * endRise[i]
-      const centre = platformPoint(spec, u, DECK_DEPTH / 2, platformDeckY(spec, u) - drop / 2)
-      box(
-        centre,
-        new Vector3(1.6, 0.1, (steps * 0.32) / 2 + 0.12),
-        -sign * Math.atan2(drop, steps * 0.32),
-        Math.atan2(along.x, along.z),
-      )
+
+    // Flights: the ramp surface runs bottom tread → deck, so both ends land
+    // exactly on the landing they meet.
+    for (const plan of [grand, ...ends]) {
+      const head = plan.foot
+        .clone()
+        .addScaledVector(plan.climb, plan.steps * plan.run)
+        .setY(plan.foot.y + plan.steps * plan.rise + 0.015)
+      surface(plan.foot, head, plan.width / 2, 0.14)
     }
-    // Access ramp.
-    const rampHead = platformDeckY(spec, RAMP_U0)
-    const rampMid = platformPoint(
-      spec,
-      RAMP_U0 + rampRun / 2,
-      DECK_DEPTH + 0.95,
-      (rampHead + rampFootY) / 2 + 0.09,
-    )
-    const rampTangent = platformTangent(spec, RAMP_U0 + rampRun / 2)
-    box(
-      rampMid,
-      new Vector3(0.95, 0.1, rampRun / 2),
-      Math.atan2(rampHead - rampFootY, rampRun),
-      Math.atan2(rampTangent.x, rampTangent.z),
-    )
-    // Canopy columns and windbreak posts.
+    for (const [plan, depth] of [
+      [grand, 1.6],
+      [ends[0], 2.2],
+      [ends[1], 2.2],
+    ] as Array<[FlightPlan, number]>) {
+      const outward = plan.climb.clone().negate()
+      const far = plan.foot.clone().addScaledVector(outward, depth * 0.75)
+      surface(plan.foot, far.setY(this.groundAt(far)), plan.width / 2 + 0.12, 0.05)
+    }
+
+    // Ramp: the head landing is SPLAYED, so it takes two boxes — one square to
+    // the deck's arc, one square to the run — and they overlap in the middle.
+    {
+      const uc = (RAMP_OPENING.u0 + RAMP_OPENING.u1) / 2
+      const arc = RAMP_OPENING.u1 - RAMP_OPENING.u0
+      const top = platformDeckY(spec, uc)
+      const centre = platformPoint(spec, uc, DECK_DEPTH + 0.6, top - 0.4)
+      box(centre, new Vector3(0.7, 0.4, arc / 2), 0, yawOf(platformTangent(spec, uc)))
+      const b = ramp.head.clone()
+      const a = b.clone().addScaledVector(ramp.dir, -1.5)
+      surface(a, b, RAMP.half, 0.1)
+    }
+    {
+      surface(ramp.head, ramp.foot, RAMP.half, 0.05)
+      const far = ramp.foot.clone().addScaledVector(ramp.dir, 1.0)
+      surface(ramp.foot, far.setY(this.groundAt(far)), RAMP.half + 0.1, 0.05)
+    }
+
+    // The screen: one collider chain per RUN, plus its two returns. Nothing
+    // spans an opening — that was defect 1.
+    for (const run of screenRuns()) {
+      const span = run.u1 - run.u0
+      const pieces = Math.max(1, Math.round(span / 3.2))
+      for (let i = 0; i < pieces; i++) {
+        const u = run.u0 + (span * (i + 0.5)) / pieces
+        const p = platformPoint(spec, u, SCREEN_V, platformDeckY(spec, u) + SCREEN_H / 2)
+        box(
+          p,
+          new Vector3(0.08, SCREEN_H / 2, span / pieces / 2),
+          0,
+          yawOf(platformTangent(spec, u)),
+        )
+      }
+      for (const u of [run.u0, run.u1]) {
+        const vMid = SCREEN_V - 0.375
+        const p = platformPoint(spec, u, vMid, platformDeckY(spec, u) + SCREEN_H / 2)
+        box(p, new Vector3(0.08, SCREEN_H / 2, 0.375), 0, yawOf(platformOutward(spec, u)))
+      }
+    }
+
     for (let i = 0; i <= CANOPY_BAYS; i++) {
       const u = -CANOPY_ARC / 2 + (i * CANOPY_ARC) / CANOPY_BAYS
       const p = platformPoint(spec, u, V_COLUMN, platformDeckY(spec, u) + CANOPY_HEIGHT / 2)
@@ -350,380 +340,18 @@ export class PortalStationSystem implements GameSystem {
         body,
       )
     }
-    for (let i = 0; i < 5; i++) {
-      const u = -7.2 + i * 3.6
-      const p = platformPoint(spec, u, V_BACK + 0.25, platformDeckY(spec, u) + 1.1)
-      // The panels sit 3.6 m apart along the arc and must MEET: 3.6 m of
-      // local +Z on the tangent, 0.16 m of local +X across it. On `outward`
-      // each one became a 3.6 m fin pointing into the platform with a 3.4 m
-      // gap beside it — five phantom walls across the concourse, and the
-      // windbreak itself walk-through.
-      const along = platformTangent(spec, u)
-      box(p, new Vector3(0.08, 1.1, 1.8), 0, Math.atan2(along.x, along.z))
-    }
-    // The arrival viaduct — the only guideway a walker can collide with.
+
     for (const collider of guidewayColliders(buildTrackData())) {
       box(collider.center, collider.half, 0, collider.yaw)
     }
   }
 
+  private groundAt(p: Vector3): number {
+    return slabTop(p.x, p.z)
+  }
+
   dispose(ctx: GameContext): void {
     ctx.scene.remove(this.group)
-  }
-}
-
-// ------------------------------------------------------------------ canopy --
-
-/** Roof soffit datum. Per-u, because the deck itself carries the guideway's
- *  longitudinal fall — a level canopy would open a wedge at one end. */
-function roofY(spec: ArcPlatform, u: number, v: number): number {
-  return platformDeckY(spec, u) + CANOPY_HEIGHT + (v - V_FRONT) * ROOF_FALL
-}
-
-/**
- * The glazed windbreak canopy: five tapered columns, tapered rafters, four
- * purlins, a real mullion/transom grid, and glass captured under pressure
- * caps. Twelve panes; the frame is authored, not implied by a texture.
- */
-function glazedCanopy(writer: PartWriter, spec: ArcPlatform): void {
-  const uAt = (i: number): number => -CANOPY_ARC / 2 + (i * CANOPY_ARC) / CANOPY_BAYS
-  const purlinV = [V_FRONT + 0.16, V_FRONT + 1.86, V_FRONT + 3.4, V_BACK - 0.16]
-
-  // The rafter soffit over the column is `roofY(V_COLUMN) − 0.4`; the column
-  // stops 15 mm inside it, and its foot is buried deeper than the base casting
-  // so no two faces in the stack ever share a plane.
-  const columnH = CANOPY_HEIGHT + (V_COLUMN - V_FRONT) * ROOF_FALL - 0.4 + 0.085
-  const columnProfile: Vector2[] = [
-    new Vector2(0.185, 0),
-    new Vector2(0.185, 0.11),
-    new Vector2(0.128, 0.19),
-    new Vector2(0.104, columnH - 0.62),
-    new Vector2(0.15, columnH - 0.18),
-    new Vector2(0.15, columnH),
-    new Vector2(0, columnH),
-  ]
-
-  for (let i = 0; i <= CANOPY_BAYS; i++) {
-    const u = uAt(i)
-    const tangent = platformTangent(spec, u)
-    const yaw = Math.atan2(tangent.x, tangent.z)
-    writer.lathe({
-      center: platformPoint(spec, u, V_COLUMN, platformDeckY(spec, u) - 0.07),
-      profile: columnProfile,
-      slot: 'steel',
-      segments: 20,
-      capStart: true,
-      smoothAngle: SMOOTH.turned,
-    })
-    writer.box({
-      center: platformPoint(spec, u, V_COLUMN, platformDeckY(spec, u) + 0.03),
-      size: new Vector3(0.52, 0.14, 0.52),
-      rotationY: yaw,
-      slot: 'steelEdge',
-      chamfer: 0.014,
-    })
-    // Rafter: deepest over the column, tapering to both tips.
-    const silhouette: Array<[number, number]> = [
-      [V_FRONT, roofY(spec, u, V_FRONT) - 0.02],
-      [V_BACK, roofY(spec, u, V_BACK) - 0.02],
-      [V_BACK, roofY(spec, u, V_BACK) - 0.15],
-      [V_COLUMN, roofY(spec, u, V_COLUMN) - 0.4],
-      [V_FRONT, roofY(spec, u, V_FRONT) - 0.15],
-    ]
-    const ring = (offset: number): MVec3[] =>
-      silhouette.map(([v, y]) => {
-        const p = platformPoint(spec, u + offset, v, y)
-        return [p.x, p.y, p.z] as MVec3
-      })
-    const md = loft([ring(-0.06), ring(0.06)], { closeV: true, capStart: true, capEnd: true })
-    md.frame = 'y-up'
-    smoothShade(md, SMOOTH.moulded)
-    cleanMesh(md)
-    writeInto(writer, 'steel', md, { uvScale: 0.7 })
-  }
-
-  // Purlins: slabs on the roof plane, not boxes. The plane rises 0.26 m from
-  // eave to back, so a level box would be buried at one end and hanging at the
-  // other. Each stops at the rafter faces.
-  for (let bay = 0; bay < CANOPY_BAYS; bay++) {
-    const u0 = uAt(bay) + 0.06
-    const u1 = uAt(bay + 1) - 0.06
-    for (const v of purlinV) {
-      const top = (u: number): number => roofY(spec, u, v) - 0.026
-      writer.slab(
-        [
-          platformPoint(spec, u0, v - 0.045, top(u0)),
-          platformPoint(spec, u1, v - 0.045, top(u1)),
-          platformPoint(spec, u1, v + 0.045, top(u1)),
-          platformPoint(spec, u0, v + 0.045, top(u0)),
-        ],
-        0.2,
-        'steel',
-        0.6,
-      )
-    }
-  }
-
-  // Glazing: pane, then the pressure caps that hold it. The pane tucks 30 mm
-  // under each cap, so the joint is captured rather than butted.
-  for (let bay = 0; bay < CANOPY_BAYS; bay++) {
-    for (let row = 0; row < purlinV.length - 1; row++) {
-      const u0 = uAt(bay) + 0.075
-      const u1 = uAt(bay + 1) - 0.075
-      const vA = purlinV[row] + 0.055
-      const vB = purlinV[row + 1] - 0.055
-      writer.slab(
-        [
-          platformPoint(spec, u0, vA, roofY(spec, u0, vA) - 0.02),
-          platformPoint(spec, u1, vA, roofY(spec, u1, vA) - 0.02),
-          platformPoint(spec, u1, vB, roofY(spec, u1, vB) - 0.02),
-          platformPoint(spec, u0, vB, roofY(spec, u0, vB) - 0.02),
-        ],
-        0.014,
-        'stationGlass',
-      )
-    }
-  }
-  // Pressure caps, also slabs: rafter lines run the full depth, purlin lines
-  // stop 5 mm short of them so the two families never cross.
-  for (let i = 0; i <= CANOPY_BAYS; i++) {
-    const u = uAt(i)
-    writer.slab(
-      [
-        platformPoint(spec, u - 0.055, V_FRONT, roofY(spec, u, V_FRONT) + 0.028),
-        platformPoint(spec, u + 0.055, V_FRONT, roofY(spec, u, V_FRONT) + 0.028),
-        platformPoint(spec, u + 0.055, V_BACK, roofY(spec, u, V_BACK) + 0.028),
-        platformPoint(spec, u - 0.055, V_BACK, roofY(spec, u, V_BACK) + 0.028),
-      ],
-      0.06,
-      'aluminum',
-      0.6,
-    )
-  }
-  for (let bay = 0; bay < CANOPY_BAYS; bay++) {
-    const u0 = uAt(bay) + 0.065
-    const u1 = uAt(bay + 1) - 0.065
-    for (const v of purlinV) {
-      const top = (u: number): number => roofY(spec, u, v) + 0.028
-      writer.slab(
-        [
-          platformPoint(spec, u0, v - 0.055, top(u0)),
-          platformPoint(spec, u1, v - 0.055, top(u1)),
-          platformPoint(spec, u1, v + 0.055, top(u1)),
-          platformPoint(spec, u0, v + 0.055, top(u0)),
-        ],
-        0.06,
-        'aluminum',
-        0.6,
-      )
-    }
-  }
-
-  // Gutter: ONE swept member along the arc. Per-bay boxes cannot follow a
-  // falling deck, and their abutting ends are a coplanar pair waiting to happen.
-  const gutterPath: Vector3[] = []
-  for (let i = 0; i <= 12; i++) {
-    const u = -CANOPY_ARC / 2 - 0.24 + ((CANOPY_ARC + 0.48) * i) / 12
-    gutterPath.push(platformPoint(spec, u, V_FRONT - 0.1, roofY(spec, u, V_FRONT) - 0.12))
-  }
-  writer.tube({
-    path: gutterPath,
-    radius: 0.1,
-    slot: 'dark',
-    profile: [
-      new Vector2(-0.095, -0.1),
-      new Vector2(0.095, -0.1),
-      new Vector2(0.095, 0.06),
-      new Vector2(0.06, 0.1),
-      new Vector2(-0.06, 0.1),
-      new Vector2(-0.095, 0.06),
-    ],
-    smoothAngle: 34,
-  })
-  for (let bay = 0; bay < CANOPY_BAYS; bay++) {
-    const uMid = (uAt(bay) + uAt(bay + 1)) / 2
-    const span = uAt(bay + 1) - uAt(bay)
-    const tangent = platformTangent(spec, uMid)
-    const yaw = Math.atan2(tangent.x, tangent.z)
-    for (const offset of [-0.25, 0.25]) {
-      const u = uMid + offset * span
-      const v = (purlinV[1] + purlinV[2]) / 2
-      writer.box({
-        center: platformPoint(spec, u, v, roofY(spec, u, v) - 0.29),
-        size: new Vector3(0.24, 0.1, 0.24),
-        rotationY: yaw,
-        slot: 'dark',
-        chamfer: 0.014,
-      })
-      writer.box({
-        center: platformPoint(spec, u, v, roofY(spec, u, v) - 0.35),
-        size: new Vector3(0.11, 0.022, 0.11),
-        rotationY: yaw,
-        slot: 'utilityLight',
-      })
-    }
-  }
-}
-
-/**
- * The windbreak screen along the back of the deck: posts, a capping rail, a
- * kick rail and glass in real frames. Left open at the west end, where the
- * access ramp lands.
- */
-function windbreak(writer: PartWriter, spec: ArcPlatform): void {
-  const v = V_BACK + 0.25
-  const height = 2.1
-  const posts = 5
-  const pitch = 3.6
-  for (let i = 0; i < posts; i++) {
-    const u = -((posts - 1) / 2) * pitch + i * pitch
-    const deckY = platformDeckY(spec, u)
-    const p = platformPoint(spec, u, v, deckY)
-    const tangent = platformTangent(spec, u)
-    const yaw = Math.atan2(tangent.x, tangent.z)
-    writer.box({
-      center: p.clone().setY(deckY + height / 2 - 0.015),
-      size: new Vector3(0.13, height + 0.07, 0.09),
-      rotationY: yaw,
-      slot: 'steel',
-      chamfer: 0.01,
-    })
-    writer.box({
-      center: p.clone().setY(deckY + 0.02),
-      size: new Vector3(0.3, 0.08, 0.24),
-      rotationY: yaw,
-      slot: 'steelEdge',
-      chamfer: 0.01,
-    })
-    if (i === posts - 1) continue
-    const uMid = u + pitch / 2
-    const deckMid = platformDeckY(spec, uMid)
-    const tangentMid = platformTangent(spec, uMid)
-    const yawMid = Math.atan2(tangentMid.x, tangentMid.z)
-    // Glass, captured between the rails with a 20 mm bite top and bottom.
-    writer.box({
-      center: platformPoint(spec, uMid, v, deckMid + (0.24 + height - 0.09) / 2),
-      size: new Vector3(0.014, height - 0.35, pitch - 0.34),
-      rotationY: yawMid,
-      slot: 'stationGlass',
-    })
-  }
-  // Head and kick rails: ONE swept section each, through the posts. Per-bay
-  // boxes on a falling deck butt at every post, which is a coplanar pair the
-  // moment two neighbours disagree about the deck height by a millimetre.
-  const span = (posts - 1) * pitch
-  for (const [lift, halfHeight] of [
-    [height - 0.06, 0.06],
-    [0.22, 0.05],
-  ] as const) {
-    const path: Vector3[] = []
-    for (let i = 0; i <= 16; i++) {
-      const u = -span / 2 - 0.12 + ((span + 0.24) * i) / 16
-      path.push(platformPoint(spec, u, v, platformDeckY(spec, u) + lift))
-    }
-    writer.tube({
-      path,
-      radius: halfHeight,
-      slot: 'steel',
-      profile: [
-        new Vector2(-0.045, -halfHeight),
-        new Vector2(0.045, -halfHeight),
-        new Vector2(0.045, halfHeight),
-        new Vector2(-0.045, halfHeight),
-      ],
-      smoothAngle: 34,
-    })
-  }
-}
-
-/** 1:14 access ramp behind the deck, with kerbs and a handrail both sides. */
-function accessRamp(
-  writer: PartWriter,
-  spec: ArcPlatform,
-  u0: number,
-  rampRun: number,
-  footY: number,
-): void {
-  const vNear = spec.depth + 0.04
-  const vFar = spec.depth + 1.94
-  const segments = 5
-  const headY = platformDeckY(spec, u0)
-  const yAt = (t: number): number => headY + 0.006 - (headY - footY - 0.02) * t
-  // A RETAINED solid, not a floating deck: the ground behind the platform
-  // falls away toward the station-foot apron, so each segment runs down to
-  // 0.3 m below its own grade and reads as an embankment wall.
-  for (let i = 0; i < segments; i++) {
-    const ua = u0 + (rampRun * i) / segments
-    const ub = u0 + (rampRun * (i + 1)) / segments
-    const corners: [Vector3, Vector3, Vector3, Vector3] = [
-      platformPoint(spec, ua, vNear, yAt(i / segments)),
-      platformPoint(spec, ub, vNear, yAt((i + 1) / segments)),
-      platformPoint(spec, ub, vFar, yAt((i + 1) / segments)),
-      platformPoint(spec, ua, vFar, yAt(i / segments)),
-    ]
-    let ground = Infinity
-    for (const corner of corners) ground = Math.min(ground, interiorHeight(corner.x, corner.z))
-    const top = Math.min(yAt(i / segments), yAt((i + 1) / segments))
-    writer.slab(corners, Math.max(0.24, top - ground + 0.3), 'cast', 0.5)
-  }
-  // Rail geometry, and why each number is what it is:
-  //  - the RETURN. A handrail may not stop in a raw cut, so the run turns down
-  //    90 mm inside each end (`archkit/kit.ts` handrail's own detail). It used
-  //    to be a flat capped disc hanging in air at the top AND the bottom.
-  //  - the POSTS. `dark` stanchions climbing to 0.95 ended ON the rail's axis:
-  //    26 mm of one material inside another. They stop 4 mm under its soffit
-  //    now — the shadow gap the guardrail shoe uses for the same joint.
-  //  - the END posts move in by RETURN_IN so they carry rail rather than stand
-  //    past its tip, and the pitch comes off the run (1.6 m, as the kit's).
-  const RETURN_IN = 0.11
-  const RAIL_H = 0.95
-  const posts = Math.max(4, Math.round(rampRun / 1.6))
-  for (const v of [vNear + 0.06, vFar - 0.06]) {
-    const at = (t: number, lift: number): Vector3 =>
-      platformPoint(spec, u0 + rampRun * t, v, yAt(t) + lift)
-    const kerb: Vector3[] = []
-    const rail: Vector3[] = [at(0.02 / rampRun, RAIL_H - 0.09), at(RETURN_IN / rampRun, RAIL_H)]
-    for (let i = 0; i <= segments * 2; i++) {
-      const t = i / (segments * 2)
-      // The kerb's two end stations sit BELOW the ramp top, so the run rises
-      // out of the pour it is bedded in instead of butting a capped disc on
-      // the open slab — the tram rails' feather, at kerb scale.
-      kerb.push(at(t, i === 0 || i === segments * 2 ? -0.06 : 0.03))
-      if (t > (RETURN_IN + 0.05) / rampRun && t < 1 - (RETURN_IN + 0.05) / rampRun) {
-        rail.push(at(t, RAIL_H))
-      }
-    }
-    rail.push(at(1 - RETURN_IN / rampRun, RAIL_H), at(1 - 0.02 / rampRun, RAIL_H - 0.09))
-    writer.tube({
-      path: kerb,
-      radius: 0.055,
-      slot: 'dark',
-      radialSegments: 8,
-      capStart: true,
-      capEnd: true,
-    })
-    writer.tube({
-      path: rail,
-      radius: 0.026,
-      slot: 'orangeTop',
-      radialSegments: 10,
-      capStart: true,
-      capEnd: true,
-    })
-    for (let i = 0; i <= posts; i++) {
-      const t =
-        (RETURN_IN + ((rampRun - 2 * RETURN_IN) * i) / posts) / rampRun
-      const foot = at(t, 0.02)
-      writer.tube({
-        // 0.02 foot + 0.90 = the rail's soffit (0.95 − 0.026) less a 4 mm gap.
-        path: [foot.clone(), foot.clone().setY(foot.y + 0.9)],
-        radius: 0.021,
-        slot: 'dark',
-        radialSegments: 8,
-        capStart: true,
-        capEnd: true,
-      })
-    }
   }
 }
 
@@ -737,7 +365,7 @@ function departureBoard(
   spec: ArcPlatform,
   u: number,
 ): void {
-  const v = V_BACK - 0.35
+  const v = V_CANOPY_BACK - 0.45
   const deck = platformDeckY(spec, u)
   const y = deck + 1.72
   const outward = platformOutward(spec, u)
@@ -748,8 +376,7 @@ function departureBoard(
   const anchor = platformPoint(spec, u, v, y)
   // Local +Z is `outward` under `placeYaw`, so local X is the board's WIDTH
   // and local Z its depth. Swapped, the cabinet was 0.16 m wide and 2.46 m
-  // deep — a fin out of the middle of the board, hiding a third of the type
-  // from anyone standing in front of it.
+  // deep — a fin out of the middle of the board.
   writer.box({
     center: anchor,
     size: new Vector3(width + 0.16, height + 0.16, 0.16),
@@ -767,10 +394,7 @@ function departureBoard(
   for (const sign of [-1, 1]) {
     const post = anchor.clone().addScaledVector(tangent, sign * (width / 2 + 0.02))
     writer.tube({
-      path: [
-        post.clone().setY(deck - 0.03),
-        post.clone().setY(y + height / 2 + 0.06),
-      ],
+      path: [post.clone().setY(deck - 0.03), post.clone().setY(y + height / 2 + 0.06)],
       radius: 0.042,
       slot: 'steel',
       radialSegments: 12,
@@ -806,14 +430,11 @@ const DEPARTURES: Array<[string, string]> = [
 /**
  * The board draws its OWN canvas rather than going through `signageMaterial`.
  *
- * A departure board is a TABLE: destinations flush left, times flush right,
- * on a shared baseline grid. `signageMaterial` centres every line, so the only
+ * A departure board is a TABLE: destinations flush left, times flush right, on
+ * a shared baseline grid. `signageMaterial` centres every line, so the only
  * way to fake columns through it was to pad each row with runs of spaces —
- * which were counted for a monospace font. In the shipping face the time
- * column landed 6.3 / 8.1 / 6.3 em from the row start, i.e. ragged by ~8 cm on
- * a 2.2 m board, and the centring made the destination column ragged too.
- * Owning the layout also lets the header sit on its own accent rule instead of
- * being a fourth body line, so `OVERLOOK WEST` can be spelled out.
+ * counted for a monospace font. Owning the layout also lets the header sit on
+ * its own accent rule instead of being a fourth body line.
  *
  * Every measurement below is a fraction of the canvas, so the board reads the
  * same whatever `widthPx` or plate aspect it is given.
@@ -864,8 +485,7 @@ function departureFace(plateW: number, plateH: number): MeshStandardNodeMaterial
     const ruleY = Math.round(headerY + h * 0.085)
     g.fillRect(pad, ruleY, w - 2 * pad, Math.max(3, Math.round(h * 0.018)))
 
-    // Body rows on a shared grid: ONE size for both columns of every row, so
-    // the destinations and the times each line up as a column.
+    // Body rows on a shared grid: ONE size for both columns of every row.
     const first = ruleY + h * 0.16
     const pitch = (h - pad - first) / Math.max(1, DEPARTURES.length - 0.35)
     const timeW = w * 0.26

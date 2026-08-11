@@ -99,6 +99,22 @@ export const GUIDEWAY_CHANNEL = {
   lip: 0.09,
 } as const
 
+/** Half-width of the turnout street band (each track's clear way plus the
+ *  edging strip — the reference image's single clean corridor). */
+export const THROAT_HALF = 2.85
+
+/** The turnout street's plan: ring bearings it spans and the two ribbon
+ *  spines (`paving.emitThroatStreet` pours it; the regions carry the same
+ *  lines for trimming and the walkable field). Null only if the arrival
+ *  spine never reaches the boulevard band (a plan change). */
+export interface ThroatSpec {
+  phiLo: number
+  phiHi: number
+  spurLine: Vector2[]
+  half: number
+}
+export let THROAT: ThroatSpec | null = null
+
 export type Region =
   | { kind: 'disc'; id: string; priority: number; cx: number; cz: number; radius: number; curb: boolean }
   | {
@@ -293,16 +309,21 @@ function buildRegions(): Region[] {
     })
   }
 
-  // The arrival spur's recessed corridor across the boulevard band — the
-  // turnout's counterpart of the guideway channel (same recess, same width,
-  // paving.ts emits its floor+lips; the track agent lays the trackbed and
-  // rails into it). Clipped to the EXISTING paved cover: the corridor region
-  // feeds the walkable-datum field like any region, so a run past the band
-  // edge would grade the regolith trench up to slab datum.
+  // THE TURNOUT STREET (P-wave 5 rebuild, owner reference image). The old
+  // treatment stacked a recessed channel, corridor cuttings, chamfered lips,
+  // verge skirts and slab margins where the spur merges the ring — every
+  // system brought its own edge lines to one spot and the throat read as a
+  // pile of intersecting bevels. Clean sheet: ONE street surface pours
+  // through the whole throat at the trackbed's level; every tile field trims
+  // to the street's smooth ribbon boundary; a single slim edging strip
+  // sweeps that boundary; the track panels sit proud on the street with
+  // their rails. Two ribbons make the plan: one along the ring arc through
+  // the zone, one along the spur across the boulevard band — tangential,
+  // so their union boundary is smooth.
   {
     // The FULL spine, not a tail subset: a Catmull-Rom through a subset loses
     // the upstream control points' pull on the end tangents and bows metres
-    // off the true alignment — the corridors must sit exactly under the
+    // off the true alignment — the street must sit exactly under the
     // trackbed the track agent sweeps from these same stations.
     const spine = ARRIVAL_SPINE.map(([x, z]) => new Vector2(x, z))
     const sampled = ribbonLine(spine, 0, 0)
@@ -313,34 +334,72 @@ function buildRegions(): Region[] {
           region.priority < 98 &&
           regionDistance(region, p.x, p.y) < -0.05,
       ) || Math.abs(p.length() - GUIDEWAY_CHANNEL.radius) < GUIDEWAY_CHANNEL.width / 2
-    // The boulevard corridor is the CONTIGUOUS covered run that ends at the
-    // channel — marched backward from the loop end. A forward findIndex would
-    // latch onto the rim-promenade crossing 10 m upstream and pave the
-    // regolith gap between the two bands.
+    // The contiguous covered run that ends at the channel — marched backward
+    // from the loop end (a forward findIndex would latch onto the
+    // rim-promenade crossing 10 m upstream).
     let first = -1
     for (let i = sampled.length - 1; i >= 0; i--) {
       if (covered(sampled[i])) first = i
       else if (first >= 0) break
     }
     if (first >= 0) {
-      const line = sampled.slice(first)
-      if (first > 0 && line.length >= 2) {
-        // One overhang station past the band edge, so the corridor mouth
-        // meets the regolith trench instead of leaving a buried strip.
-        const dir = sampled[first].clone().sub(sampled[first + 1]).normalize()
-        line.unshift(sampled[first].clone().addScaledVector(dir, 0.35))
+      const R = GUIDEWAY_CHANNEL.radius
+      // Spur leg: band entry down to the merge (the ring leg takes over
+      // inside R + 0.5). One overhang station past the band edge so the
+      // street mouth meets the regolith trench instead of a buried strip.
+      const spurLine: Vector2[] = []
+      let phiHi = Math.PI / 2
+      for (let i = first; i < sampled.length; i++) {
+        const p = sampled[i]
+        const rho = p.length()
+        if (rho < R + 0.5) break
+        spurLine.push(p.clone())
+        if (rho < R + 2.2) phiHi = Math.max(phiHi, Math.atan2(p.y, p.x))
       }
-      if (line.length >= 2) {
+      if (first > 0 && spurLine.length >= 2) {
+        const dir = sampled[first].clone().sub(sampled[first + 1]).normalize()
+        spurLine.unshift(sampled[first].clone().addScaledVector(dir, 0.35))
+      }
+      phiHi += 2.5 / R
+      // The street runs west at least to where the platform and terrace
+      // flank the ring tightly (the owner's reference frames the whole
+      // throat as one treatment) — the hand-off to the plain channel then
+      // happens hidden between paved fields, never mid-view.
+      phiHi = Math.max(phiHi, Math.PI / 2 + 0.115)
+      const phiLo = Math.PI / 2 - 3.5 / R
+      THROAT = { phiLo, phiHi, spurLine, half: THROAT_HALF }
+      // The REGION's arc line stops one cap radius short of each end: a
+      // ribbon region ends in a round cap, and a cap at the pour's end would
+      // bite the neighbouring tiles beyond the poured surface. Shortened,
+      // the caps land inside the pour; the pour's square corners extend
+      // PAST the trim line and tuck 50+ mm under the untrimmed tiles —
+      // deliberate hidden bury, no hole, nothing coplanar.
+      const capIn = (THROAT_HALF - 0.02) / R
+      const aLo = phiLo + capIn
+      const aHi = phiHi - capIn
+      const arcLine: Vector2[] = []
+      const arcSteps = Math.max(4, Math.round(((aHi - aLo) * R) / 1.1))
+      for (let i = 0; i <= arcSteps; i++) {
+        const a = aHi - ((aHi - aLo) * i) / arcSteps
+        arcLine.push(new Vector2(Math.cos(a) * R, Math.sin(a) * R))
+      }
+      if (arcLine.length >= 2) {
         list.push({
           kind: 'ribbon',
-          id: 'spur-corridor',
+          id: 'turnout-street',
           priority: 98,
-          line,
-          // Width to the OUTSIDE of the chamfered lip: paving trims to the
-          // lip's arris, the cut's walls stand at width/2 and the 90 mm
-          // chamfer bridges between them (same move as the channel's
-          // footprint reaching past its plan by `lip`).
-          halfWidth: GUIDEWAY_CHANNEL.width / 2 + GUIDEWAY_CHANNEL.lip,
+          line: arcLine,
+          halfWidth: THROAT_HALF,
+          curb: false,
+        })
+      }
+      if (spurLine.length >= 2) {
+        list.push({
+          kind: 'ribbon',
+          id: 'turnout-street-spur',
+          priority: 98,
+          line: spurLine,
+          halfWidth: THROAT_HALF,
           curb: false,
         })
       }
@@ -672,7 +731,7 @@ export function pavedTraffic(x: number, z: number): number {
     const region = PAVED_REGIONS[segments[i]]
     if (region.kind !== 'ribbon') continue
     // The spur corridors are guideway, not walk — no desire-line wear.
-    if (region.id.startsWith('spur-corridor')) continue
+    if (region.id.startsWith('spur-corridor') || region.id.startsWith('turnout-street')) continue
     const s = segments[i + 1]
     const d = Math.sqrt(segmentDistanceSq(region.line[s], region.line[s + 1], x, z))
     const reach = region.halfWidth + 1.2
@@ -733,7 +792,7 @@ function buildPlanters(): PlanterSpec[] {
     rInner: number,
     rOuter: number,
     gaps: number[],
-    gapHalf: number,
+    gapHalf: (angle: number) => number,
     minSpan: number,
     maxSpan: number,
   ): void => {
@@ -741,8 +800,9 @@ function buildPlanters(): PlanterSpec[] {
     if (sorted.length === 0) sorted.push(0)
     let index = 0
     for (let i = 0; i < sorted.length; i++) {
-      const from = sorted[i] + gapHalf
-      const to = (i + 1 < sorted.length ? sorted[i + 1] : sorted[0] + TAU) - gapHalf
+      const from = sorted[i] + gapHalf(sorted[i])
+      const next = i + 1 < sorted.length ? sorted[i + 1] : sorted[0] + TAU
+      const to = next - gapHalf(next)
       const span = to - from
       if (span < minSpan) continue
       const pieces = Math.max(1, Math.ceil(span / maxSpan))
@@ -773,15 +833,31 @@ function buildPlanters(): PlanterSpec[] {
     FIRST_TREE.plazaRadius - 5.6,
     FIRST_TREE.plazaRadius - 1.5,
     plazaGaps,
-    0.19,
+    () => 0.19,
     0.28,
     0.62,
   )
 
   // Boulevard inner edge — a green kerb between the tram street and the park.
+  //
+  // A STATION gap is wider than a path gap: the end flights land on the
+  // terrace and their aprons run on outward along the arc, and 0.115 rad put
+  // the first bed ~1 m past the bottom nosing — square in the walk-off line
+  // (the owner's third defect). 0.148 rad clears the flight foot, its 2.2 m
+  // apron and the 1.5 m egress envelope beyond it, at every station.
   const boulevardGaps = entryAngles(0, 0, BOULEVARD.innerRadius, 3.4)
   boulevardGaps.push(Math.PI / 2) // station terrace
   for (const station of LOOP.stations) boulevardGaps.push(station.angle)
+  const stationBearings = [Math.PI / 2, ...LOOP.stations.map((station) => station.angle)]
+  const boulevardGapHalf = (angle: number): number => {
+    for (const bearing of stationBearings) {
+      let delta = angle - bearing
+      while (delta > Math.PI) delta -= TAU
+      while (delta < -Math.PI) delta += TAU
+      if (Math.abs(delta) < 0.04) return 0.148
+    }
+    return 0.115
+  }
   arcRun(
     'boulevard',
     0,
@@ -789,7 +865,7 @@ function buildPlanters(): PlanterSpec[] {
     BOULEVARD.innerRadius + 1.1,
     BOULEVARD.innerRadius + 3.9,
     boulevardGaps,
-    0.115,
+    boulevardGapHalf,
     0.075,
     0.16,
   )
@@ -824,9 +900,10 @@ export function insideGuidewayChannel(x: number, z: number, margin = 0): boolean
 /** True inside the recessed arrival-spur corridor (same contract).
  *  Hot path — interiorHeight asks for every floor vertex and heightfield
  *  sample — so a cached AABB rejects the whole park in four compares. */
-/** Both spur cuttings share one contract; interiorHeight, the floor-light
- *  exclusion and the channel-lip suppression all ask through here. */
-const CORRIDOR_IDS = ['spur-corridor', 'spur-corridor-promenade']
+/** The track ground bands share one contract; interiorHeight, the
+ *  floor-light exclusion and the channel-lip suppression all ask through
+ *  here. */
+const CORRIDOR_IDS = ['turnout-street', 'turnout-street-spur', 'spur-corridor-promenade']
 
 interface CorridorBox {
   region: Region & { kind: 'ribbon' }
