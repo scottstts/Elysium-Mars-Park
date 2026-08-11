@@ -1674,12 +1674,12 @@ machine's pane (hidden-pane FPS readings remain meaningless).
 - **Sign accent bars:** `signageMaterial` lays the text block first and
   reserves the accent strip under it (heat-rejection finding). Never draw
   plate decorations at fixed canvas offsets.
-- **Entry screen (P3 redesign):** full-bleed typographic boot screen — thin
-  ELYSIUM wordmark, dome-as-hairline-arc standing on a glowing horizon, BOARD
-  ghost button framed at the dome crown, manifest reduced to two corner
-  whispers. Progress and button share one grid slot (progress fades, button
-  rises). Keep the `createEntryScreen` API stable; `flags.debug` overlay sits
-  top-left above it.
+- **Entry screen (P3 redesign) — SUPERSEDED**, see "Entry screen: SHEET 03"
+  at the end of this file. The typographic version (centred ELYSIUM wordmark,
+  dome-as-hairline-arc on a glowing horizon, BOARD ghost button) was rejected
+  by the owner as landing-page cliche. What still holds from it: keep the
+  `createEntryScreen` API stable, and `flags.debug` overlay sits top-left
+  above the screen.
 
 ## Continuity audit (P-wave 3) — every linear run that was pieced or hung
 
@@ -2462,3 +2462,115 @@ owns circulation/enclosure; `portalStation.ts` is the system only.
   monolith made one big one). Order down-run-first for an up normal, and
   when a slab looks wrong, raycast the BODY (probe for tops ABOVE the
   intended plane), not just the plan surface.
+
+## Owner fix session (2026-08-11 evening): mist rectangles ROOT-CAUSED, livery clip, gait clock
+
+- **THE GREENHOUSE-MIST RECTANGLES, ACTUAL MECHANISM (third report, now dead
+  by construction).** In r185, a material's blending applies to the MRT's
+  `output` attachment ONLY. Every other attachment gets NO blend state
+  (`WebGPUPipelineUtils`: `getBlendMode(name)` defaults to `_noBlending` →
+  `blend: undefined` → unblended REPLACE). So every transparent/additive
+  fragment REPLACED the normal+receiver buffer across its full rasterized
+  footprint — a sprite's whole quad. The two earlier fixes failed because
+  their premises were wrong: the particle layer / castShadow never touch the
+  MRT path, and `mrt({ normal: vec4(0) })` did not "add nothing under
+  additive blending" — it stamped zero-normals + zero-receiver over the quad
+  (AO-holes + `normalize(vec3(0))` NaN risk through GTAO/bilateral/share).
+  Fix: pass-level `sceneMrt.setBlendMode('normal', new BlendMode(NormalBlending))`
+  makes the attachment's OWN source alpha the write authority (color
+  SrcAlpha/1−SrcAlpha, alpha One/1−SrcAlpha): opaque writes (n, 1) → exact
+  replace as before; `vec4(0)` → write NOTHING (G-buffer bit-identical to the
+  no-sprite frame); glazing's `(normalView, 0)` now preserves the background
+  pair instead of forcing receiver 0 — through-glass AO is the background's
+  own, consistent with the background depth that glass never overwrote.
+  THREE FACTS TO NOT RE-LEARN: (1) per-MATERIAL MRT blend modes do nothing —
+  the pipeline reads blend state from the PASS-level MRT node only;
+  (2) `MRTNode.merge` has an r185 bug assigning merged modes to a dead
+  `.blendings` property; (3) any new transparent/additive billboard MUST set
+  `material.mrtNode = mrt({ normal: vec4(0) })` — the pass default writes
+  authority 1. Also removed the bare `.normalize()` on the share path's
+  world normal (zero-length → NaN); `normalUnit` is already epsilon-guarded.
+- **A wrong mechanism in a comment steers the NEXT agent wrong.** The mist
+  code carried a confident, incorrect explanation ("additive blending ADDS…
+  zeroing makes it a no-op") that survived one whole fix wave and framed the
+  next. When a fix does not hold in the owner's build, re-derive the
+  mechanism from the renderer source before re-fixing — both sprite sites'
+  comments now state the verified path.
+- **Tram livery clip ("ELYSIUM L"):** raising the decal canvas 192 → 310 for
+  the aspect fix scaled the h-keyed fonts 1.61× past the unchanged 1024px
+  width; canvas text does not wrap, it CLIPS at the bitmap edge. Both lines
+  now measure-fit into the margin box (`fitText`) — and the fit must probe
+  and scale the SAME integer px then FLOOR, or measure-at-rounded /
+  scale-from-unrounded lands a few px back over the margin. Verified
+  headlessly (scratchpad livery-probe recipe: signage-audit advance-width
+  tables + recording ctx): 91→90px wordmark, right edge 989/1024, both lines
+  inside margins.
+- **Gait is ONE clock now (owner spec: 2.5 steps/s walk, 4.0 sprint).**
+  Cadence linear in TRUE planar speed through those two points
+  (`CADENCE_BASE/SLOPE` in playerSystem); `bobPhase` advances cadence·π/s so
+  `sin(2φ)` dips once per step; `PlayerSystem.stepCount` increments at each
+  bob LOW point (φ ≡ 3π/4 mod π, grounded, >0.5 m/s) and the audio fires
+  footsteps off that counter. The old audio stride accumulator (1.95 m) ran
+  0.82 steps/s at walk against a 1.57 Hz bob — two free-running clocks; any
+  future gait consumer (dust kicks, controller rumble) must read `stepCount`,
+  never integrate its own.
+
+## Entry screen: SHEET 03 (boot page rebuilt, 2026-08-11)
+
+Owner rejected the previous boot page as "landing page cliche / AI frontend
+slop" (centred letterspaced wordmark + ghost button + thin progress bar +
+corner whispers). The replacement is one authored concept: **the entry screen
+is SHEET 03 of the drawing set for Dome One** — an A0 plate, dark ink on bone
+plotter paper, section + key plan + detail + title block. Not a dark screen.
+Not a wordmark. If a future request is "restyle the entry screen", restyle the
+plate; do not regress to a hero + button.
+
+- **The load IS the artwork.** Each system that reports in inks the layer it
+  builds (`sky` → sun + oculus shaft, `dome` → the shell, `tram` → the Loop
+  and Gate S, `vegetation` → Tree 1). 14 `<g class="ly" data-layer=…>` groups,
+  revealed by adding `.on` — pure CSS opacity, no rAF, no canvas, so the main
+  thread stays free while shaders compile. Progress is a **plot register** in
+  the right margin (code + name + a box that inks), never a bar.
+- **The drawing is struck from the live constants, not eyeballed.** `W` in
+  entryScreen.ts quotes latticeField/parkPlan/track/firstTree (base 130, crown
+  64, sphere R 164.031, θ_base 0.91495, the 13 ring parallels, plinth
+  128.9/131.7/+1.15/−2.40, LOOP r 97, platform edge 95.6, car 2.60 × 3.048,
+  12.0 m ginkgo). The springing is verified to land at exactly z 130 / y 0.000,
+  which is why the sheet can say "the springing IS the datum". **If those world
+  constants change, the plate is wrong** — it is a second consumer of them.
+- Scales are internally consistent and derive from one number (`SCALE_500`
+  3.78 units/m): section 1:500, key plan 1:2000, DETAIL A 1:50, parts as noted.
+- **The soul of the sheet is REV G:** Tree 1 grew 1.0 m past the dashed
+  planting envelope it was drawn inside; the canopy breaks the envelope, a rust
+  revision cloud rings it, and the revision table says "drawing amended to
+  suit". Keep it. The park winning an argument with its own drawing is the
+  whole idea.
+- **The one action is a rubber stamp**, bottom-right in the title block:
+  a dashed empty box carrying the plot percentage until ready, then the rust
+  ADMIT ONE / BOARD stamp lands rotated −2.6°. Contract unchanged and load
+  bearing: root `id="entry"`, exactly ONE `<button>`, gains class `ready`
+  (headless probes read `#entry button`.className). It is `disabled` until
+  ready, which does not affect className.
+- **The plot pointer is monotonic on purpose.** Real emit order is
+  main.ts's 0.05 `render-pipeline`, then registry ids, then `ready` (which the
+  registry fires BEFORE the shader pre-warm), then `prewarm` twice. So
+  `advance()` never moves backwards, `LABEL_ALIAS` folds physics→groundworks,
+  interaction→player, doors/opsScreens→interiors, and `ready` maps to the LAST
+  row rather than to completion — completion only happens in `showEnter()`.
+  Verified by replaying both the player-mode and `flags.view` label sequences.
+- **Verifying a dense SVG plate without a browser:** copy the module to the
+  scratchpad, append `export const __svg = drawing()`, transpile with
+  `tsc --ignoreConfig --module esnext`, and run node checks over the string —
+  (1) no NaN/undefined in any attribute, (2) tag balance, (3) every numeric
+  attribute inside the viewBox, and above all (4) **estimate each `<text>`
+  box from its class font-size, char count and anchor and report overlapping
+  pairs**. That last check found 7 real label collisions and 1 label running
+  off the plate that hand-computed layout had missed. Cheap, repeatable, and
+  the only honest way to lay out ~110 annotations blind.
+- SVG paint defaults are set once on `#entry svg { fill: none; stroke: none }`
+  and inherited, so stroke-weight classes (`s0`…`s3`, `sr`) and fill classes
+  (`f1`, `f2`, `fp`, `fe`, `fh`) compose freely on one element. Strokes are
+  NOT `non-scaling-stroke`: the plate scales as a whole, like a real plot.
+- Long annotation must be wrapped by hand into ≤ ~40-character lines. Forcing
+  a 66-character note into a 370-unit column with `textLength` crushes the
+  tracking to negative; SVG text does not wrap.

@@ -29,8 +29,7 @@ export class AudioEngineSystem implements GameSystem {
   private interiorGain: GainNode | null = null
 
   private tickTimer = 6
-  private strideAccumulator = 0
-  private readonly lastPlayerPosition = new Vector3()
+  private lastStepCount = 0
   private zone: Zone = 'tram'
   private zoneBlend = 0
 
@@ -419,19 +418,19 @@ export class AudioEngineSystem implements GameSystem {
       this.glassTick(((ctx.time.sim * 431) % 2) - 1)
     }
 
-    // Footsteps from real player travel.
+    // Footsteps land on the player's own gait: playerSystem counts a plant
+    // at every bob low point (cadence law, 2.5 steps/s walk → 4.0 sprint),
+    // so the heard step and the camera dip are ONE event — not the two
+    // free-running clocks the old metres-accumulator gave (0.82 steps/s at
+    // walk against a 1.57 Hz bob). While seated the counter is swallowed
+    // silently so alighting never fires a stale step.
     const player = this.player
-    if (player && !player.seated) {
-      const delta = new Vector3().subVectors(player.eye, this.lastPlayerPosition)
-      delta.y = 0
-      this.strideAccumulator += delta.length()
-      const stride = 1.95
-      if (this.strideAccumulator > stride) {
-        this.strideAccumulator %= stride
+    if (player) {
+      if (!player.seated && player.stepCount > this.lastStepCount) {
         this.footstep(this.classifySurface(player.eye))
       }
+      this.lastStepCount = player.stepCount
     }
-    if (player) this.lastPlayerPosition.copy(player.eye)
 
     // Servos follow their robots.
     if (this.robots) {

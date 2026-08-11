@@ -235,17 +235,19 @@ export class MistSystem {
       material.transparent = true
       material.depthWrite = false
       material.blending = AdditiveBlending
-      // THE MOVING RECTANGLE ARTIFACT (owner, twice): the scene pass is MRT —
-      // any material that doesn't override `mrtNode` gets the pass-level
-      // `normal: vec4(normalView, 1)` written for every fragment it
-      // rasterizes. A sprite rasterizes its whole QUAD (opacity only gates
-      // colour), and additive blending ADDS a camera-facing normal plus a
-      // receiver-mask 1 across that rectangle into the normal attachment —
-      // GTAO then reads the corrupted normals and darkens the exact quad,
-      // growing and dying with the puff. Zeroing the attachment makes the
-      // additive write a no-op; the colour output is untouched. castShadow
-      // and the particle layer never touched this path — the artifact is not
-      // a shadow, it is the AO reading the normal buffer.
+      // THE MOVING RECTANGLE ARTIFACT (owner, three times): a sprite
+      // rasterizes its whole QUAD (opacity only gates colour), and in r185
+      // the material's blending applies to the MRT's `output` attachment
+      // ONLY — every other attachment is an unblended REPLACE, whatever the
+      // material's blend mode says. So the quad used to stamp the normal
+      // buffer wholesale, GTAO read the stamp, and the AO delta tracked the
+      // puff's growth exactly. The pass now blends the normal attachment by
+      // ITS OWN source alpha (render/pipeline.ts setBlendMode): this vec4(0)
+      // means "write nothing" — the G-buffer under a puff stays bit-identical
+      // to the no-puff frame, which is what makes the artifact impossible
+      // rather than merely masked. castShadow and the particle layer never
+      // touched this path — it is the AO reading the normal buffer, not a
+      // shadow.
       material.mrtNode = mrt({ normal: vec4(0) })
       const life = this.life.add(seedUniform).fract()
       material.colorNode = mix(vec3(0.62, 0.68, 0.66), vec3(0.36, 0.4, 0.39), life)

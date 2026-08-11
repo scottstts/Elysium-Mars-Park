@@ -236,20 +236,42 @@ function stencilMaterial(tex: CanvasTexture): MeshStandardNodeMaterial {
 function liveryTexture(): CanvasTexture {
   return decalCanvas(
     (g, w, h) => {
+      // Both lines are MEASURED into the margin box, never trusted to a
+      // height-keyed size: raising this canvas 192 -> 310 for the aspect fix
+      // scaled the h-keyed fonts 1.6x past the unchanged width, and canvas
+      // text does not wrap — it clips at the bitmap edge, which shipped as
+      // "ELYSIUM L" on every bodyside. One probe suffices per line because
+      // measureText scales linearly with font size.
+      const margin = w * 0.03
+      const fitText = (weight: number, size: number, text: string): void => {
+        const font = (px: number): string =>
+          `${weight} ${px}px "Helvetica Neue", Helvetica, Arial, sans-serif`
+        // Probe and scale the SAME integer size, and floor the result —
+        // rounding up after scaling put the fitted line a few px back over
+        // the margin it was fitted to.
+        const probe = Math.max(1, Math.round(size))
+        g.font = font(probe)
+        const measured = g.measureText(text).width
+        const maxWidth = w - margin * 2
+        if (measured > maxWidth) {
+          g.font = font(Math.max(1, Math.floor((probe * maxWidth) / measured)))
+        }
+      }
       g.fillStyle = '#20211f'
       g.textAlign = 'left'
       g.textBaseline = 'middle'
-      g.font = `700 ${Math.round(h * 0.44)}px "Helvetica Neue", Helvetica, Arial, sans-serif`
-      g.fillText('E L Y S I U M   L O O P', w * 0.03, h * 0.34)
+      const wordmark = 'E L Y S I U M   L O O P'
+      fitText(700, h * 0.44, wordmark)
+      g.fillText(wordmark, margin, h * 0.34)
       g.fillStyle = '#b8531e'
-      g.fillRect(w * 0.03, h * 0.56, w * 0.62, h * 0.045)
+      g.fillRect(margin, h * 0.56, w * 0.62, h * 0.045)
       g.fillStyle = '#4a4844'
-      g.font = `500 ${Math.round(h * 0.19)}px "Helvetica Neue", Helvetica, Arial, sans-serif`
-      g.fillText('AUTOMATED PEOPLE MOVER  ·  ELYSIUM PLANITIA PARK', w * 0.03, h * 0.76)
+      const subline = 'AUTOMATED PEOPLE MOVER  ·  ELYSIUM PLANITIA PARK'
+      fitText(500, h * 0.19, subline)
+      g.fillText(subline, margin, h * 0.76)
     },
     // The patch this lands on (tramBody `decalPatch`, z 2.06->3.14 by section
-    // 11.7->12.85) is 1.073 m by 0.325 m = aspect 3.30. At 1024x192 (5.33) the
-    // wordmark was condensed to 62 % of its authored width.
+    // 11.7->12.85) is 1.073 m by 0.325 m = aspect 3.30, matched at 1024x310.
     1024,
     310,
   )

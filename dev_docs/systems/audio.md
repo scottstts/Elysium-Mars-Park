@@ -8,11 +8,14 @@
   position + tram riding state. Interiors detected by plan footprints
   (lounge, enterable greenhouse). Crossfade at ~3/s; a master lowpass
   drops to 4.2 kHz in the cabin and 900 Hz in the tube — the "duct" sound.
-- Footsteps: stride accumulator on real eye travel (1.95 m), gated off
-  while seated. Surface classification: station pad footprint → deck,
-  distance-to-PATHS segments (paver only) → paver, else regolith;
-  interior zone → muted interior step. Each step is a filtered noise
-  burst with per-surface band/decay.
+- Footsteps: fired off `PlayerSystem.stepCount` (one per bob-phase plant;
+  cadence 2.5 steps/s walk → 4.0 sprint, owner spec 2026-08-11), swallowed
+  silently while seated so alighting never replays stale steps. The old
+  metres-accumulator (1.95 m/step) is gone — it ran at 0.82 steps/s against
+  a 1.57 Hz camera bob, two visibly disagreeing clocks. Surface
+  classification: station pad footprint → deck, distance-to-PATHS segments
+  (paver only) → paver, else regolith; interior zone → muted interior step.
+  Each step is a filtered noise burst with per-surface band/decay.
 - Point sources use PannerNode (inverse distance): 4 robot servos (thin
   saws behind tight bandpass, pitch up when moving), tram rail-sing
   (resonant noise + 80–160 Hz tone ∝ speed), greenhouse mist hiss (only

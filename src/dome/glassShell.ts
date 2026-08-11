@@ -210,7 +210,11 @@ export function createGlassShell(): { mesh: Mesh; exteriorMesh: Mesh } {
       .div(max(coverage, 1e-4))
     material.opacityNode = coverage.mul(float(1).sub(portalCut(positionWorld)))
 
-    // Glass never receives AO (alpha 0 in the normal MRT target).
+    // Alpha 0 = zero write authority under the pass-level normal-target
+    // blend (render/pipeline.ts): the glass leaves the G-buffer to whatever
+    // stands behind it, so AO on a glass pixel is the background's own —
+    // sky and mountains sit past the AO distance fade, so the shell still
+    // reads AO-free everywhere it matters.
     material.mrtNode = mrt({ normal: vec4(normalView, 0) })
     return material
   }

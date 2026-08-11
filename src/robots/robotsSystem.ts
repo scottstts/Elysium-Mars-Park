@@ -115,9 +115,12 @@ export class RobotsSystem implements GameSystem {
         material.transparent = true
         material.depthWrite = false
         material.blending = AdditiveBlending
-        // Additive sprite in an MRT scene pass: zero the normal attachment or
-        // the quad ADDS `vec4(normalView, 1)` across its whole rectangle and
-        // GTAO darkens it (the greenhouse-mist artifact, same mechanism).
+        // Sprite in an MRT scene pass: material blending applies to the
+        // `output` attachment only, so without this override the quad would
+        // stamp the normal buffer across its whole rectangle (the
+        // greenhouse-mist artifact). Under the pass-level alpha-authority
+        // blend (render/pipeline.ts), vec4(0) means "write nothing" — the
+        // G-buffer behind a plume stays exactly as if the plume were absent.
         material.mrtNode = mrt({ normal: vec4(0) })
         const seed = puff / 7
         const life = this.vaporLife.add(seed).fract()

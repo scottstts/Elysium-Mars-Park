@@ -17,8 +17,23 @@ Choices beyond the code:
   to box mean, epsilon-guarded normal renormalization) or thin members strobe
   at walking speed. The dome lattice makes this defect class fatal here — do
   not simplify the filter.
-- **AO receiver mask** rides the normal MRT alpha: materials that must not
-  receive AO (sky, dome glass) write 0 there when they land.
+- **AO receiver mask** rides the normal MRT alpha — and since the
+  moving-rectangle fix (2026-08-11) that alpha is also the WRITE AUTHORITY.
+  r185 gives non-`output` MRT attachments NO blend state (material blending
+  applies to `output` only; per-material MRT blend modes are read from the
+  PASS node only, and `MRTNode.merge` drops them besides), so every
+  transparent fragment used to REPLACE the normal+receiver buffer across its
+  full rasterized footprint — a sprite's whole quad, which is the
+  greenhouse-mist "moving dark rectangles" artifact, mis-fixed twice before
+  the mechanism was found. The pass now sets
+  `setBlendMode('normal', new BlendMode(NormalBlending))`: opaque materials
+  write alpha 1 → exact replace, bit-identical to before; mist/vapour
+  override `mrt({ normal: vec4(0) })` → zero authority, G-buffer untouched;
+  glazing's `vec4(normalView, 0)` now PRESERVES the background pair
+  (consistent with the background depth glass never writes) instead of
+  forcing receiver 0 — AO seen through glass is the background's own, which
+  is the physically right answer. Any future transparent/additive billboard
+  MUST carry the `vec4(0)` override; the pass default writes alpha 1.
 - **`hdrTransform` hook** is where S4's interior haze + shafts transform the
   HDR image (depth-aware), keeping the pipeline file effect-agnostic.
 - **Fixed authored exposure** (`gradeParams.exposureEV`) — no meter, no

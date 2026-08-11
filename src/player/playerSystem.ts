@@ -10,6 +10,19 @@ import { PlayerInput } from './input'
 /** Locomotion tuning (plan §10): a low-G lope, composed, never floaty-silly. */
 const WALK_SPEED = 1.6
 const SPRINT_SPEED = 4.2
+/**
+ * Footfall cadence (owner spec): 2.5 steps/s at full walk, 4.0 at full
+ * sprint, linear in TRUE planar speed between. One bob cycle IS one step —
+ * the camera lope and the footstep SFX both derive from `bobPhase`
+ * (`stepCount` below), so the heard plant and the felt dip are one event
+ * and can never drift apart the way the old metres-accumulator did.
+ */
+const WALK_CADENCE = 2.5
+const SPRINT_CADENCE = 4.0
+const CADENCE_SLOPE = (SPRINT_CADENCE - WALK_CADENCE) / (SPRINT_SPEED - WALK_SPEED)
+const CADENCE_BASE = WALK_CADENCE - CADENCE_SLOPE * WALK_SPEED
+/** No footfall events below this true speed: standing drift is not a gait. */
+const STEP_MIN_SPEED = 0.5
 const EYE_HEIGHT = 0.8 // above capsule center; capsule center sits at 0.9
 const CAPSULE_HALF_HEIGHT = 0.55
 const CAPSULE_RADIUS = 0.35
@@ -38,6 +51,8 @@ export class PlayerSystem implements GameSystem {
   private readonly currentPosition = new Vector3()
   private bobPhase = 0
   private bobEnergy = 0
+  /** Monotonic footfall counter — audio fires exactly one step per tick up. */
+  stepCount = 0
 
   /**
    * Seated state: a pose closure (static for benches, live for the tram),
@@ -323,8 +338,22 @@ export class PlayerSystem implements GameSystem {
     const planarSpeed = Math.hypot(this.velocity.x, this.velocity.z)
     const targetEnergy = this.grounded ? Math.min(1, planarSpeed / SPRINT_SPEED) : 0
     this.bobEnergy += (targetEnergy - this.bobEnergy) * Math.min(1, 6 * dt)
-    // Long Mars strides: bob frequency scales with speed, ~1.5 Hz at sprint.
-    this.bobPhase += dt * (0.9 + planarSpeed * 0.42) * Math.PI
+    // Cadence law (steps/s) × π: one step is HALF a lateral sway cycle
+    // (left plant, right plant), so the vertical dip at sin(2·phase)
+    // bounces exactly once per step by construction.
+    const cadence = CADENCE_BASE + planarSpeed * CADENCE_SLOPE
+    const previousPhase = this.bobPhase
+    this.bobPhase += dt * cadence * Math.PI
+    // A footfall is the bob's LOW point: sin(2φ) = −1 at φ ≡ 3π/4 (mod π).
+    // Count plant crossings only while actually striding on the ground —
+    // airborne travel and standing drift make no steps (the old accumulator
+    // banked jump distance and fired a phantom step on landing).
+    if (this.grounded && planarSpeed > STEP_MIN_SPEED) {
+      const plant = 0.75 * Math.PI
+      this.stepCount +=
+        Math.floor((this.bobPhase - plant) / Math.PI) -
+        Math.floor((previousPhase - plant) / Math.PI)
+    }
   }
 
   update(ctx: GameContext, dt: number, alpha: number): void {

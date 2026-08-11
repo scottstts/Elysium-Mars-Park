@@ -1,6 +1,6 @@
-import { ColorManagement, NeutralToneMapping, NoToneMapping, SRGBColorSpace } from 'three'
+import { ColorManagement, NeutralToneMapping, NormalBlending, NoToneMapping, SRGBColorSpace } from 'three'
 import type { Camera, Mesh } from 'three'
-import { RenderPipeline } from 'three/webgpu'
+import { BlendMode, RenderPipeline } from 'three/webgpu'
 import type { Node, PassNode } from 'three/webgpu'
 import {
   Fn,
@@ -132,7 +132,28 @@ export class RenderPipelineSystem implements GameSystem {
     // `albedo` is what lets AO stay off direct light (see the composite
     // below); `diffuseColor` is the material's base colour before any
     // lighting, which is exactly the quantity the indirect estimate needs.
-    scenePass.setMRT(mrt({ output, normal: vec4(normalView, 1) }))
+    const sceneMrt = mrt({ output, normal: vec4(normalView, 1) })
+    // THE MOVING-RECTANGLE ARTIFACT, ROOT CAUSE (owner report, three times):
+    // in r185 an MRT attachment that is not `output` gets NO blend state —
+    // the material's own blending applies to `output` only, so every
+    // transparent/additive fragment REPLACED the normal+receiver buffer
+    // across its full rasterized quad (a sprite rasterizes its whole
+    // rectangle; opacity only gates colour). The earlier per-material
+    // `mrtNode = mrt({ normal: vec4(0) })` fix therefore did not "add
+    // nothing" — it stamped zero normals + zero receiver over the quad,
+    // which punched moving AO-holes and fed zero-length vectors into the
+    // GTAO/bilateral/share chain (normalize(0) = NaN on strict-IEEE paths).
+    // The pass-level per-attachment blend below makes the attachment's own
+    // source alpha the WRITE AUTHORITY (src·a + dst·(1−a); alpha One /
+    // OneMinusSrcAlpha): opaque materials write (normal, 1) → exact replace,
+    // bit-identical to before; any material that writes vec4(0) — the mist
+    // puffs, the reclaimer vapour, all glazing — now leaves the G-buffer
+    // untouched, so AO behind a puff is the AO without the puff, by
+    // construction. Per-material MRT blend modes do NOT work in r185 (the
+    // pipeline reads blend state from the PASS-level node only, and
+    // MRTNode.merge drops them besides) — this must stay on the pass node.
+    sceneMrt.setBlendMode('normal', new BlendMode(NormalBlending))
+    scenePass.setMRT(sceneMrt)
     this.scenePass = scenePass
 
     const sceneColor = scenePass.getTextureNode('output')
@@ -249,7 +270,12 @@ export class RenderPipelineSystem implements GameSystem {
     // fullscreen post pass the implicit camera nodes are the pipeline's
     // business, and the SCENE camera is what turns a view normal into a
     // world normal. Same discipline as `projectionInverse` above.
-    const worldNormal = cameraWorld.mul(vec4(normalUnit, 0)).xyz.normalize()
+    // NO bare `.normalize()` here: `normalUnit` is already unit-or-zero
+    // (epsilon-guarded above) and the camera matrix is rigid, so a second
+    // normalize adds nothing for valid normals and turns the zero vector
+    // into NaN — which then rides `indirectFraction` into the composite as
+    // undefined-colour pixels on some drivers.
+    const worldNormal = cameraWorld.mul(vec4(normalUnit, 0)).xyz
     const surfaceWorld = cameraWorld.mul(vec4(footprintView, 1)).xyz
     const ambientTerm = luminance(marsAmbientIrradiance(worldNormal)).mul(ENVIRONMENT_INTENSITY)
     const sunTerm = max(dot(worldNormal, sunDirectionUniform), 0)
