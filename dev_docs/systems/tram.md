@@ -265,14 +265,55 @@ a real structural joint and mechanically a `backToBack` pair, never a `zfight`.
   the true crown — the channel floor (poured per-vertex from the same
   slabTop) rose OVER the trackbed and buried whole stretches of rail (owner
   defect, screenshot: "rails buried underneath the ground").
-- The paving yields TWO spur cuttings (`pavingPlan` ribbon regions
-  `'spur-corridor'` through the boulevard throat and
-  `'spur-corridor-promenade'` across the rim walk, both priority 98): genuine
-  CUTTINGS — floor follows the trackbed crown − 10 mm (`interiorHeight.
+- The paving yields ONE spur cutting away from the station
+  (`'spur-corridor-promenade'` across the rim walk, priority 98): a genuine
+  CUTTING — floor follows the trackbed crown − 10 mm (`interiorHeight.
   spurTrackDatum`), vertical cast walls to 60 mm below the slab, then a
-  90 mm chamfered lip to the trimmed edge (region halfWidth reaches
-  `width/2 + lip`, the same move as the channel footprint) — the cut edge
-  is a treated arris exactly as along the ring channel.
+  90 mm chamfered lip to the trimmed edge — the cut edge is a treated arris
+  exactly as along the ring channel. The boulevard throat is NOT a cutting:
+  see THE TURNOUT THROAT below.
+- THE TURNOUT THROAT (owner reference image: "clean pavement with track on
+  top", built as ONE PIECE OF MODELLING, not an assembly). Everything in
+  the zone derives from one scalar union field
+  `pavingPlan.throatU(x,z) = smoothmin(|ρ−R| clamped to the zone bearings,
+  d(spurLine), k = 0.35)` minus a WEDGE BRIDGE:
+  - `spurLine` is marched to TANGENCY (ρ → R + 0.02) and continued along
+    the ring so its end cap nests inside the ring band — a line cut short
+    bulges the union contour at the hand-off.
+  - The zone spans the whole station frontage
+    (`phiLo/phiHi = π/2 ∓ 0.1937`, 0.6 m inside the terrace corners), so
+    the picture-frame headers land on existing field boundary lines and no
+    street end is ever mid-view. The channel treatment (floors, lips,
+    verge skirt) is clipped EXACTLY on those bearings (`zoneClip`
+    bisection), never at segment granularity.
+  - Street: one clipped XZ grid at blended crown + 14 mm (4 mm under the
+    cast aprons, edges tucked under the casts at |d| = 1.30), poured to
+    U ≤ half + 0.16 (30 mm PAST the tile cut, buried 46 mm under the
+    tiles) and additionally over any live bridge — a bridged plateau's
+    U-band widens into square metres the tile trim cannot resolve.
+  - Strips: the iso-contour U = half + 0.09, MARCHED (predictor-corrector
+    on `throatUOpen` — the unclamped field; a march cannot cross the
+    clamp's discontinuity and orbits the zone if you try), Chaikin-faired,
+    swept as a 0.18 m section 6 mm proud of the tiles. Ends never die in
+    the open: headers cap one movement joint off the cast aprons, trench
+    legs dive bodily under the conform dirt.
+  - Tiles: the fields trim on the SAME field at U = half + 0.13 via the
+    `'zone'` region kind (a signed-distance region — round-capped ribbons
+    cannot express a field footprint); the cut is buried under the strip
+    and keeps its interior `edge` attribute (no border course → no moat).
+  - Heights: `interiorHeight.throatCrown` = the two ways' crowns blended
+    by squared inverse distance ANCHORED AT THE CAST EDGES (|d| = 1.3), so
+    the street meets EVERY cast at its own datum and never creases at the
+    generator switch. `throatLift` grades the fields to the street
+    (tiles = street + 46 mm at the strip, fading over 8 m laterally, 5 m
+    of arc past the headers) — the cross-slope absorber of the zone; the
+    regolith sheet FOLLOWS the lift down where it is negative
+    (`regolithSurface`), or dirt roofs the lowered tiles.
+  - The vee wedges between the diverging ways bridge to street below
+    ~1.35 m of clear gap ("between" = the directions to the two nearest
+    alignments OPPOSE — in the merged stretch both measure the same side
+    and the bridge must stay off or the band balloons). The strip contour
+    wraps each vee's rounded end automatically.
 - THE CORRIDOR CONFORM LAW (P-wave 5, replaces the old trenchDip/lid-clamp
   patchwork): `groundGrade` stays PURE (every pour datum reads undipped
   grade, slabs stay flat), and ONE law shapes the dirt near the whole

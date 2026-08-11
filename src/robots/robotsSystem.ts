@@ -1,6 +1,6 @@
 import { AdditiveBlending, Group, Sprite, Vector3 } from 'three'
 import { SpriteNodeMaterial } from 'three/webgpu'
-import { float, mix, smoothstep, uniform, uv, vec2, vec3 } from 'three/tsl'
+import { float, mix, mrt, smoothstep, uniform, uv, vec2, vec3, vec4 } from 'three/tsl'
 import { panewalkerPhi } from '../dome/latticeField'
 import { markDynamic } from '../render/layers'
 import type { GameContext } from '../runtime/context'
@@ -115,6 +115,10 @@ export class RobotsSystem implements GameSystem {
         material.transparent = true
         material.depthWrite = false
         material.blending = AdditiveBlending
+        // Additive sprite in an MRT scene pass: zero the normal attachment or
+        // the quad ADDS `vec4(normalView, 1)` across its whole rectangle and
+        // GTAO darkens it (the greenhouse-mist artifact, same mechanism).
+        material.mrtNode = mrt({ normal: vec4(0) })
         const seed = puff / 7
         const life = this.vaporLife.add(seed).fract()
         // Warm at the lip, cooling to dust as it entrains regolith fines.

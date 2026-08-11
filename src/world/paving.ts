@@ -10,7 +10,7 @@ import {
 } from './groundMaterials'
 import { GroundWriter, sweepSection } from './groundWriter'
 import type { GroundVertex, SweepStation } from './groundWriter'
-import { corridorField, groundGrade, spurTrackDatum } from './interiorHeight'
+import { groundGrade, spurTrackDatum, throatCrown, throatLift } from './interiorHeight'
 import {
   CURB,
   GUIDEWAY_CHANNEL,
@@ -27,6 +27,9 @@ import {
   pavedTraffic,
   regionDistance,
   spurCorridorDistance,
+  throatBridge,
+  throatU,
+  throatUOpen,
 } from './pavingPlan'
 import type { Region } from './pavingPlan'
 
@@ -71,9 +74,12 @@ export interface PavingBuild {
   triangles: number
 }
 
-/** The slab top at a point: the ONE definition of the paved datum. */
+/** The slab top at a point: the ONE definition of the paved datum. Carries
+ *  the throat's grade conform — around the turnout the fields are graded to
+ *  the street (interiorHeight.throatLift), so tiles meet the edging strips
+ *  flush instead of stepping the natural cross-fall at them. */
 export function slabTop(x: number, z: number): number {
-  return groundGrade(x, z) + PAVE.rise
+  return groundGrade(x, z) + PAVE.rise + throatLift(x, z)
 }
 
 const NORMAL_EPS = 1.1
@@ -453,8 +459,11 @@ interface Patch {
   at: (u: number, v: number) => PaveVertex
 }
 
-/** How far a crossed cell may subdivide before its centre simply decides. */
-const MAX_TRIM_DEPTH = 4
+/** How far a crossed cell may subdivide before its centre simply decides.
+ *  6 (1/64 cell ≈ 2.7 cm on the coarsest fields) — at 4 the terrace dropped
+ *  whole cells in the throat's vee tips, where two zone boundaries cross one
+ *  cell closer together than an eighth of it. */
+const MAX_TRIM_DEPTH = 6
 /** Below this a clipped cell is a shading artefact, not a floor (1 cm²). */
 const MIN_CELL_AREA = 1e-4
 
@@ -521,7 +530,12 @@ function cutVertex(
   }
   const t = (lo + hi) * 0.5
   const vertex = patch.at(ua + (ub - ua) * t, va + (vb - va) * t)
-  vertex.edge = 0
+  // A cut against the throat zone keeps its interior edge distance: the
+  // border course belongs to junctions BETWEEN fields, and painting it
+  // along the street cut turned the whole zone boundary into a dark moat
+  // (owner arrows). The cut there is buried under the edging strip anyway.
+  const against = coverRegionAt(patch.cover, vertex.x, vertex.z)
+  if (!against || against.kind !== 'zone') vertex.edge = 0
   return vertex
 }
 
@@ -990,6 +1004,10 @@ function regionBoundaries(region: Region): BoundaryStation[][] {
       return [rectBoundary(region)]
     case 'ribbon':
       return [ribbonBoundary(region)]
+    case 'zone':
+      // The throat zone never carries curbs or lights — its edging is the
+      // swept strip system in emitThroatGround.
+      return []
   }
 }
 
@@ -1375,17 +1393,35 @@ function emitGuidewayChannel(writer: GroundWriter): void {
       uv: new Vector2(angle * GUIDEWAY_CHANNEL.radius, r - GUIDEWAY_CHANNEL.radius),
     }
   }
+  // The turnout throat owns its zone whole: no floors, no lips, no verge
+  // skirt there — emitThroatGround pours the ground and the edging. The cut
+  // is EXACT (every polygon bisected on the header bearings), so the
+  // resuming floors butt the street's header strips on one radial joint
+  // instead of a 1.4 m segment staircase.
+  const zoneClip = (x: number, z: number): number => {
+    if (!THROAT) return 1
+    const phi = Math.atan2(z, x)
+    return Math.max(THROAT.phiLo - phi, phi - THROAT.phiHi) * GUIDEWAY_CHANNEL.radius
+  }
+  const clippedFace = (corners: GroundVertex[]): void => {
+    const cell = clipGround(corners, zoneClip)
+    if (cell.length >= 3) writer.face('channel', cell)
+  }
   const radialSteps = 3
   for (let i = 0; i < steps; i++) {
     const a0 = (i / steps) * TAU
     const a1 = ((i + 1) / steps) * TAU
-    // The turnout street owns its zone whole: no floors, no lips, no verge
-    // skirt there — emitThroatStreet pours the ground and the edging.
-    if (THROAT && (a0 + a1) / 2 > THROAT.phiLo && (a0 + a1) / 2 < THROAT.phiHi) continue
+    if (
+      THROAT &&
+      (a0 + a1) / 2 > THROAT.phiLo + 0.02 &&
+      (a0 + a1) / 2 < THROAT.phiHi - 0.02
+    ) {
+      continue
+    }
     for (let j = 0; j < radialSteps; j++) {
       const ra = rInner + ((rOuter - rInner) * j) / radialSteps
       const rb = rInner + ((rOuter - rInner) * (j + 1)) / radialSteps
-      writer.face('channel', [
+      clippedFace([
         point(ra, a0, floorY),
         point(ra, a1, floorY),
         point(rb, a1, floorY),
@@ -1412,7 +1448,7 @@ function emitGuidewayChannel(writer: GroundWriter): void {
         { p: new Vector3(c.x, slabTop(c.x, c.z), c.z), uv: new Vector2(a1 * radius, 0.09) },
         { p: new Vector3(b.x, floorY(b.x, b.z), b.z), uv: new Vector2(a1 * radius, 0) },
       ]
-      writer.face('channel', outward < 0 ? corners : [...corners].reverse())
+      clippedFace(outward < 0 ? corners : [...corners].reverse())
       // Verge skirt: from the lip arris down and outward to crown − 0.45.
       // On open stretches the regolith sheet lies EXACTLY at crown − 0.13
       // (interiorHeight's corridor conform law), so the skirt crosses under
@@ -1440,7 +1476,7 @@ function emitGuidewayChannel(writer: GroundWriter): void {
         },
         { p: new Vector3(c.x, slabTop(c.x, c.z), c.z), uv: new Vector2(a1 * radius, 0.09) },
       ]
-      writer.face('channel', outward < 0 ? skirt : [...skirt].reverse())
+      clippedFace(outward < 0 ? skirt : [...skirt].reverse())
     }
   }
 }
@@ -1489,7 +1525,7 @@ function clipGround(
  */
 function emitSpurCorridor(writer: GroundWriter): void {
   // Only the rim-promenade crossing keeps the recessed-cut treatment; the
-  // boulevard throat is the turnout street now (emitThroatStreet).
+  // boulevard throat is the turnout ground now (emitThroatGround).
   for (const id of ['spur-corridor-promenade']) emitSpurCut(writer, id)
 }
 
@@ -1611,256 +1647,449 @@ function emitSpurCut(writer: GroundWriter, id: string): void {
 }
 
 /**
- * THE TURNOUT STREET — the owner's reference image: one clean pavement
- * through the whole merge with the track riding on top. In the throat zone
- * this REPLACES the recessed channel, the spur cutting, their chamfered
- * lips, the verge skirt and every slab margin — the only lines left are the
- * street's own edging strips and the rails.
+ * THE TURNOUT THROAT — the owner's reference image: continuous tiled ground
+ * with the two track ways set into it as smooth bands, ONE slim edging
+ * strip per boundary, rails riding on top. Built as one piece of modelling,
+ * not an assembly — every surface here is an offset of the union field
+ * U = throatU(x, z) (pavingPlan):
  *
- *   surface   projected crown + 0.014 — 4 mm under the trackbed aprons, so
- *             the panels read as overlays let into the street and the two
- *             pours are never coplanar
- *   strips    ONE concrete edging band per boundary (0.18 m), swept
- *             continuously, crown 6 mm proud of the neighbouring tiles,
- *             feathered down dead where the other leg's way opens through
- *   ends      ring ends ease down onto the resuming channel-margin level
- *             behind a radial joint; the spur end eases toward the open
- *             trench and closes with a buried skirt
+ *   street   ONE clipped pour over the whole zone, U ≤ half+0.05, at the
+ *            projected crown + 0.014 (4 mm under the trackbed aprons, its
+ *            cut edges tucked beneath the casts at |d| = 1.30), joints on
+ *            the world grid
+ *   strips   swept along MARCHED ISO-CONTOURS of U at half+0.09 — the two
+ *            ways' edgings merge tangentially and round the gore vee
+ *            because a union field's contour does; there is no leg-vs-leg
+ *            trimming to leave crossing lines or dying slivers
+ *   tiles    the fields trim on the same field at half+0.13 (the zone
+ *            region), the cut buried under the strip body
  *
- * The two legs PARTITION the plan (ring leg owns |ρ−R| ≤ 2.67, spur leg the
- * rest of its band) so nothing is poured twice, and both leave the casts'
- * 1.36 m slots open — the sweep tucks 10 mm over the street's cut edge.
+ * Strip ends NEVER die in the open: at the zone's bearing ends each
+ * shoulder closes as a picture-frame header (corner fillet, radial leg,
+ * end cap one movement JOINT off the cast apron); at the regolith trench
+ * the strips dive bodily under the conform dirt. The resuming channel
+ * butts the headers on the same bisected bearing lines
+ * (emitGuidewayChannel.zoneClip).
  */
-function emitThroatStreet(writer: GroundWriter): void {
+function emitThroatGround(writer: GroundWriter): void {
   const throat = THROAT
   if (!throat) return
   const R = GUIDEWAY_CHANNEL.radius
   const half = throat.half
-  const STRIP = 0.18
-  const inner = half - STRIP
-  const SLOT = 1.36
-  const fallback = groundGrade(0, R) + PAVE.rise - GUIDEWAY_CHANNEL.recess
-  const crownAt = (x: number, z: number): number => corridorField(x, z)?.crown ?? fallback
-  const dRing = (x: number, z: number): number => Math.abs(Math.hypot(x, z) - R)
-  const dSpur = (x: number, z: number): number => spurTrackDatum(x, z)?.d ?? 1e4
-  const up = new Vector3(0, 1, 0)
+  /** Street edge under the cast: apron edge 1.35 overlaps it 4 mm above. */
+  const SLOT = 1.3
+  const STREET_LIFT = 0.014
+  /** The pour runs 30 mm PAST the tile cut (half+0.13): in the bridged vee
+   *  plateaus the field flattens and the band between street edge and tile
+   *  cut widens into whole square metres — left unpoured it exposed the dug
+   *  sheet as a dark patch. Where tiles exist the overlap is buried 46 mm
+   *  beneath them; where they don't, the street reaches the cut line. */
+  const POUR_EDGE = half + 0.16
+  const STRIP_AT = half + 0.09
+  /** Header end cap stands one movement joint off the cast apron. */
+  const CAP_AT = 1.35 + 0.02
+  const line = throat.spurLine
+  if (line.length < 2) return
+  const mouth = line[0]
+  const mouthDir = line[1].clone().sub(line[0]).normalize()
+  // The medial-blended crown: the street/strips must never crease where the
+  // nearest-generator switch happens mid-wedge (interiorHeight.throatCrown).
+  const streetY = (x: number, z: number): number => throatCrown(x, z) + STREET_LIFT
+  const dRingRaw = (x: number, z: number): number => Math.abs(Math.hypot(x, z) - R)
+  const dSpurCast = (x: number, z: number): number => spurTrackDatum(x, z)?.d ?? 1e4
+  const alongMouth = (x: number, z: number): number =>
+    (x - mouth.x) * mouthDir.x + (z - mouth.y) * mouthDir.y
 
-  // Ring-end easing: the last 1.6 m before each zone end drops the surface
-  // onto the channel-margin level (crown − gutter) so the resuming
-  // treatment meets it behind a clean radial joint.
-  const BLEND = 1.6
-  const ease = (along: number): number => {
-    if (along >= BLEND) return 0
-    const t = 1 - Math.max(0, along) / BLEND
-    const s = t * t * (3 - 2 * t)
-    return (-GUIDEWAY_CHANNEL.gutter - 0.014) * s
-  }
   const vert = (x: number, z: number, y: number, u: number, v: number): GroundVertex => ({
     p: new Vector3(x, y, z),
     n: new Vector3(0, 1, 0),
     uv: new Vector2(u, v),
   })
-  const face = (slot: string, corners: GroundVertex[]): void => {
-    if (corners.length >= 3) writer.face(slot, corners)
+  /** |plan area| of a clipped ring — drops bisection soup, keeps the real
+   *  slivers (the wedge between the merging casts is a real surface). */
+  const planArea = (ring: GroundVertex[]): number => {
+    let doubled = 0
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i].p
+      const q = ring[(i + 1) % ring.length].p
+      doubled += p.x * q.z - q.x * p.z
+    }
+    return Math.abs(doubled) * 0.5
   }
-  // Quads whose winding is decided by the surface they should face — the
-  // strips wrap over a crown, so a fixed order would backface one side.
-  const oriented = (slot: string, quad: GroundVertex[], prefer: Vector3): void => {
-    const [a, b, c] = quad
+  const oriented = (slot: string, ring: GroundVertex[], prefer: Vector3): void => {
+    if (ring.length < 3) return
+    const [a, b, c] = ring
     const n = new Vector3().subVectors(b.p, a.p).cross(new Vector3().subVectors(c.p, a.p))
-    face(slot, n.dot(prefer) >= 0 ? quad : [...quad].reverse())
+    writer.face(slot, n.dot(prefer) >= 0 ? ring : [...ring].reverse())
   }
 
-  // ---- ring leg: radial bands each side of the cast slot, cells clipped
-  //      where the spur's own way crosses (the merging band opening).
-  const steps = Math.max(8, Math.round(((throat.phiHi - throat.phiLo) * R) / 1.1))
-  for (let i = 0; i < steps; i++) {
-    const a0 = throat.phiLo + ((throat.phiHi - throat.phiLo) * i) / steps
-    const a1 = throat.phiLo + ((throat.phiHi - throat.phiLo) * (i + 1)) / steps
-    const eased = (a: number): number =>
-      ease(Math.min(a - throat.phiLo, throat.phiHi - a) * R)
-    for (const [b0, b1] of [
-      [-inner, -SLOT],
-      [SLOT, inner],
-    ] as const) {
-      for (let j = 0; j < 2; j++) {
-        const r0 = R + b0 + ((b1 - b0) * j) / 2
-        const r1 = R + b0 + ((b1 - b0) * (j + 1)) / 2
-        const c = (a: number, r: number): GroundVertex => {
-          const x = Math.cos(a) * r
-          const z = Math.sin(a) * r
-          return vert(x, z, crownAt(x, z) + 0.014 + eased(a), a * R, r - R)
-        }
-        // Along-first corner order — the channel floors' up-facing winding.
-        // Radial-first came out reversed and the whole ring leg back-face
-        // culled (invisible AND ray-transparent: the probe lesson).
-        face(
-          'paving',
-          clipGround(
-            [c(a0, r0), c(a1, r0), c(a1, r1), c(a0, r1)],
-            (x, z) => dSpur(x, z) - SLOT,
-          ),
-        )
-      }
-    }
-  }
-
-  // ---- spur leg: everything in its band OUTSIDE the ring leg's territory
-  //      and outside its own cast slot.
-  const line = throat.spurLine
-  const side = (i: number): Vector2 => {
-    const a = line[Math.max(0, i - 1)]
-    const b = line[Math.min(line.length - 1, i + 1)]
-    const t = b.clone().sub(a)
-    const l = t.length() || 1
-    return new Vector2(t.y / l, -t.x / l)
-  }
-  const run: number[] = [0]
-  for (let i = 1; i < line.length; i++) run.push(run[i - 1] + line[i].distanceTo(line[i - 1]))
-  const spurEase = (i: number): number => ease(run[i])
-  for (let i = 0; i < line.length - 1; i++) {
-    for (const [b0, b1] of [
-      [-inner, -SLOT],
-      [SLOT, inner],
-    ] as const) {
-      for (let j = 0; j < 2; j++) {
-        const c0 = b0 + ((b1 - b0) * j) / 2
-        const c1 = b0 + ((b1 - b0) * (j + 1)) / 2
-        const c = (k: number, across: number): GroundVertex => {
-          const s = side(k)
-          const x = line[k].x + s.x * across
-          const z = line[k].y + s.y * across
-          return vert(x, z, crownAt(x, z) + 0.014 + spurEase(k), run[k], across)
-        }
-        // Yield only to ground the ring leg ACTUALLY poured (its band AND
-        // its bearing range) — clipping on the band alone left a bare wedge
-        // where the spur hugs the ring beyond phiHi (owner-visible hole).
-        face(
-          'paving',
-          clipGround([c(i, c0), c(i + 1, c0), c(i + 1, c1), c(i, c1)], (x, z) => {
-            const phi = Math.atan2(z, x)
-            if (phi <= throat.phiLo || phi >= throat.phiHi) return 1
-            return dRing(x, z) - inner
-          }),
-        )
-      }
-    }
-  }
-  // Spur mouth: a buried skirt across the band, closing the pour into the
-  // trench the conform law digs (dirt at crown − 0.13; skirt dives past it).
+  // ---- THE STREET: one grid, four clips, no legs. Cells outside the zone
+  //      vanish on the first clip (the bearing-clamped field is huge there).
   {
-    const s = side(0)
-    const p = line[0]
-    const drop = (across: number, dy: number): GroundVertex => {
-      const x = p.x + s.x * across
-      const z = p.y + s.y * across
-      return vert(x, z, crownAt(x, z) + 0.014 + spurEase(0) + dy, across, dy)
+    const xs: number[] = []
+    const zs: number[] = []
+    for (const p of line) {
+      xs.push(p.x)
+      zs.push(p.y)
     }
-    for (const [c0, c1] of [
-      [-inner, -SLOT],
-      [SLOT, inner],
-    ] as const) {
-      oriented('paving', [drop(c0, 0), drop(c1, 0), drop(c1, -0.34), drop(c0, -0.34)], up)
+    for (let k = 0; k <= 12; k++) {
+      const phi = throat.phiLo + ((throat.phiHi - throat.phiLo) * k) / 12
+      xs.push(Math.cos(phi) * R)
+      zs.push(Math.sin(phi) * R)
+    }
+    const pad = POUR_EDGE + 0.3
+    const minX = Math.min(...xs) - pad
+    const maxX = Math.max(...xs) + pad
+    const minZ = Math.min(...zs) - pad
+    const maxZ = Math.max(...zs) + pad
+    const CELL = 0.5
+    for (let x0 = minX; x0 < maxX; x0 += CELL) {
+      for (let z0 = minZ; z0 < maxZ; z0 += CELL) {
+        const x1 = x0 + CELL
+        const z1 = z0 + CELL
+        // Cheap reject before the field: cell centre far outside the band.
+        if (throatU((x0 + x1) / 2, (z0 + z1) / 2) > POUR_EDGE + CELL) continue
+        const corner = (x: number, z: number): GroundVertex =>
+          vert(x, z, streetY(x, z), x, z)
+        // Keep-field: inside the band edge OR anywhere the wedge bridge is
+        // live — a bridged plateau must be street to its last square metre
+        // (the tile trim over it is unresolvable; see throatBridge).
+        let cell = clipGround(
+          [corner(x0, z0), corner(x0, z1), corner(x1, z1), corner(x1, z0)],
+          (x, z) => Math.max(POUR_EDGE - throatU(x, z), throatBridge(x, z) - 0.08),
+        )
+        if (cell.length >= 3) cell = clipGround(cell, (x, z) => dRingRaw(x, z) - SLOT)
+        if (cell.length >= 3) cell = clipGround(cell, (x, z) => dSpurCast(x, z) - SLOT)
+        if (cell.length >= 3) cell = clipGround(cell, (x, z) => alongMouth(x, z))
+        if (cell.length >= 3 && planArea(cell) > 2e-4) writer.face('paving', cell)
+      }
     }
   }
 
-  // ---- edging strips. Profile across [−0.09, +0.09] about the strip
-  //      centreline (|lateral| = half − 0.09): buried foot in the street,
-  //      chamfered crown 6 mm proud of the tiles, outer leg diving 0.24 —
-  //      under the tiles where tiles flank, under the conform dirt where not.
-  type StripStation = { x: number; z: number; out: Vector2; feather: number; run: number }
-  const emitStrip = (stations: StripStation[]): void => {
+  // ---- trench mouth: a buried skirt per shoulder, seated 20 mm INSIDE the
+  //      pour so its top edge lies under the street sheet (no shared line).
+  {
+    const perp = new Vector2(mouthDir.y, -mouthDir.x)
+    const base = mouth.clone().addScaledVector(mouthDir, 0.02)
+    const prefer = new Vector3(-mouthDir.x, 0.3, -mouthDir.y)
+    for (const [s0, s1] of [
+      [-POUR_EDGE, -SLOT],
+      [SLOT, POUR_EDGE],
+    ] as const) {
+      for (let j = 0; j < 3; j++) {
+        const a = s0 + ((s1 - s0) * j) / 3
+        const b = s0 + ((s1 - s0) * (j + 1)) / 3
+        const pa = base.clone().addScaledVector(perp, a)
+        const pb = base.clone().addScaledVector(perp, b)
+        const ya = streetY(pa.x, pa.y)
+        const yb = streetY(pb.x, pb.y)
+        oriented(
+          'paving',
+          [
+            vert(pa.x, pa.y, ya, a, 0),
+            vert(pb.x, pb.y, yb, b, 0),
+            vert(pb.x, pb.y, yb - 0.34, b, -0.34),
+            vert(pa.x, pa.y, ya - 0.34, a, -0.34),
+          ],
+          prefer,
+        )
+      }
+    }
+  }
+
+  // ---- THE STRIPS: iso-contour marching on U = STRIP_AT, on the OPEN
+  //      field (throatUOpen) — the bearing clamp is a discontinuity, and a
+  //      march cannot cross a discontinuity; the stops below end the paths.
+  const gradU = (x: number, z: number): Vector2 => {
+    const h = 0.02
+    return new Vector2(
+      (throatUOpen(x + h, z) - throatUOpen(x - h, z)) / (2 * h),
+      (throatUOpen(x, z + h) - throatUOpen(x, z - h)) / (2 * h),
+    )
+  }
+  const snap = (p: Vector2): Vector2 => {
+    for (let i = 0; i < 4; i++) {
+      const d = throatUOpen(p.x, p.y) - STRIP_AT
+      if (Math.abs(d) < 5e-4) break
+      const g = gradU(p.x, p.y)
+      const lengthSq = g.lengthSq() || 1
+      p.addScaledVector(g, -d / lengthSq)
+    }
+    return p
+  }
+  /** Predictor-corrector march; stops where `inside` first goes negative and
+   *  refines the crossing by chord bisection (the last chord is 0.3 m on a
+   *  smooth contour — the refined point is on the line to a millimetre). */
+  const march = (
+    seed: Vector2,
+    dir0: Vector2,
+    inside: (p: Vector2) => number,
+  ): Vector2[] => {
+    const pts: Vector2[] = []
+    let p = snap(seed.clone())
+    let dir = dir0.clone().normalize()
+    pts.push(p.clone())
+    for (let i = 0; i < 700; i++) {
+      const g = gradU(p.x, p.y)
+      const t = new Vector2(-g.y, g.x)
+      if (t.lengthSq() < 1e-8) break
+      t.normalize()
+      if (t.dot(dir) < 0) t.multiplyScalar(-1)
+      dir = t
+      // 0.18 m step: the gore vee turns ~150° over ~0.5 m of arc (the
+      // smooth-min rounds it at k/2 ≈ 0.18) — a coarser step chords the apex.
+      const q = snap(p.clone().addScaledVector(t, 0.18))
+      if (inside(q) < 0) {
+        let lo = 0
+        let hi = 1
+        for (let k = 0; k < 20; k++) {
+          const mid = (lo + hi) / 2
+          if (inside(p.clone().lerp(q, mid)) >= 0) lo = mid
+          else hi = mid
+        }
+        pts.push(p.clone().lerp(q, (lo + hi) / 2))
+        return pts
+      }
+      pts.push(q.clone())
+      p = q
+    }
+    return pts
+  }
+  const stopAtHi = (p: Vector2): number => (throat.phiHi - Math.atan2(p.y, p.x)) * R
+  const stopAtLo = (p: Vector2): number => (Math.atan2(p.y, p.x) - throat.phiLo) * R
+  const stopAtMouth = (p: Vector2): number => alongMouth(p.x, p.y) - 0.55
+
+  interface StripStation {
+    x: number
+    z: number
+    ox: number
+    oz: number
+    dive: number
+  }
+  /** Chaikin ×2 then resample: the union field inherits the spur polyline's
+   *  segment kinks, and a specular strip shows every one of them (owner
+   *  arrow at the trench bend). Endpoints stay exact — headers and dives
+   *  attach there. */
+  const fairPath = (pts: Vector2[]): Vector2[] => {
+    let current = pts
+    for (let pass = 0; pass < 2 && current.length >= 3; pass++) {
+      const out: Vector2[] = [current[0].clone()]
+      for (let i = 0; i < current.length - 1; i++) {
+        out.push(
+          current[i].clone().lerp(current[i + 1], 0.25),
+          current[i].clone().lerp(current[i + 1], 0.75),
+        )
+      }
+      out.push(current[current.length - 1].clone())
+      current = out
+    }
+    const resampled: Vector2[] = [current[0]]
+    for (let i = 1; i < current.length - 1; i++) {
+      if (current[i].distanceTo(resampled[resampled.length - 1]) >= 0.22) {
+        resampled.push(current[i])
+      }
+    }
+    resampled.push(current[current.length - 1])
+    return resampled
+  }
+  const contourStations = (pts: Vector2[]): StripStation[] =>
+    fairPath(pts).map((p) => {
+      const g = gradU(p.x, p.y)
+      const l = g.length() || 1
+      return { x: p.x, z: p.y, ox: g.x / l, oz: g.y / l, dive: 0 }
+    })
+  /** Trench nose: three stations on along the last direction, sinking the
+   *  whole section under the conform dirt (crown − 0.13; the nose bottoms
+   *  0.34 under its own crown line). */
+  const withDive = (stations: StripStation[]): StripStation[] => {
+    if (stations.length < 2) return stations
+    const last = stations[stations.length - 1]
+    const prev = stations[stations.length - 2]
+    const dx = last.x - prev.x
+    const dz = last.z - prev.z
+    const l = Math.hypot(dx, dz) || 1
+    const out: StripStation[] = [...stations]
+    for (const [d, dive] of [
+      [0.3, 0.3],
+      [0.6, 0.7],
+      [0.85, 1],
+    ] as const) {
+      out.push({
+        x: last.x + (dx / l) * d,
+        z: last.z + (dz / l) * d,
+        ox: last.ox,
+        oz: last.oz,
+        dive,
+      })
+    }
+    return out
+  }
+  /** Picture-frame header: corner fillet off the contour end, radial leg
+   *  along the exact zone bearing, end cap a joint off the cast apron.
+   *  `s` +1 outer / −1 inner; `aSign` +1 when the path arrives travelling
+   *  toward +φ. Returned corner-first (append; reverse to prepend). */
+  const headerFor = (pEnd: Vector2, s: number, aSign: number): StripStation[] => {
+    const phiB = Math.atan2(pEnd.y, pEnd.x)
+    const rHat = new Vector2(Math.cos(phiB), Math.sin(phiB))
+    const A = new Vector2(-Math.sin(phiB), Math.cos(phiB)).multiplyScalar(aSign)
+    const T = rHat.clone().multiplyScalar(-s)
+    const contourOut = rHat.clone().multiplyScalar(s)
+    const FILLET = 0.14
+    const centre = pEnd.clone().addScaledVector(A, -FILLET).addScaledVector(T, FILLET)
+    const stations: StripStation[] = []
+    for (const deg of [0, 30, 60]) {
+      const th = (deg * Math.PI) / 180
+      const p = centre
+        .clone()
+        .addScaledVector(T, -Math.cos(th) * FILLET)
+        .addScaledVector(A, Math.sin(th) * FILLET)
+      const o = contourOut
+        .clone()
+        .multiplyScalar(Math.cos(th))
+        .addScaledVector(A, Math.sin(th))
+        .normalize()
+      stations.push({ x: p.x, z: p.y, ox: o.x, oz: o.y, dive: 0 })
+    }
+    for (const offset of [STRIP_AT - FILLET, 1.85, 1.6, CAP_AT]) {
+      const p = rHat.clone().multiplyScalar(R + s * offset)
+      stations.push({ x: p.x, z: p.y, ox: A.x, oz: A.y, dive: 0 })
+    }
+    return stations
+  }
+
+  const emitStripRun = (stations: StripStation[], capStart: boolean, capEnd: boolean): void => {
+    const clean: StripStation[] = []
+    for (const st of stations) {
+      const previous = clean[clean.length - 1]
+      if (previous && Math.hypot(st.x - previous.x, st.z - previous.z) < 0.02) continue
+      clean.push(st)
+    }
+    if (clean.length < 2) return
     const profile = (st: StripStation): Vector3[] => {
-      const innerPt = { x: st.x - st.out.x * 0.09, z: st.z - st.out.y * 0.09 }
-      const outerPt = { x: st.x + st.out.x * 0.09, z: st.z + st.out.y * 0.09 }
-      const street = crownAt(innerPt.x, innerPt.z) + 0.014
-      const slabOut = slabTop(outerPt.x, outerPt.z)
-      const top = (slabOut + 0.006) * (1 - st.feather) + (street - 0.02) * st.feather
-      const shoulder = top - 0.024
+      const street = streetY(st.x - st.ox * 0.09, st.z - st.oz * 0.09)
+      const tile = slabTop(st.x + st.ox * 0.09, st.z + st.oz * 0.09)
+      const drop = st.dive * 0.34
+      const top = tile + 0.006 - drop
       const pt = (lateral: number, y: number): Vector3 =>
-        new Vector3(st.x + st.out.x * lateral, y, st.z + st.out.y * lateral)
+        new Vector3(st.x + st.ox * lateral, y, st.z + st.oz * lateral)
       return [
-        pt(-0.09, street - 0.055),
-        pt(-0.09, Math.max(street - 0.05, shoulder)),
+        pt(-0.09, street - 0.055 - drop),
+        pt(-0.075, top - 0.02),
         pt(-0.052, top),
         pt(0.052, top),
-        pt(0.09, Math.max(slabOut - 0.23, shoulder)),
-        pt(0.09, slabOut - 0.24),
+        pt(0.075, top - 0.02),
+        pt(0.09, tile - 0.3 - drop),
       ]
     }
-    let previous: Vector3[] | null = null
-    let previousStation: StripStation | null = null
-    for (const st of stations) {
+    let run = 0
+    let previousRun = 0
+    let previous = profile(clean[0])
+    for (let i = 1; i < clean.length; i++) {
+      const st = clean[i]
+      const before = clean[i - 1]
+      run += Math.hypot(st.x - before.x, st.z - before.z)
       const points = profile(st)
-      if (previous && previousStation) {
-        const outward = new Vector3(
-          (previousStation.out.x + st.out.x) / 2,
-          1.2,
-          (previousStation.out.y + st.out.y) / 2,
+      const outward = new Vector3(
+        (before.ox + st.ox) / 2,
+        1.1,
+        (before.oz + st.oz) / 2,
+      )
+      for (let k = 0; k < points.length - 1; k++) {
+        oriented(
+          'concrete',
+          [
+            vert(previous[k].x, previous[k].z, previous[k].y, previousRun, k * 0.1),
+            vert(points[k].x, points[k].z, points[k].y, run, k * 0.1),
+            vert(points[k + 1].x, points[k + 1].z, points[k + 1].y, run, (k + 1) * 0.1),
+            vert(previous[k + 1].x, previous[k + 1].z, previous[k + 1].y, previousRun, (k + 1) * 0.1),
+          ],
+          outward,
         )
-        for (let k = 0; k < points.length - 1; k++) {
-          oriented(
-            'concrete',
-            [
-              vert(previous[k].x, previous[k].z, previous[k].y, previousStation.run, k),
-              vert(points[k].x, points[k].z, points[k].y, st.run, k),
-              vert(points[k + 1].x, points[k + 1].z, points[k + 1].y, st.run, k + 1),
-              vert(previous[k + 1].x, previous[k + 1].z, previous[k + 1].y, previousStation.run, k + 1),
-            ],
-            outward,
-          )
-        }
       }
       previous = points
-      previousStation = st
+      previousRun = run
+    }
+    const cap = (index: number, forward: boolean): void => {
+      const st = clean[index]
+      const other = clean[forward ? index - 1 : index + 1]
+      const travel = new Vector3(st.x - other.x, 0, st.z - other.z)
+      const ring = profile(st).map((p, k) => vert(p.x, p.z, p.y, 0, k * 0.1))
+      oriented('concrete', ring, travel)
+    }
+    if (capStart) cap(0, false)
+    if (capEnd) cap(clean.length - 1, true)
+  }
+
+  // P_inner — the park-side edging: one arc, headers both ends. The
+  // contour's boundary points are dropped where a header takes over — the
+  // fillet's θ=0 station stands exactly there, and keeping both would fold
+  // the sweep back on itself at every corner.
+  {
+    const mid = (throat.phiLo + throat.phiHi) / 2
+    const seed = new Vector2(Math.cos(mid), Math.sin(mid)).multiplyScalar(R - STRIP_AT)
+    const west = march(seed, new Vector2(-Math.sin(mid), Math.cos(mid)), stopAtHi)
+    const east = march(seed, new Vector2(Math.sin(mid), -Math.cos(mid)), stopAtLo)
+    const path = [...east.slice(1).reverse(), ...west]
+    if (path.length >= 4) {
+      const stations = [
+        ...headerFor(path[0], -1, -1).reverse(),
+        ...contourStations(path.slice(1, -1)),
+        ...headerFor(path[path.length - 1], -1, 1),
+      ]
+      emitStripRun(stations, true, true)
     }
   }
-  // Feathering: 1 where the OTHER leg's way passes through this strip
-  // (the strip sinks 20 mm under the street and the way opens), easing over
-  // 0.9 m — plus a feathered nose at every run end.
-  const featherOf = (clearance: number): number => {
-    if (clearance >= 0.9) return 0
-    const t = 1 - Math.max(0, clearance) / 0.9
-    return t * t * (3 - 2 * t)
-  }
-  // Arc strips, both sides of the ring leg.
-  for (const sgn of [-1, 1] as const) {
-    const rs = R + sgn * (half - 0.09)
-    const stations: StripStation[] = []
-    const count = Math.max(8, Math.round(((throat.phiHi - throat.phiLo) * rs) / 0.9))
-    for (let i = 0; i <= count; i++) {
-      const a = throat.phiLo + ((throat.phiHi - throat.phiLo) * i) / count
-      const x = Math.cos(a) * rs
-      const z = Math.sin(a) * rs
-      const endIn = Math.min(a - throat.phiLo, throat.phiHi - a) * rs
-      const feather = Math.max(
-        featherOf(dSpur(x, z) - half),
-        featherOf(endIn - 0.15),
-      )
-      stations.push({ x, z, out: new Vector2(Math.cos(a) * sgn, Math.sin(a) * sgn), feather, run: a * rs })
+  // P_outer — the outer envelope: phiHi header, tangential hand-off onto the
+  // spur's outer side, trench dive.
+  let outerContour: Vector2[]
+  {
+    const at = throat.phiHi - 0.6 / R
+    const seed = new Vector2(Math.cos(at), Math.sin(at)).multiplyScalar(R + STRIP_AT)
+    const west = march(seed, new Vector2(-Math.sin(at), Math.cos(at)), stopAtHi)
+    const east = march(seed, new Vector2(Math.sin(at), -Math.cos(at)), stopAtMouth)
+    outerContour = [...east.slice(1).reverse(), ...west]
+    if (outerContour.length >= 4) {
+      const noseFirst = withDive(
+        contourStations(outerContour.slice(1).reverse()),
+      ).reverse()
+      const stations = [
+        ...noseFirst,
+        ...headerFor(outerContour[outerContour.length - 1], 1, 1),
+      ]
+      emitStripRun(stations, true, true)
     }
-    emitStrip(stations)
   }
-  // Spur strips, both sides — TRUNCATED where they reach the arc strip's
-  // line (a feather ramp that kept running crossed the street as a dying
-  // sliver, owner-visible): the run stops one station past first contact
-  // and dives dead there.
-  for (const sgn of [-1, 1] as const) {
-    const stations: StripStation[] = []
-    for (let i = 0; i < line.length; i++) {
-      const s = side(i)
-      const x = line[i].x + s.x * sgn * (half - 0.09)
-      const z = line[i].y + s.y * sgn * (half - 0.09)
-      if (dRing(x, z) < half + 0.05) {
-        if (stations.length >= 2) {
-          stations.push({ x, z, out: new Vector2(s.x * sgn, s.y * sgn), feather: 1, run: run[i] })
-        }
+  // P_gore — the vee between the diverging ways: phiLo header, round the
+  // cusp (the smooth-min rounds it at strip scale), trench dive. Skipped if
+  // the ways never separate inside the zone (the seed would land on the
+  // outer envelope).
+  {
+    const at = throat.phiLo + 0.4 / R
+    const seed = snap(
+      new Vector2(Math.cos(at), Math.sin(at)).multiplyScalar(R + STRIP_AT),
+    )
+    let onOuter = false
+    for (const p of outerContour) {
+      if (Math.hypot(p.x - seed.x, p.y - seed.y) < 0.4) {
+        onOuter = true
         break
       }
-      const feather = featherOf(Math.min(dRing(x, z) - half - 0.05, run[i] - 0.15))
-      stations.push({ x, z, out: new Vector2(s.x * sgn, s.y * sgn), feather, run: run[i] })
     }
-    emitStrip(stations)
+    if (!onOuter) {
+      const west = march(seed, new Vector2(-Math.sin(at), Math.cos(at)), stopAtMouth)
+      const east = march(seed, new Vector2(Math.sin(at), -Math.cos(at)), stopAtLo)
+      const path = [...west.slice(1).reverse(), ...east]
+      if (path.length >= 4) {
+        const noseFirst = withDive(
+          contourStations(path.slice(1).reverse()),
+        ).reverse()
+        const stations = [
+          ...noseFirst,
+          ...headerFor(path[path.length - 1], 1, -1),
+        ]
+        emitStripRun(stations, true, true)
+      }
+    }
   }
 }
 
@@ -1902,7 +2131,7 @@ export function buildPaving(): PavingBuild {
 
   emitGuidewayChannel(writer)
   emitSpurCorridor(writer)
-  emitThroatStreet(writer)
+  emitThroatGround(writer)
   emitFloorLights(writer, lightRuns)
   emitPlanters(writer, colliders)
 

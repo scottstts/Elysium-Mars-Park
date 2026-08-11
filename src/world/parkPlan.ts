@@ -191,6 +191,11 @@ export const PATHS: PathSpec[] = [
   },
   {
     id: 'farm-lane',
+    // Ends AT the Farmside station's step-free ramp: the ribbon runout
+    // (pavingPlan) runs the last leg on to the ramp's discharge apron, so the
+    // accessible route reads station → lane → the RANGE halls. Without it the
+    // ramp dumped onto raw regolith in the service yard — the owner's
+    // "leads nowhere" structure.
     points: [v(26, 6), v(40, 12), v(52, 18), v(66, 14), v(80, 8)],
     width: 4.5,
     surface: 'paver',

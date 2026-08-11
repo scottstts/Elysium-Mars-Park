@@ -2387,3 +2387,78 @@ owns circulation/enclosure; `portalStation.ts` is the system only.
   open 0.148 rad instead of 0.115, which clears the end flight foot, its 2.2 m
   apron and the 1.5 m egress envelope. Anything that grows a station platform
   outward has to re-check that number.
+
+## P-wave 6 — turnout throat rebuild + Farmside lane + MRT sprites (owner arrows session)
+
+- **One field, not legs.** The throat's street/strips/tile-cut are three
+  offsets of ONE union field (`throatU`). Every prior mess (crossing lines,
+  dying stubs, T-joints) came from building per-leg and clipping legs
+  against each other. If two swept systems share ground, derive both from
+  one scalar field; iso-contours cannot cross themselves.
+- **Never march a clamped field.** Contour marching cannot cross a
+  discontinuity: the marcher turns and runs ALONG it (ours orbited the
+  whole 236 m zone boundary and emitted strip knots inside the band). March
+  the smooth unclamped field; end paths with explicit stop functions.
+- **Anchor cross-datum blends at the built edges.** Blending two ways'
+  crowns by plain medial distance left the street ~50 mm shy of each cast
+  near the merge (every flank read as a loose panel). Squared IDW with
+  weights anchored at the cast edges (|d| − 1.3) pins the surface to each
+  neighbour exactly where they meet.
+- **Grade conforms must propagate to the sheet.** `throatLift` pulls fields
+  DOWN toward the street where the terrain is high; the regolith sheet had
+  to follow (`regolithSurface` takes `min(corridorDip, min(0, throatLift))`)
+  or dirt roofs the lowered tiles. Any future re-grading of paving needs
+  the same audit.
+- **Field-defined regions**: new `Region` kind `'zone'` (signed distance
+  fn + bbox). Ribbons always end in round caps — they cannot express a
+  square-ended or field-shaped trim. `MAX_TRIM_DEPTH` is now 6; but note a
+  sub-cell stripe can still be MISSED by the 9-sample cell test (dropped
+  whole, silently) — that is why the bridge pours street over every
+  plateau instead of trusting the tile trim there.
+- **Sprites in the MRT scene pass corrupt aux attachments.** Any material
+  that does not override `material.mrtNode` gets the pass-level
+  `normal: vec4(normalView, 1)` written across its full rasterized QUAD —
+  additive blending ADDS it, GTAO reads the garbage, and the sprite's
+  rectangle darkens and grows with it (the greenhouse "moving shadow").
+  EVERY additive/transparent billboard must set
+  `material.mrtNode = mrt({ normal: vec4(0) })` (mist + reclaimer vapour
+  done; glassShell already had its own override). castShadow/layers do NOT
+  touch this path.
+- **Farmside step-free route**: farm-lane's runout now ends ON the side
+  ramp's discharge apron (`RIBBON_RUNOUT 'farm-lane': [4, 10.5]`,
+  end ≈ (89.6, 3.9)); `planSideRamp` iterates its foot against
+  `interiorHeight` so the landing came out flush (0.68 = 0.68) with no
+  further change. A ramp/stair is only DONE when its discharge lands on a
+  real walk — probe `pavedSignedDistance` at the foot.
+- **Verification tooling**: `node --experimental-strip-types` probes can
+  import the real modules and raycast a `buildPaving()` result headlessly
+  (fast iteration, exact numbers) — see scratchpad throat-probe*.mjs
+  pattern. In-page, raycast through SCREEN PIXELS
+  (`raycaster.setFromCamera`) to identify what a visual defect actually is
+  before theorising; include `ground:regolith` in the mesh set. The FPS
+  overlay reads ~3 FPS whenever the browser pane is hidden (rAF
+  throttling) — front the tab before judging performance (32+ FPS real).
+- Vite dev can serve MIXED stale/new modules across cross-module edit
+  bursts even after a server restart; `rm -rf node_modules/.vite` +
+  restart + hard navigate, then verify IN PAGE (fetch the module source or
+  probe built geometry) before debugging "unchanged" visuals.
+- **Rails define access topology, not just safety.** The side ramps were
+  geometrically perfect AND unenterable: both long edges railed end-to-end
+  fenced the head off from the back band it lies flush with, so the whole
+  ramp read as a raised dead box (the owner's "big stairs that lead
+  nowhere" — the SECOND complaint after the landing was already fixed).
+  `buildSideRamp` now leaves the first 1.35 m of the deck-side edge open
+  (the entry) and closes the head's END FACE with a return that turns down
+  the far edge as one continuous railRun. When auditing egress: walk the
+  route in your head THROUGH the railings — foot AND head — not just the
+  surfaces.
+- **`PartWriter.slab` extrudes along the corner winding's NEGATIVE face
+  normal — corner order decides UP vs DOWN.** The side-station ramp passed
+  (across, then down-run) corners, whose normal points DOWN in the platform
+  frame, so every slab extruded UPWARD: a solid box standing proud of the
+  intended walking plane. THIS was the entire "giant stairs / giant block"
+  saga — the surface numbers probed correct while the phantom body stood on
+  top of them (the old segmented version stacked stepped boxes; the
+  monolith made one big one). Order down-run-first for an up normal, and
+  when a slab looks wrong, raycast the BODY (probe for tops ABOVE the
+  intended plane), not just the plan surface.

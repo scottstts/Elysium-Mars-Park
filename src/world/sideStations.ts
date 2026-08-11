@@ -48,17 +48,25 @@ const BACK = DEPTH - 0.22
  *  THRESHOLD_SET idiom). */
 const THRESHOLD = 0.009
 
-/** The step-free route: fixed grade, derived run. */
+/** The step-free route: fixed grade, derived run.
+ *
+ *  PERPENDICULAR to the platform's back edge, run pointing AWAY from the
+ *  track (owner directive after two failed parallel versions): from the
+ *  deck you look DOWN ITS LENGTH — it reads as a way out, not a mass —
+ *  and from the track side it shows only its short end. Top dead flush
+ *  with the deck plane at a 2 cm movement joint; nothing but handrail
+ *  above deck level; foot dead flush with the ground walk it serves. */
 interface RampPlan {
-  u0: number
+  /** Arc position of the ramp axis. */
+  u: number
+  /** Back-band offset of the head edge (deck depth + the joint). */
+  vHead: number
   run: number
   headY: number
   footY: number
-  vNear: number
-  vFar: number
 }
 
-const RAMP = { grade: 10, vNear: DEPTH + 0.028, vFar: DEPTH + 1.94, railHeight: 0.95 }
+const RAMP = { grade: 10, width: 2.6, joint: 0.02, railHeight: 0.95 }
 
 export function buildSideStations(writer: PartWriter, group: Group, physics: PhysicsSystem): void {
   for (const station of LOOP.stations) {
@@ -78,6 +86,10 @@ export function buildSideStations(writer: PartWriter, group: Group, physics: Phy
     }
     buildOne(writer, group, physics, spec, {
       title: station.id === 'overlook' ? 'OVERLOOK WEST' : 'FARMSIDE',
+      // The ramp axis aims at the walk the station actually serves: the
+      // farm-lane's end leg at Farmside (u = +2), the meridian-west walk
+      // at Overlook (u = −4). Both probed paved at the 1:10 foot.
+      rampU: station.id === 'overlook' ? -4 : 2,
     })
   }
 }
@@ -87,7 +99,7 @@ function buildOne(
   group: Group,
   physics: PhysicsSystem,
   spec: ArcPlatform,
-  options: { title: string },
+  options: { title: string; rampU: number },
 ): void {
   const half = ARC / 2
 
@@ -125,7 +137,7 @@ function buildOne(
   }
 
   // ---- the ramp.
-  const ramp = planSideRamp(spec)
+  const ramp = planSideRamp(spec, options.rampU)
   buildSideRamp(writer, spec, ramp)
 
   buildColliders(physics, spec, flights, ramp)
@@ -134,63 +146,67 @@ function buildOne(
 // ---------------------------------------------------------------- ramp ----
 
 /**
- * Head at the west end of the back band, open onto the deck (side platforms
- * carry no windbreak, so nothing can seal it); one straight run along the
- * arc at 1:10, its length solved so the foot lands ON the ground measured at
- * the foot itself — across the full width, the portal ramp's root-cause fix.
+ * Head ON the back edge at u = +2 (biased toward the district the station
+ * serves — at Farmside the run lands its foot on the farm-lane's own
+ * centreline), top EXACTLY the deck plane, one straight run at 1:10 away
+ * from the track, its length solved so the foot lands ON the ground
+ * measured at the foot itself — across the full width, the portal ramp's
+ * root-cause fix.
  */
-function planSideRamp(spec: ArcPlatform): RampPlan {
-  const half = ARC / 2
-  const u0 = -half + 1.35
-  const headY = platformDeckY(spec, u0) - 0.006
-  const vMid = (RAMP.vNear + RAMP.vFar) / 2
+function planSideRamp(spec: ArcPlatform, u: number): RampPlan {
+  const vHead = DEPTH + RAMP.joint
+  const headY = platformDeckY(spec, u)
   let run = 5
-  let footY = headY
-  for (let pass = 0; pass < 5; pass++) {
-    const footU = u0 + run
+  let footY = headY - 0.5
+  for (let pass = 0; pass < 6; pass++) {
+    const vFoot = vHead + run
     let ground = -Infinity
-    for (const v of [RAMP.vNear + 0.2, vMid, RAMP.vFar - 0.2]) {
-      const p = platformPoint(spec, footU, v, 0)
+    for (const du of [-RAMP.width / 2 + 0.2, 0, RAMP.width / 2 - 0.2]) {
+      const p = platformPoint(spec, u + du, vFoot, 0)
       ground = Math.max(ground, interiorHeight(p.x, p.z))
     }
     footY = ground + 0.012
-    const next = Math.min(half * 2 - 2.0, Math.max(3.2, RAMP.grade * (headY - footY)))
+    const next = Math.min(12, Math.max(3.2, RAMP.grade * (headY - footY)))
     if (Math.abs(next - run) < 0.02) {
       run = next
       break
     }
     run = next
   }
-  return { u0, run, headY, footY, vNear: RAMP.vNear, vFar: RAMP.vFar }
+  return { u, vHead, run, headY, footY }
 }
 
 function buildSideRamp(writer: PartWriter, spec: ArcPlatform, plan: RampPlan): void {
-  const { u0, run, headY, footY, vNear, vFar } = plan
+  const { u, vHead, run, headY, footY } = plan
+  const halfW = RAMP.width / 2
   const yAt = (t: number): number => headY + (footY - headY) * t
-  // Retained solid: segment slabs bedded below their OWN local grade (the
-  // ground under each segment, not a proxy), so the run is an embankment
-  // wall wherever the grade falls away.
-  const segments = Math.max(4, Math.ceil(run / 1.15))
-  for (let i = 0; i < segments; i++) {
-    const ua = u0 + (run * i) / segments
-    const ub = u0 + (run * (i + 1)) / segments
-    const ya = yAt(i / segments)
-    const yb = yAt((i + 1) / segments)
-    const corners: [Vector3, Vector3, Vector3, Vector3] = [
-      platformPoint(spec, ua, vNear, ya),
-      platformPoint(spec, ub, vNear, yb),
-      platformPoint(spec, ub, vFar, yb),
-      platformPoint(spec, ua, vFar, ya),
-    ]
-    let ground = Infinity
-    for (const corner of corners) ground = Math.min(ground, interiorHeight(corner.x, corner.z))
-    writer.slab(corners, Math.max(0.22, Math.min(ya, yb) - ground + 0.32), 'cast', 0.5)
-  }
-  // Kerbs: one swept member per side, ends diving into the pours (the tram
+  const vAt = (t: number): number => vHead + run * t
+  // ONE monolithic retained prism: planar top from the flush head threshold
+  // to the flush foot, continuous flanks to a buried bottom. CORNER ORDER IS
+  // LOAD-BEARING: `PartWriter.slab` extrudes along the corner winding's
+  // NEGATIVE face normal, and the (across, then down-run) order used here
+  // before — inherited from the original segmented version — has a DOWNWARD
+  // normal in the platform frame, so every slab extruded UPWARD: a box
+  // standing 0.95 m proud of the intended surface. That phantom box (and
+  // its stepped per-segment ancestors) IS what read as the "giant stairs /
+  // giant block" (owner, four times). Down-run first, then across, puts the
+  // normal up and the body below the walking plane where it belongs.
+  writer.slab(
+    [
+      platformPoint(spec, u - halfW, vHead, headY),
+      platformPoint(spec, u - halfW, vHead + run, footY),
+      platformPoint(spec, u + halfW, vHead + run, footY),
+      platformPoint(spec, u + halfW, vHead, headY),
+    ],
+    0.95,
+    'cast',
+    0.5,
+  )
+  // Kerbs: one swept member per flank, ends diving into the pours (the tram
   // rails' feather at kerb scale — never a capped disc on the open slab).
-  for (const v of [vNear + 0.07, vFar - 0.07]) {
+  for (const s of [-1, 1] as const) {
     const at = (t: number, lift: number): Vector3 =>
-      platformPoint(spec, u0 + run * t, v, yAt(t) + lift)
+      platformPoint(spec, u + s * (halfW - 0.07), vAt(t), yAt(t) + lift)
     writer.tube({
       path: [at(0.004, -0.07), at(0.03, 0.028), at(0.97, 0.028), at(0.996, -0.07)],
       radius: 0.052,
@@ -200,19 +216,24 @@ function buildSideRamp(writer: PartWriter, spec: ArcPlatform, plan: RampPlan): v
       capEnd: true,
     })
   }
-  // Handrails: the canonical run + stanchions.
-  for (const v of [vNear + 0.07, vFar - 0.07]) {
+  // Handrails: full-length on BOTH flanks — with a perpendicular run the
+  // two ends ARE the thresholds (head flush with the deck, foot flush with
+  // the walk), so closing the flanks is the correct topology and both
+  // openings exist by construction.
+  for (const s of [-1, 1] as const) {
     const axis: Vector3[] = []
     const steps = Math.max(3, Math.ceil(run / 1.4))
     for (let i = 0; i <= steps; i++) {
       const t = i / steps
-      axis.push(platformPoint(spec, u0 + run * t, v, yAt(t) + RAMP.railHeight))
+      axis.push(
+        platformPoint(spec, u + s * (halfW - 0.07), vAt(t), yAt(t) + RAMP.railHeight),
+      )
     }
     railRun(writer, axis, { radius: 0.026, cornerRadius: 0.14 })
     const posts = Math.max(3, Math.round(run / 1.6))
     for (let i = 0; i <= posts; i++) {
       const t = i / posts
-      const p = platformPoint(spec, u0 + run * t, v, yAt(t))
+      const p = platformPoint(spec, u + s * (halfW - 0.07), vAt(t), yAt(t))
       railPost(writer, p, yAt(t) + RAMP.railHeight, {
         radius: 0.021,
         slot: 'dark',
@@ -221,12 +242,12 @@ function buildSideRamp(writer: PartWriter, spec: ArcPlatform, plan: RampPlan): v
       })
     }
   }
-  // Discharge apron: poured at the foot, crossing the local ground.
-  const footU = u0 + run
+  // Discharge apron: poured at the foot, crossing the local ground, facing
+  // on down the run (away from the track).
   groundApron(writer, {
-    left: platformPoint(spec, footU, vFar, footY),
-    right: platformPoint(spec, footU, vNear, footY),
-    outward: platformTangent(spec, footU),
+    left: platformPoint(spec, u - halfW, vHead + run, footY),
+    right: platformPoint(spec, u + halfW, vHead + run, footY),
+    outward: platformOutward(spec, u).multiplyScalar(-1),
     depth: 1.3,
     inset: 0.3,
     overhang: 0.1,
@@ -297,15 +318,24 @@ function buildColliders(
       Math.atan2(plan.climb.x, plan.climb.z),
     )
   }
-  // Ramp: one pitched slab down the run.
-  const rampMidU = ramp.u0 + ramp.run / 2
-  const along = platformTangent(spec, rampMidU)
-  const vMid = (ramp.vNear + ramp.vFar) / 2
+  // Ramp: one pitched slab down the run — local +Z along the descent
+  // (perpendicular to the platform, away from the track), which FALLS
+  // along +Z, so a positive pitch about local +X.
+  const down = platformOutward(spec, ramp.u).multiplyScalar(-1)
   box(
-    platformPoint(spec, rampMidU, vMid, (ramp.headY + ramp.footY) / 2 + 0.08),
-    new Vector3((ramp.vFar - ramp.vNear) / 2, 0.1, Math.hypot(ramp.run, ramp.headY - ramp.footY) / 2 + 0.1),
+    platformPoint(
+      spec,
+      ramp.u,
+      ramp.vHead + ramp.run / 2,
+      (ramp.headY + ramp.footY) / 2 + 0.08,
+    ),
+    new Vector3(
+      RAMP.width / 2,
+      0.1,
+      Math.hypot(ramp.run, ramp.headY - ramp.footY) / 2 + 0.1,
+    ),
     Math.atan2(ramp.headY - ramp.footY, ramp.run),
-    Math.atan2(along.x, along.z),
+    Math.atan2(down.x, down.z),
   )
   // Canopy columns (u −6.4 / 0 / +6.4 for the 12.8 m canopy).
   for (const u of [-6.4, 0, 6.4]) {

@@ -2311,35 +2311,62 @@ function buildReclaimTank(services: DistrictServices): void {
 }
 
 /**
- * Rainwater runs: one visible feed from the walkable range's north collector
- * to the tank, and a catchpit at every other gable where the run goes under.
+ * Rainwater runs: every gable's header turns down into a catchpit and runs
+ * UNDER the yard; the walkable range's feed resurfaces as a riser beside
+ * the reclaim tank. The old design ran that feed at grade on saddles — the
+ * farm-lane and the station's step-free ramp now cross that route, and the
+ * pipe dove straight into the ramp body (owner arrow).
  */
 function buildFarmPipework(services: DistrictServices): void {
   const { writer } = services
   const frames = houseFrames()
   const tankBase = interiorHeight(TANK_X, TANK_Z)
 
+  const catchpit = (x: number, z: number): number => {
+    const g = interiorHeight(x, z)
+    const pit = box(x - 0.32, g - 0.3, z - 0.32, x + 0.32, g + 0.05, z + 0.32)
+    pit.frame = 'y-up'
+    bevel(pit, BEVEL.carcass, 2)
+    writeInto(writer, 'cast', pit)
+    const lid = box(x - 0.24, g + 0.05, z - 0.24, x + 0.24, g + 0.075, z + 0.24)
+    lid.frame = 'y-up'
+    bevel(lid, BEVEL.hardware, 2)
+    writeInto(writer, 'dark', lid)
+    return g
+  }
+
+  // The walkable range's collector: straight down into its own catchpit.
   const feedFrame = frames[1]
   const start = feedFrame.point(-(HALF_SPAN + 0.145), 0.11, HALF_LENGTH + 0.3)
+  {
+    const g = catchpit(start.x, start.z)
+    const drop = tubeAlong(
+      [
+        [start.x, start.y, start.z],
+        [start.x, g - 0.2, start.z],
+      ],
+      circle(0.055, 10),
+      { up: [0, 0, 1], cap: true },
+    )
+    drop.frame = 'y-up'
+    smoothShade(drop, SMOOTH.turned)
+    writeInto(writer, 'aluminum', drop)
+  }
+
+  // The tank-side riser: up out of a pit 0.6 m south of the junction (the
+  // pit stays clear of the farm-lane's edge), elbow into the tank inlet.
   const junction = new Vector3(TANK_X - 2.6, tankBase + 0.6, TANK_Z - 5.3)
-  const run: Vec3[] = [
-    [start.x, start.y, start.z],
-    [start.x, start.y, junction.z],
-    [junction.x + 0.4, start.y, junction.z],
-    [junction.x, junction.y, junction.z],
-  ]
-  const pipe = tubeAlong(run, circle(0.055, 10), { up: [0, 1, 0], cap: true })
-  pipe.frame = 'y-up'
-  smoothShade(pipe, SMOOTH.turned)
-  writeInto(writer, 'aluminum', pipe)
-  for (let i = 1; i < 6; i++) {
-    const t = i / 6
-    const x = start.x + (junction.x + 0.4 - start.x) * t
-    const g = interiorHeight(x, junction.z)
-    const saddle = box(x - 0.07, g - 0.1, junction.z - 0.07, x + 0.07, start.y - 0.055, junction.z + 0.07)
-    saddle.frame = 'y-up'
-    bevel(saddle, BEVEL.panel, 2)
-    writeInto(writer, 'cast', saddle)
+  {
+    const g = catchpit(junction.x, junction.z - 0.6)
+    const riser: Vec3[] = [
+      [junction.x, g - 0.2, junction.z - 0.6],
+      [junction.x, junction.y, junction.z - 0.6],
+      [junction.x, junction.y, junction.z],
+    ]
+    const pipe = tubeAlong(riser, circle(0.055, 10), { up: [1, 0, 0], cap: true })
+    pipe.frame = 'y-up'
+    smoothShade(pipe, SMOOTH.turned)
+    writeInto(writer, 'aluminum', pipe)
   }
 
   // Catchpits where the other ranges' headers turn down into the ground.
@@ -2347,7 +2374,7 @@ function buildFarmPipework(services: DistrictServices): void {
     if (frame.index === 1) continue
     for (const side of [-1, 1]) {
       const p = frame.point(side * (HALF_SPAN + 0.145), 0.11, HALF_LENGTH + 0.3)
-      const g = interiorHeight(p.x, p.z)
+      const g = catchpit(p.x, p.z)
       const drop = tubeAlong(
         [
           [p.x, p.y, p.z],
@@ -2359,14 +2386,6 @@ function buildFarmPipework(services: DistrictServices): void {
       drop.frame = 'y-up'
       smoothShade(drop, SMOOTH.turned)
       writeInto(writer, 'aluminum', drop)
-      const pit = box(p.x - 0.32, g - 0.3, p.z - 0.32, p.x + 0.32, g + 0.05, p.z + 0.32)
-      pit.frame = 'y-up'
-      bevel(pit, BEVEL.carcass, 2)
-      writeInto(writer, 'cast', pit)
-      const lid = box(p.x - 0.24, g + 0.05, p.z - 0.24, p.x + 0.24, g + 0.075, p.z + 0.24)
-      lid.frame = 'y-up'
-      bevel(lid, BEVEL.hardware, 2)
-      writeInto(writer, 'dark', lid)
     }
   }
 }

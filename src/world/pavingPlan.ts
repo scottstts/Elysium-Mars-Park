@@ -99,14 +99,20 @@ export const GUIDEWAY_CHANNEL = {
   lip: 0.09,
 } as const
 
-/** Half-width of the turnout street band (each track's clear way plus the
- *  edging strip — the reference image's single clean corridor). */
-export const THROAT_HALF = 2.85
+/**
+ * Half-width of the turnout street (the paved way each side of a track's
+ * centreline). The full throat cross-section, per side:
+ *   0     … 1.30   under the trackbed cast (the street tucks beneath it)
+ *   1.30  … 2.05   the street shoulder, 4 mm under the cast aprons
+ *   2.00  … 2.18   the edging strip (crown 6 mm proud of the tiles)
+ *   2.13  …        the tile fields (their cut buried under the strip)
+ */
+export const THROAT_HALF = 2.0
 
-/** The turnout street's plan: ring bearings it spans and the two ribbon
- *  spines (`paving.emitThroatStreet` pours it; the regions carry the same
- *  lines for trimming and the walkable field). Null only if the arrival
- *  spine never reaches the boulevard band (a plan change). */
+/** The turnout throat's plan: ring bearings it spans and the spur spine.
+ *  `paving.emitThroatGround` pours it; `throatU` is the ONE field every
+ *  surface in the zone derives from. Null only if the arrival spine never
+ *  reaches the boulevard band (a plan change). */
 export interface ThroatSpec {
   phiLo: number
   phiHi: number
@@ -114,6 +120,96 @@ export interface ThroatSpec {
   half: number
 }
 export let THROAT: ThroatSpec | null = null
+
+/**
+ * THE THROAT FIELD. U(x,z) = smooth-min of the two ways' lateral distances:
+ * the ring (bearing-clamped to the zone) and the spur spine (tangency-
+ * extended, so near the merge it nests inside the ring band). Every ground
+ * treatment in the throat is an offset of this ONE number — the street pours
+ * U ≤ half+0.05, the edging strips sweep the iso-contour U = half+0.09, the
+ * tile fields trim at U = half+0.13 — which is why the two ways' edges merge
+ * tangentially and round the gore vee instead of crossing: iso-contours of a
+ * union field cannot intersect themselves. The smooth-min (k = 0.35) rounds
+ * the vee at strip scale; away from the seams it IS the plain min.
+ */
+const SMIN_K = 0.35
+
+function smin(a: number, b: number): number {
+  const h = Math.min(1, Math.max(0, 0.5 + (0.5 * (b - a)) / SMIN_K))
+  return b + (a - b) * h - SMIN_K * h * (1 - h)
+}
+
+export function throatU(x: number, z: number): number {
+  return throatField(x, z, true)
+}
+
+/** The same union field WITHOUT the bearing clamp. The strip marcher walks
+ *  this one: the clamp is a discontinuity, and a contour march cannot cross
+ *  a discontinuity — it turns and runs along it instead (the 236 m orbiting
+ *  path that shipped knots of strip inside the band). The zone ends are the
+ *  MARCH STOPS' job, not the field's. */
+export function throatUOpen(x: number, z: number): number {
+  return throatField(x, z, false)
+}
+
+/** The wedge-bridge amount 0..1 at a point (see throatField). Exported so
+ *  the street pour can cover EVERY bridged plateau: where the field flattens
+ *  the U-band between street edge and tile cut widens into square metres,
+ *  and the tile trim cannot be trusted to resolve it. */
+export function throatBridge(x: number, z: number): number {
+  const throat = THROAT
+  if (!throat) return 0
+  const r = Math.hypot(x, z)
+  const dRing = Math.abs(r - GUIDEWAY_CHANNEL.radius)
+  const dSpur = polylineDistance(throat.spurLine, x, z)
+  return bridgeTerm(x, z, r, dRing, dSpur)
+}
+
+function bridgeTerm(
+  x: number,
+  z: number,
+  r: number,
+  dRing: number,
+  dSpur: number,
+): number {
+  const throat = THROAT
+  if (!throat) return 0
+  const gap = dRing + dSpur - 2 * (THROAT_HALF + 0.13)
+  if (gap >= 1.35 || dRing >= 1e3) return 0
+  const near = nearestOnPolyline(throat.spurLine, x, z)
+  const sx = near.x - x
+  const sz = near.y - z
+  const sl = Math.hypot(sx, sz)
+  const rx = (x / (r || 1e-6)) * GUIDEWAY_CHANNEL.radius - x
+  const rz = (z / (r || 1e-6)) * GUIDEWAY_CHANNEL.radius - z
+  const rl = Math.hypot(rx, rz)
+  if (sl <= 1e-4 || rl <= 1e-4) return 0
+  const opposed = Math.max(0, -((sx * rx + sz * rz) / (sl * rl)))
+  const t = clamp01((1.35 - gap) / 0.8)
+  return smooth(t) * opposed
+}
+
+function throatField(x: number, z: number, clampBearings: boolean): number {
+  const throat = THROAT
+  if (!throat) return 1e4
+  const r = Math.hypot(x, z)
+  let dRing = Math.abs(r - GUIDEWAY_CHANNEL.radius)
+  if (clampBearings) {
+    const phi = Math.atan2(z, x)
+    if (phi <= throat.phiLo || phi >= throat.phiHi) dRing = 1e4
+  }
+  const dSpur = polylineDistance(throat.spurLine, x, z)
+  // THE WEDGE BRIDGE. Where the two ways bound a wedge of ground too narrow
+  // to hold tiles plus two edging strips (< ~1.35 m clear), the wedge reads
+  // as STREET: U dips below the strip contour there, so the iso-contour
+  // wraps the wedge's rounded end instead of squeezing a knife-edge tile
+  // sliver into it — which is both how real special-work is paved and the
+  // only footprint the tile fields' cell trim can resolve. "Between the
+  // ways" means the directions to the two nearest alignments OPPOSE; in the
+  // merged stretch (both distances measuring the SAME side) the bridge
+  // stays off, or the band itself would balloon.
+  return smin(dRing, dSpur) - 0.75 * bridgeTerm(x, z, r, dRing, dSpur)
+}
 
 export type Region =
   | { kind: 'disc'; id: string; priority: number; cx: number; cz: number; radius: number; curb: boolean }
@@ -144,6 +240,21 @@ export type Region =
       /** Resampled centreline (world XZ), ~1.1 m stations. */
       line: Vector2[]
       halfWidth: number
+      curb: boolean
+    }
+  | {
+      kind: 'zone'
+      id: string
+      priority: number
+      /** Signed distance to the zone's footprint boundary (negative inside).
+       *  A zone is a field-defined region — the throat trims every tile
+       *  field on the SAME union field its own strips and street derive
+       *  from, which a round-capped ribbon cannot express. */
+      distance: (x: number, z: number) => number
+      minX: number
+      maxX: number
+      minZ: number
+      maxZ: number
       curb: boolean
     }
 
@@ -199,7 +310,11 @@ const RIBBON_RUNOUT: Record<string, [number, number]> = {
   'meridian-south': [4, 4],
   'meridian-west': [4, 6],
   'residential-lane': [8, 0],
-  'farm-lane': [4, 0],
+  // farm-lane's end run reaches the Farmside station's ramp discharge —
+  // the perpendicular ramp's foot lands ON this leg's centreline at
+  // ~(84.9, 6.0) — so the step-free route lands on a real walk instead of
+  // the service yard's regolith (owner finding: "leads nowhere").
+  'farm-lane': [4, 7],
   'amphitheater-spur': [4, 0],
 }
 
@@ -309,17 +424,14 @@ function buildRegions(): Region[] {
     })
   }
 
-  // THE TURNOUT STREET (P-wave 5 rebuild, owner reference image). The old
-  // treatment stacked a recessed channel, corridor cuttings, chamfered lips,
-  // verge skirts and slab margins where the spur merges the ring — every
-  // system brought its own edge lines to one spot and the throat read as a
-  // pile of intersecting bevels. Clean sheet: ONE street surface pours
-  // through the whole throat at the trackbed's level; every tile field trims
-  // to the street's smooth ribbon boundary; a single slim edging strip
-  // sweeps that boundary; the track panels sit proud on the street with
-  // their rails. Two ribbons make the plan: one along the ring arc through
-  // the zone, one along the spur across the boulevard band — tangential,
-  // so their union boundary is smooth.
+  // THE TURNOUT THROAT (owner reference image). One piece of ground, not an
+  // assembly: the zone region below trims every tile field on the SAME
+  // union field (`throatU`) that the street pour and the edging strips
+  // derive from in paving.ts — so the tile cut, the strip centreline and
+  // the street edge are three offsets of one number and can never cross,
+  // gap or stack. The old plan (two round-capped ribbons) could not say
+  // where the zone ENDS: a cap either bit the neighbouring tiles or left
+  // them bulging into the street's frame corners.
   {
     // The FULL spine, not a tail subset: a Catmull-Rom through a subset loses
     // the upstream control points' pull on the end tangents and bows metres
@@ -344,15 +456,17 @@ function buildRegions(): Region[] {
     }
     if (first >= 0) {
       const R = GUIDEWAY_CHANNEL.radius
-      // Spur leg: band entry down to the merge (the ring leg takes over
-      // inside R + 0.5). One overhang station past the band edge so the
-      // street mouth meets the regolith trench instead of a buried strip.
+      // The spur spine, marched all the way to TANGENCY (ρ → R), not cut at
+      // R + 0.5: the union field measures distance to this polyline, and a
+      // line that stops short ends in a round cap whose bulge kinks the
+      // outer edging exactly at the hand-off. One overhang station past the
+      // band entry so the street mouth meets the regolith trench.
       const spurLine: Vector2[] = []
       let phiHi = Math.PI / 2
       for (let i = first; i < sampled.length; i++) {
         const p = sampled[i]
         const rho = p.length()
-        if (rho < R + 0.5) break
+        if (rho < R + 0.02) break
         spurLine.push(p.clone())
         if (rho < R + 2.2) phiHi = Math.max(phiHi, Math.atan2(p.y, p.x))
       }
@@ -361,45 +475,52 @@ function buildRegions(): Region[] {
         spurLine.unshift(sampled[first].clone().addScaledVector(dir, 0.35))
       }
       phiHi += 2.5 / R
-      // The street runs west at least to where the platform and terrace
-      // flank the ring tightly (the owner's reference frames the whole
-      // throat as one treatment) — the hand-off to the plain channel then
-      // happens hidden between paved fields, never mid-view.
-      phiHi = Math.max(phiHi, Math.PI / 2 + 0.115)
-      const phiLo = Math.PI / 2 - 3.5 / R
-      THROAT = { phiLo, phiHi, spurLine, half: THROAT_HALF }
-      // The REGION's arc line stops one cap radius short of each end: a
-      // ribbon region ends in a round cap, and a cap at the pour's end would
-      // bite the neighbouring tiles beyond the poured surface. Shortened,
-      // the caps land inside the pour; the pour's square corners extend
-      // PAST the trim line and tuck 50+ mm under the untrimmed tiles —
-      // deliberate hidden bury, no hole, nothing coplanar.
-      const capIn = (THROAT_HALF - 0.02) / R
-      const aLo = phiLo + capIn
-      const aHi = phiHi - capIn
-      const arcLine: Vector2[] = []
-      const arcSteps = Math.max(4, Math.round(((aHi - aLo) * R) / 1.1))
-      for (let i = 0; i <= arcSteps; i++) {
-        const a = aHi - ((aHi - aLo) * i) / arcSteps
-        arcLine.push(new Vector2(Math.cos(a) * R, Math.sin(a) * R))
+      // The street spans the WHOLE station frontage (the owner's reference
+      // frames the throat as one treatment): both ends land 0.6 m inside
+      // the terrace's corner bearings (x = ±19 → ±11.3°), so each header
+      // strip coincides with the terrace's own corner boundary and the
+      // hand-off to the plain channel happens where the hero fields end —
+      // never mid-view. The boulevard planters (outer wall r = 94.90)
+      // clear the edging strip's outer face (r ≤ 94.88) by design.
+      phiHi = Math.max(phiHi, Math.PI / 2 + 0.1937)
+      const phiLo = Math.PI / 2 - 0.1937
+      // Continue the spine ALONG THE RING past tangency so the polyline's
+      // end cap nests wholly inside the ring band — clamped clear of the
+      // phiHi header.
+      if (spurLine.length >= 2) {
+        let phi = Math.atan2(
+          spurLine[spurLine.length - 1].y,
+          spurLine[spurLine.length - 1].x,
+        )
+        for (let k = 0; k < 3 && phi + 1.1 / R < phiHi - 0.6 / R; k++) {
+          phi += 1.1 / R
+          spurLine.push(new Vector2(Math.cos(phi) * R, Math.sin(phi) * R))
+        }
       }
-      if (arcLine.length >= 2) {
+      THROAT = { phiLo, phiHi, spurLine, half: THROAT_HALF }
+      if (spurLine.length >= 2) {
+        const trim = THROAT_HALF + 0.13
+        const reach = trim + 0.5
+        const xs: number[] = []
+        const zs: number[] = []
+        for (const p of spurLine) {
+          xs.push(p.x)
+          zs.push(p.y)
+        }
+        for (let k = 0; k <= 8; k++) {
+          const phi = phiLo + ((phiHi - phiLo) * k) / 8
+          xs.push(Math.cos(phi) * R)
+          zs.push(Math.sin(phi) * R)
+        }
         list.push({
-          kind: 'ribbon',
+          kind: 'zone',
           id: 'turnout-street',
           priority: 98,
-          line: arcLine,
-          halfWidth: THROAT_HALF,
-          curb: false,
-        })
-      }
-      if (spurLine.length >= 2) {
-        list.push({
-          kind: 'ribbon',
-          id: 'turnout-street-spur',
-          priority: 98,
-          line: spurLine,
-          halfWidth: THROAT_HALF,
+          distance: (x, z) => throatU(x, z) - trim,
+          minX: Math.min(...xs) - reach,
+          maxX: Math.max(...xs) + reach,
+          minZ: Math.min(...zs) - reach,
+          maxZ: Math.max(...zs) + reach,
           curb: false,
         })
       }
@@ -461,6 +582,8 @@ export function regionDistance(region: Region, x: number, z: number): number {
     }
     case 'ribbon':
       return polylineDistance(region.line, x, z) - region.halfWidth
+    case 'zone':
+      return region.distance(x, z)
   }
 }
 
@@ -500,12 +623,28 @@ export function projectToBoundary(region: Region, x: number, z: number, out: Vec
         near.y + (dz / d) * region.halfWidth,
       )
     }
+    case 'zone': {
+      // Walk the (smooth) distance field's gradient onto the boundary.
+      let px = x
+      let pz = z
+      for (let i = 0; i < 6; i++) {
+        const d = region.distance(px, pz)
+        if (Math.abs(d) < 1e-3) break
+        const h = 0.05
+        const gx = (region.distance(px + h, pz) - region.distance(px - h, pz)) / (2 * h)
+        const gz = (region.distance(px, pz + h) - region.distance(px, pz - h)) / (2 * h)
+        const l = Math.hypot(gx, gz) || 1
+        px -= (gx / l) * d
+        pz -= (gz / l) * d
+      }
+      return out.set(px, pz)
+    }
   }
 }
 
 const scratchNear = new Vector2()
 
-function polylineDistance(line: Vector2[], x: number, z: number): number {
+export function polylineDistance(line: Vector2[], x: number, z: number): number {
   let best = Infinity
   for (let i = 0; i < line.length - 1; i++) {
     const d = segmentDistanceSq(line[i], line[i + 1], x, z)
@@ -610,6 +749,18 @@ function buildGrid(): void {
     let minZ: number
     let maxX: number
     let maxZ: number
+    if (region.kind === 'zone') {
+      stamp(
+        region.minX - reach,
+        region.minZ - reach,
+        region.maxX + reach,
+        region.maxZ + reach,
+        (cell) => {
+          cellRegions[cell].push(index)
+        },
+      )
+      return
+    }
     if (region.kind === 'disc') {
       minX = region.cx - region.radius - reach
       maxX = region.cx + region.radius + reach
@@ -730,8 +881,9 @@ export function pavedTraffic(x: number, z: number): number {
   for (let i = 0; i < segments.length; i += 2) {
     const region = PAVED_REGIONS[segments[i]]
     if (region.kind !== 'ribbon') continue
-    // The spur corridors are guideway, not walk — no desire-line wear.
-    if (region.id.startsWith('spur-corridor') || region.id.startsWith('turnout-street')) continue
+    // The spur corridors are guideway, not walk — no desire-line wear. (The
+    // turnout zone never reaches here: it is not a ribbon.)
+    if (region.id.startsWith('spur-corridor')) continue
     const s = segments[i + 1]
     const d = Math.sqrt(segmentDistanceSq(region.line[s], region.line[s + 1], x, z))
     const reach = region.halfWidth + 1.2
@@ -903,10 +1055,10 @@ export function insideGuidewayChannel(x: number, z: number, margin = 0): boolean
 /** The track ground bands share one contract; interiorHeight, the
  *  floor-light exclusion and the channel-lip suppression all ask through
  *  here. */
-const CORRIDOR_IDS = ['turnout-street', 'turnout-street-spur', 'spur-corridor-promenade']
+const CORRIDOR_IDS = ['turnout-street', 'spur-corridor-promenade']
 
 interface CorridorBox {
-  region: Region & { kind: 'ribbon' }
+  distance: (x: number, z: number) => number
   minX: number
   maxX: number
   minZ: number
@@ -921,23 +1073,35 @@ export function spurCorridorDistance(x: number, z: number): number {
     corridorBoxes = []
     for (const id of CORRIDOR_IDS) {
       const region = PAVED_REGIONS.find((r) => r.id === id)
-      if (!region || region.kind !== 'ribbon') continue
-      const xs = region.line.map((p) => p.x)
-      const zs = region.line.map((p) => p.y)
-      const pad = region.halfWidth + 2.4
-      corridorBoxes.push({
-        region,
-        minX: Math.min(...xs) - pad,
-        maxX: Math.max(...xs) + pad,
-        minZ: Math.min(...zs) - pad,
-        maxZ: Math.max(...zs) + pad,
-      })
+      if (!region) continue
+      if (region.kind === 'zone') {
+        corridorBoxes.push({
+          distance: region.distance,
+          minX: region.minX,
+          maxX: region.maxX,
+          minZ: region.minZ,
+          maxZ: region.maxZ,
+        })
+      } else if (region.kind === 'ribbon') {
+        const xs = region.line.map((p) => p.x)
+        const zs = region.line.map((p) => p.y)
+        const pad = region.halfWidth + 2.4
+        const line = region.line
+        const halfWidth = region.halfWidth
+        corridorBoxes.push({
+          distance: (qx, qz) => polylineDistance(line, qx, qz) - halfWidth,
+          minX: Math.min(...xs) - pad,
+          maxX: Math.max(...xs) + pad,
+          minZ: Math.min(...zs) - pad,
+          maxZ: Math.max(...zs) + pad,
+        })
+      }
     }
   }
   let best = 1e4
   for (const box of corridorBoxes) {
     if (x < box.minX || x > box.maxX || z < box.minZ || z > box.maxZ) continue
-    const d = polylineDistance(box.region.line, x, z) - box.region.halfWidth
+    const d = box.distance(x, z)
     if (d < best) best = d
   }
   return best

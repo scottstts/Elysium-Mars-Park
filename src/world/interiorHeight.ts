@@ -2,8 +2,10 @@ import { AMPHITHEATER, ARRIVAL_SPINE, BOULEVARD, LOOP, PADS } from './parkPlan'
 import {
   GUIDEWAY_CHANNEL,
   PAVE,
+  THROAT,
   insideSpurCorridor,
   pavedSignedDistance,
+  polylineDistance,
 } from './pavingPlan'
 
 /**
@@ -203,10 +205,94 @@ export function corridorDip(x: number, z: number, grade = groundGrade(x, z)): nu
   return (target - grade) * w
 }
 
-/** What the regolith floor mesh draws: the grade conformed to the corridor. */
+/** What the regolith floor mesh draws: the grade conformed to the corridor
+ *  AND to the throat's grade conform — where the fields dish DOWN to the
+ *  street (throatLift < 0) the sheet follows, or it roofs the lowered tiles
+ *  (dirt poking through a paved forecourt — the owner's moat). Dig-only,
+ *  like every sheet conform. */
 export function regolithSurface(x: number, z: number): number {
   const grade = groundGrade(x, z)
-  return grade + corridorDip(x, z, grade)
+  return grade + Math.min(corridorDip(x, z, grade), Math.min(0, throatLift(x, z)))
+}
+
+/**
+ * THE THROAT GRADE CONFORM — the cross-fall absorber of the turnout zone.
+ *
+ * The street pours at the PROJECTED crown (the track's datum); the tile
+ * fields pour at the LOCAL slab datum. Across the throat the two diverge by
+ * up to ±0.18 m of natural cross-fall, and something must absorb it. On the
+ * plain ring that job belongs to the channel's chamfered lip; in the throat
+ * the owner's reference shows the real-world answer — the GROUND IS GRADED
+ * TO THE STREET: tiles meet the edging strip flush (street + 46 mm, so the
+ * strip's crown stands its designed 6 mm proud), easing back to the natural
+ * grade over ~2.7 m laterally and ~3 m of arc beyond the zone's headers.
+ *
+ * Applied by `paving.slabTop` (every pour, curb, planter base and footing
+ * follows automatically) and by `interiorHeight`'s paved branch (physics
+ * and props agree). The regolith never lifts — dirt is not paving.
+ */
+/**
+ * The throat's crown datum with the MEDIAL BLEND: the two ways' crowns
+ * genuinely diverge away from tangency (the ring follows its grade, the
+ * spur its own descent — ~0.1 m apart across the zone), and any surface
+ * keyed to "the nearer one" creases on the switch line. Every throat
+ * surface (street, strips, lifted tiles, the walkable datum) reads THIS,
+ * which mixes the two over the 1.6 m around equidistance.
+ */
+export function throatCrown(x: number, z: number): number {
+  const r = Math.hypot(x, z) || 1e-6
+  const dRing = Math.abs(r - LOOP.radius)
+  const ringCrown =
+    groundGrade((x / r) * LOOP.radius, (z / r) * LOOP.radius) +
+    PAVE.rise -
+    GUIDEWAY_CHANNEL.recess
+  const spur = spurTrackDatum(x, z)
+  if (!spur) return ringCrown
+  // Inverse-distance weighting ANCHORED AT THE CAST EDGES (|d| = 1.3): a
+  // plain medial blend left the street up to 50 mm shy of whichever cast it
+  // ran beside near the merge, and every exposed cast flank read as a loose
+  // panel (owner: "messy parts"). Squared IDW pins the street to each
+  // cast's own datum at its edge and varies smoothly between them.
+  const aRing = Math.max(dRing - 1.3, 0.02)
+  const aSpur = Math.max(spur.d - 1.3, 0.02)
+  const wRing = 1 / (aRing * aRing)
+  const wSpur = 1 / (aSpur * aSpur)
+  return (ringCrown * wRing + spur.y * wSpur) / (wRing + wSpur)
+}
+
+export function throatLift(x: number, z: number): number {
+  const throat = THROAT
+  if (!throat) return 0
+  const r = Math.hypot(x, z)
+  const dRing = Math.abs(r - LOOP.radius)
+  const dSpurLine = polylineDistance(throat.spurLine, x, z)
+  const lateral = Math.min(dRing, dSpurLine)
+  const full = throat.half + 0.13
+  // A WIDE fade (8 m): at 2.7 m the graded apron was a visible tinted ring
+  // around the band — a 6 % slope facing away from the low sun (the owner's
+  // "moat"). At 8 m it is a ~2 % dish across the whole terrace frontage,
+  // the real-world grading a station forecourt gets.
+  const fade = throat.half + 8
+  if (lateral >= fade) return 0
+  const wLat =
+    lateral <= full ? 1 : 1 - smooth((lateral - full) / (fade - full))
+  // Longitudinal weight: full through the zone, easing out over 5 m of arc
+  // beyond each header so the tile fields TILT back to their natural datum
+  // instead of stepping on the header line. The spur leg needs no fade — it
+  // ends in the regolith trench, which never lifts.
+  let w = wLat
+  if (dRing < dSpurLine) {
+    const phi = Math.atan2(z, x)
+    const RAMP = 5 / LOOP.radius
+    const along = clamp01(
+      Math.min(phi - (throat.phiLo - RAMP), throat.phiHi + RAMP - phi) / RAMP,
+    )
+    w = wLat * smooth(along)
+  }
+  if (w <= 0) return 0
+  // Target: tiles at street + 46 mm, street at the blended crown + 14 mm.
+  const natural = groundGrade(x, z) + PAVE.rise
+  return (throatCrown(x, z) + 0.06 - natural) * w
 }
 
 // --- the arrival spur's ground truth ---------------------------------------
@@ -286,13 +372,20 @@ export function interiorHeight(x: number, z: number): number {
   // shallow contract still applies via the coverage path below.
   if (insideSpurCorridor(x, z, -0.12)) {
     const field = corridorField(x, z)
-    if (field && field.d < 3.0) return field.crown + 0.02
+    // Blended crown, not the min-switch: walking across the wedge between
+    // the merging ways must not pop 0.1 m at the generator switch line.
+    if (field && field.d < 3.0) return throatCrown(x, z) + 0.02
     const track = spurTrackDatum(x, z)
     if (track) return track.y + 0.018
   }
   const sd = pavedSignedDistance(x, z)
   const grade = groundGrade(x, z)
-  if (sd >= PAVE.edgeFade) return grade + corridorDip(x, z, grade)
+  const lift = throatLift(x, z)
+  const sheetDip = Math.min(corridorDip(x, z, grade), Math.min(0, lift))
+  if (sd >= PAVE.edgeFade) return grade + sheetDip
   const coverage = sd <= 0 ? 1 : 1 - smooth(sd / PAVE.edgeFade)
-  return grade + corridorDip(x, z, grade) * (1 - coverage) + PAVE.rise * coverage
+  // The paved datum carries the throat's grade conform (see throatLift) so
+  // physics and props stand exactly on the poured tiles there; the dirt
+  // datum matches regolithSurface for the same reason.
+  return grade + sheetDip * (1 - coverage) + (PAVE.rise + lift) * coverage
 }

@@ -1,7 +1,7 @@
 import { AdditiveBlending, Color, Sprite, Vector3 } from 'three'
 import type { InstancedMesh, Object3D } from 'three'
 import { SpriteNodeMaterial } from 'three/webgpu'
-import { float, mix, smoothstep, uniform, uv, vec2, vec3 } from 'three/tsl'
+import { float, mix, mrt, smoothstep, uniform, uv, vec2, vec3, vec4 } from 'three/tsl'
 import type { Rng } from '../core/prng'
 import { markParticle } from '../render/layers'
 import {
@@ -235,6 +235,18 @@ export class MistSystem {
       material.transparent = true
       material.depthWrite = false
       material.blending = AdditiveBlending
+      // THE MOVING RECTANGLE ARTIFACT (owner, twice): the scene pass is MRT —
+      // any material that doesn't override `mrtNode` gets the pass-level
+      // `normal: vec4(normalView, 1)` written for every fragment it
+      // rasterizes. A sprite rasterizes its whole QUAD (opacity only gates
+      // colour), and additive blending ADDS a camera-facing normal plus a
+      // receiver-mask 1 across that rectangle into the normal attachment —
+      // GTAO then reads the corrupted normals and darkens the exact quad,
+      // growing and dying with the puff. Zeroing the attachment makes the
+      // additive write a no-op; the colour output is untouched. castShadow
+      // and the particle layer never touched this path — the artifact is not
+      // a shadow, it is the AO reading the normal buffer.
+      material.mrtNode = mrt({ normal: vec4(0) })
       const life = this.life.add(seedUniform).fract()
       material.colorNode = mix(vec3(0.62, 0.68, 0.66), vec3(0.36, 0.4, 0.39), life)
       // Radial falloff — without it every puff is a translucent square.
