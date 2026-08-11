@@ -4,6 +4,12 @@ Runtime shape mirrors SeaPark: `main.ts` is bootstrap only; `runtime/loop.ts`
 runs fixed 60 Hz simulation with variable-rate render and interpolation alpha;
 `runtime/registry.ts` init-orders systems and drives fixed/update/lateUpdate;
 systems are wired explicitly in main.ts, never discovered via context.
+`index.html` loads `boot.ts`, NOT main: the desktop-Chromium gate (owner
+directive 2026-08-11) dynamically imports main only on an eligible platform
+(`ui/platformGate.ts` `detectPlatform` via `navigator.userAgentData`), so an
+ineligible device downloads ~8 kB of gate and zero game chunks; everything
+else gets the responsive SHEET 00 notice plate. userAgentData needs a secure
+context — localhost is fine, plain-http LAN serving gates out real desktops.
 
 Choices beyond the code:
 

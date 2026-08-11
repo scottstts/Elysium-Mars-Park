@@ -14,11 +14,17 @@
  * wordmark, no hero. Layer inking is pure CSS opacity on <g> groups, so the
  * main thread stays free for compilation.
  *
- * The one action is a rubber stamp in the title block. Until the sheet is
- * finished it is an empty ruled box carrying the plot percentage; when the
- * world is ready the stamp lands, rotated, and ADMIT ONE / BOARD is the only
- * clickable thing on screen. Boot contract for main.ts and headless probes:
- * root `id="entry"`, exactly one <button>, which gains class `ready`.
+ * HIERARCHY (owner note, REV H): the sheet must never compete with the one
+ * action. Two states, two orders. While PLOTTING, the section is the figure,
+ * the live plot register + percentage are the single secondary focus, and
+ * every accompaniment box (pen table, key plan, Detail A, parts, notes) is
+ * demoted to tier-3 ink (`.t3`, 55%) — texture, not content. When READY, the
+ * whole plate washes back (root class `done`) and the stamp leaves its
+ * register cell to land full-size over the receded drawing: ADMIT ONE /
+ * BOARD, rotated, with an explicit CLICK TO BOARD line under it. Until then
+ * the same button is the ruled percentage box in the margin. Boot contract
+ * for main.ts and headless probes: root `id="entry"`, exactly one <button>,
+ * which gains class `ready`.
  *
  * The soul of the sheet is REV G. Tree 1 grew a metre past the planting
  * envelope it was drawn inside; the revision cloud is around the canopy and the
@@ -108,6 +114,11 @@ const CSS = `
 #entry .tr { fill: var(--rust); font-family: var(--sans); font-size: 10.5px; letter-spacing: 0.09em; }
 #entry .ly { opacity: 0; transition: opacity 620ms ease; }
 #entry .ly.on { opacity: 1; }
+/* Tier-3 ink: the accompaniment boxes (pen table, key plan, Detail A, parts,
+   notes). Demoted so the section + register read first; still rich as
+   texture. Multiplies with the .ly plot-in, so a t3 box inks straight to
+   its demoted weight. */
+#entry .t3 { opacity: 0.55; }
 #entry.void .field svg { opacity: 0.14; }
 
 /* --- the halt note (WebGPU refusal) -------------------------------------- */
@@ -195,11 +206,11 @@ const CSS = `
   letter-spacing: 0.3em; text-indent: 0.3em; text-transform: uppercase;
 }
 #entry .pending .p-now {
-  color: var(--ink-2); max-width: 94%; overflow: hidden;
+  color: var(--ink); max-width: 94%; overflow: hidden;
   white-space: nowrap; text-overflow: ellipsis;
 }
 #entry .p-num {
-  display: flex; align-items: baseline; gap: 0.1em; color: var(--ink-2);
+  display: flex; align-items: baseline; gap: 0.1em; color: var(--ink);
   font-family: var(--mono); line-height: 1;
 }
 #entry .p-num b { font-size: clamp(19px, 2.6vh, 34px); font-weight: 400; }
@@ -207,30 +218,57 @@ const CSS = `
 #entry.void .p-num { display: none; }
 #entry.void .pending { border-color: var(--rust); border-style: solid; }
 #entry.void .pending em { color: var(--rust); }
+/* Ready: hierarchy inverts in one move. The button leaves the register cell
+   (fixed against the #entry overlay, which is the viewport) and lands as a
+   full-size stamp over the washed plate — the primary element, then paper. */
+#entry button.ready {
+  cursor: pointer;
+  position: fixed; left: 50%; top: 53%;
+  width: min(max(44vw, 52vmin), 86vw, 900px);
+  height: auto; aspect-ratio: 3.15 / 1; max-height: 34vh;
+  transform: translate(-50%, -50%);
+}
 #entry .issued {
-  inset: -7% 1%; gap: 0.12em; transform: rotate(-2.6deg);
-  border: 1.6px solid var(--rust); color: var(--rust);
-  box-shadow: inset 0 0 0 2.4px var(--paper), inset 0 0 0 3.6px var(--rust);
-  transition: background 160ms ease, transform 160ms ease;
+  inset: 0; gap: 0.3em; transform: rotate(-3deg);
+  border: 2.5px solid var(--rust); color: var(--rust);
+  background-color: rgba(232, 223, 205, 0.62);
+  box-shadow: inset 0 0 0 4.5px var(--paper), inset 0 0 0 6.5px var(--rust);
+  transition: transform 160ms ease;
 }
 #entry .issued em {
-  font-style: normal; font-size: clamp(7px, 0.8vmin, 9.5px);
-  letter-spacing: 0.34em; text-indent: 0.34em; text-transform: uppercase;
+  font-style: normal; font-size: clamp(10px, 1.7vmin, 21px);
+  letter-spacing: 0.42em; text-indent: 0.42em; text-transform: uppercase;
 }
 #entry .issued b {
-  font-size: clamp(17px, 2.3vh, 30px); font-weight: 700; line-height: 1.05;
-  letter-spacing: 0.2em; text-indent: 0.2em; text-transform: uppercase;
+  font-size: clamp(30px, 6.6vmin, 84px); font-weight: 700; line-height: 1.06;
+  letter-spacing: 0.24em; text-indent: 0.24em; text-transform: uppercase;
 }
+/* The one line allowed to break costume: an explicit affordance. */
+#entry .hint {
+  position: absolute; left: 50%; top: calc(100% + 1em);
+  transform: translateX(-50%);
+  display: none; white-space: nowrap; font-style: normal;
+  font-family: var(--mono); font-size: clamp(9px, 1.15vmin, 13px);
+  letter-spacing: 0.34em; text-indent: 0.34em; text-transform: uppercase;
+  color: var(--ink-2);
+}
+#entry button.ready .hint { display: block; animation: entry-hint 420ms ease 980ms both; }
 #entry button:not(.ready) .issued { display: none; }
 #entry button.ready .pending { display: none; }
-#entry button.ready { cursor: pointer; }
-#entry button.ready .issued { animation: entry-stamp 460ms cubic-bezier(0.2, 1.3, 0.4, 1) both; }
+#entry button.ready .issued { animation: entry-stamp 540ms cubic-bezier(0.16, 1.3, 0.3, 1) 260ms both; }
 #entry button.ready:hover .issued, #entry button.ready:focus-visible .issued {
-  background: rgba(165, 60, 21, 0.09); transform: rotate(-2.6deg) scale(1.015);
+  background-image: linear-gradient(rgba(165, 60, 21, 0.08), rgba(165, 60, 21, 0.08));
+  transform: rotate(-3deg) scale(1.02);
 }
-#entry button.ready:active .issued { transform: rotate(-2.6deg) scale(0.99); }
+#entry button.ready:active .issued { transform: rotate(-3deg) scale(0.985); }
 #entry button:focus-visible { outline: none; }
-#entry button.ready:focus-visible .issued { outline: 1px dashed var(--rust); outline-offset: 5px; }
+#entry button.ready:focus-visible .issued { outline: 1.5px dashed var(--rust); outline-offset: 7px; }
+/* The finished sheet steps back so the stamp owns the frame. */
+#entry .field svg, #entry .cap, #entry .reg, #entry .revs,
+#entry .title, #entry .foot, #entry .trim { transition: opacity 760ms ease; }
+#entry.done .field svg { opacity: 0.4; }
+#entry.done .cap, #entry.done .reg, #entry.done .revs { opacity: 0.42; }
+#entry.done .title, #entry.done .foot, #entry.done .trim { opacity: 0.5; }
 
 /* --- title block and sheet caption --------------------------------------- */
 #entry .title { grid-area: title; border-left: 1px solid var(--ink); border-top: 1px solid var(--ink); }
@@ -287,12 +325,17 @@ const CSS = `
   #entry .revs { display: none; }
 }
 @keyframes entry-stamp {
-  from { opacity: 0; transform: rotate(-2.6deg) scale(1.42); }
-  to { opacity: 1; transform: rotate(-2.6deg) scale(1); }
+  from { opacity: 0; transform: rotate(-3deg) scale(1.6); }
+  to { opacity: 1; transform: rotate(-3deg) scale(1); }
+}
+@keyframes entry-hint {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #entry .ly, #entry .row, #entry .issued { transition: none; }
-  #entry button.ready .issued { animation: none; }
+  #entry .ly, #entry .row, #entry .issued, #entry .field svg, #entry .cap,
+  #entry .reg, #entry .revs, #entry .title, #entry .foot, #entry .trim { transition: none; }
+  #entry button.ready .issued, #entry button.ready .hint { animation: none; }
 }
 `
 
@@ -558,17 +601,24 @@ function sheetBase(): string {
   out.push(ln(24, 398, 232, 398, 's3'))
   out.push(ln(24, 401.5, 232, 401.5, 's0'))
   out.push(tx(244, 392, 'ON THE ARRIVAL AXIS, LOOKING WEST · 1:500', 'ts'))
-  out.push(frame(BOX.keyPlan, 'KEY PLAN · 1:2000'))
-  out.push(frame(BOX.detail, 'DETAIL A · PLATFORM EDGE AT GATE S · 1:50'))
-  out.push(frame(BOX.pens, 'PEN TABLE'))
-  out.push(frame(BOX.parts, 'STANDARD PARTS · SCALES AS NOTED'))
-  out.push(frame(BOX.notes, 'GENERAL NOTES'))
+  out.push(
+    t3(
+      frame(BOX.keyPlan, 'KEY PLAN · 1:2000') +
+        frame(BOX.detail, 'DETAIL A · PLATFORM EDGE AT GATE S · 1:50') +
+        frame(BOX.pens, 'PEN TABLE') +
+        frame(BOX.parts, 'STANDARD PARTS · SCALES AS NOTED') +
+        frame(BOX.notes, 'GENERAL NOTES'),
+    ),
+  )
   return out.join('')
 }
 
 /* --------------------------------------------------------------- layers --- */
 
 const layer = (key: string, body: string): string => `<g class="ly" data-layer="${key}">${body}</g>`
+
+/** Tier-3 ink: accompaniment that must read as texture, never as content. */
+const t3 = (body: string): string => `<g class="t3">${body}</g>`
 
 /** X-PEN — the plotter's own pen table. The render pipeline, as a legend. */
 function penTable(): string {
@@ -590,7 +640,7 @@ function penTable(): string {
     out.push(tx(b.x + 138, y + 3.4, row[2], 'ts'))
   })
   out.push(tx(b.x + 12, b.y + b.h - 8, 'PLOTTED ON ISRU BOND · 841 × 1189', 'ts'))
-  return layer('render-pipeline', out.join(''))
+  return layer('render-pipeline', t3(out.join('')))
 }
 
 /** E-SKY — the held sun, and the shaft it throws through the oculus. */
@@ -758,7 +808,7 @@ function figureLayer(): string {
   out.push(figureSilhouette(fx, base, DET.k))
   out.push(dimV(dy(W.car.floor + W.eye), base, fx + 40, fx + 13, '1700'))
   out.push(tx(b.x + b.w - 14, 452, 'VISITOR · NO EVA · NO SUIT CHECK', 'ts', 'end'))
-  return layer('player', out.join(''))
+  return layer('player', t3(out.join('')))
 }
 
 /** A-KIT — three parts of the kit the park is assembled from. */
@@ -807,7 +857,7 @@ function partsLayer(): string {
   out.push(ln(cx - 40, base, cx + 40, base, 's3'))
   out.push(tx(cx, base + 16, 'A-KIT/11 PLANTER KERB', 'ts', 'middle'))
   out.push(tx(cx, base + 28, 'RIM 0.520 · 1:20', 'tn', 'middle'))
-  return layer('archkit', out.join(''))
+  return layer('archkit', t3(out.join('')))
 }
 
 /** A-INT — the Commons drum, cut by the section at z − 54, and the notes. */
@@ -828,7 +878,8 @@ function interiorsLayer(): string {
 
   // The general notes: the part of a drawing where somebody speaks. Set as
   // real two-line notes with a hanging indent — a 66-character line squeezed
-  // into this column by textLength would crush the tracking.
+  // into this column by textLength would crush the tracking. Tier-3: the
+  // drum above is part of the section (secondary), the notes are furniture.
   const b = BOX.notes
   const notes: ReadonlyArray<readonly string[]> = [
     ['ALL LEVELS TO PARK DECK DATUM ± 0.000.', 'THE SPRINGING IS THE DATUM.'],
@@ -838,16 +889,17 @@ function interiorsLayer(): string {
     ['THE ONLY SOUND IS AIR, MACHINERY AND THE', 'TRAM. NOTHING IS PLAYED.'],
     ['OBJECTS BEYOND THE CUT OMITTED FOR', 'CLARITY.'],
   ]
+  const noteInk: string[] = []
   let ny = b.y + 42
   notes.forEach((note, i) => {
-    out.push(tx(b.x + 12, ny, String(i + 1), 'tn'))
+    noteInk.push(tx(b.x + 12, ny, String(i + 1), 'tn'))
     for (const line of note) {
-      out.push(tx(b.x + 32, ny, line, 'tx'))
+      noteInk.push(tx(b.x + 32, ny, line, 'tx'))
       ny += 14
     }
     ny += 6
   })
-  return layer('interiors', out.join(''))
+  return layer('interiors', out.join('') + t3(noteInk.join('')))
 }
 
 /** G-KEY — the whole park at 1:2000, and where this section is cut. */
@@ -926,7 +978,7 @@ function keyPlanLayer(): string {
   out.push(pl([[nx, ny - 22], [nx + 6, ny + 10], [nx, ny + 3], [nx - 6, ny + 10]], 'f2', true))
   out.push(tx(nx, ny + 24, 'N', 'tb', 'middle'))
   out.push(tx(b.x + 12, b.y + b.h - 8, 'PARK Ø 260 · FLOOR r 122 · LOOP r 97 · 3 STOPS', 'ts'))
-  return layer('park', out.join(''))
+  return layer('park', t3(out.join('')))
 }
 
 /** T-LOOP — the track, the gate, the car, and the way in. */
@@ -989,7 +1041,7 @@ function detailTram(): string {
   out.push(leader([dx(1.35), dy(f + 0.4)], [dx(3.2), 520], 30, '100 CLEAR', 'tn'))
   out.push(dimV(dy(f + c.doorHead), dy(f), dx(-2.1), dx(-hw), '1940'))
   out.push(tx(b.x + b.w - 14, 618, 'LEVEL BOARDING · DOOR CLEAR 1760', 'ts', 'end'))
-  return layer('tram', out.join(''))
+  return layer('tram', t3(out.join('')))
 }
 
 /** M-GKR — the machines that keep it: one on the shell, one on the platform. */
@@ -1171,13 +1223,14 @@ function markup(): string {
     `<span class="p-num"><b class="pct">0</b><i>%</i></span>` +
     `<em class="p-now">Calibrating pens</em></span>` +
     `<span class="issued"><em>Admit one</em><b>Board</b><em>Gate S · The Loop</em></span>` +
+    `<i class="hint">Click to board</i>` +
     `</button>` +
     `</div>` +
     `</div>` +
     `<div class="foot">` +
     `<h1>Dome One — General Arrangement</h1>` +
     `<div class="sub">Section A–A · Key plan · Detail A · Sheet 03 of 12</div>` +
-    `<div class="adm">Admission is by stamp, right. Gate S is always open.</div>` +
+    `<div class="adm">Admission is by stamp. Gate S is always open.</div>` +
     `</div>` +
     `<div class="title">` +
     `<div class="proj"><b>Elysium Commons</b><span>Elysium Planitia, Mars · − 2 540 m</span></div>` +
@@ -1264,6 +1317,10 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
       peak = LAYERS.length - 1
       count.textContent = String(LAYERS.length)
       pct.textContent = '100'
+      // Hierarchy inversion: the plate recedes (root `done` washes drawing,
+      // register, title block), then the stamp lands over it. Sequenced by
+      // CSS — wash eases immediately, stamp animation is delayed 260 ms.
+      root.classList.add('done')
       button.disabled = false
       button.classList.add('ready')
       button.focus({ preventScroll: true })

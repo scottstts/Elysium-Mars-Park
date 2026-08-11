@@ -2574,3 +2574,66 @@ plate; do not regress to a hero + button.
 - Long annotation must be wrapped by hand into ≤ ~40-character lines. Forcing
   a 66-character note into a 370-unit column with `textLength` crushes the
   tracking to negative; SVG text does not wrap.
+
+## SHEET 03 REV H — hierarchy pass (owner critique) + the desktop gate
+
+- **Owner rejected the first SHEET 03 execution on HIERARCHY, not concept**:
+  "drowning in distractions… user might not even realize i'm supposed to
+  click Board". The fix is two states with inverted orders, all CSS:
+  (1) PLOTTING — the section is the figure; the live percentage/caption and
+  register are the one secondary focus (full ink now); all five
+  accompaniment boxes (pen table, key plan, Detail A, standard parts, notes)
+  are wrapped in `<g class="t3">` at 55% ink — texture, not content. The t3
+  wrapper multiplies with the `.ly` plot-in, so a demoted box inks straight
+  to its demoted weight. (2) READY — root gains `done`: drawing washes to
+  40%, margin/title/foot to ~45%, and the button leaves the register cell
+  via `position: fixed` (the #entry overlay IS the viewport) to land as a
+  min(max(44vw, 52vmin), 86vw, 900px) stamp, aspect-ratio 3.15/1, over the
+  receded plate — delayed 260 ms behind the wash, with an explicit CLICK TO
+  BOARD mono line fading in under it. Lesson for any boot-page work: a
+  dense aesthetic is fine, but the CTA state must INVERT the hierarchy, not
+  join the density; and a button confined to a layout cell can never become
+  primary — promote it out of flow at the state change.
+- The behavioral probe recipe for this screen lives in the session
+  scratchpad (`entry-probe.mjs`): run the REAL createEntryScreen against a
+  ~80-line DOM stub (classList sets, innerHTML capture, querySelector memo),
+  replay the true boot label sequence including aliases and the double
+  render-pipeline report, then assert the contract classes (`button.ready`,
+  root `done`), one-button rule, balanced `<g>`, and the 7 t3 groups. 46
+  assertions, no browser.
+- **The game is now DESKTOP CHROMIUM ONLY (owner directive).** `index.html`
+  loads `src/boot.ts`, which imports ONLY `ui/platformGate.ts` and
+  dynamically imports `main.ts` on an eligible platform — vite splits the
+  whole game behind that import (verified by build: 7.87 kB gate chunk vs
+  3.8 MB game chunk), so phones never fetch the game. Detection:
+  `navigator.userAgentData` (Chromium-only API) — brands must include
+  "Chromium", `mobile === false`, and platform ∈ {Windows, macOS, Linux,
+  Chrome OS, Chromium OS} (Android tablets report mobile: false but
+  platform Android). WebGPU is deliberately NOT gated in boot — an eligible
+  desktop Chromium without WebGPU still reaches main.ts's detailed entry
+  error. Ineligible devices get SHEET 00 (`platformGate.ts`): the plate
+  language, single column, composes from 320 px phones up, with a diegetic
+  admission survey (Engine/Device/Renderer PASS-FAIL rows) and an ADMISSION
+  HELD · DESKTOP ONLY stamp. Caveat recorded in the module header:
+  userAgentData requires a secure context — localhost passes, plain-http
+  LAN serving gates out a real desktop Chrome.
+- SHEET 00 stamp follow-up (owner rewording overflowed it): a stamp die must
+  be an SVG, never nowrap HTML — viewport-keyed type in a width-capped sheet
+  overflows the moment the wording grows. `stampSvg()` derives the ring
+  geometry from the string, pins every line with `textLength`/`spacing` (the
+  tracking IS the fit, like a real die), and scales as one drawing at
+  `min(97%, 520px)` of the sheet (the 3% eats the 3° rotation's reach), so
+  ANY future wording self-fits on any font stack. Also: centre an
+  over-viewport sheet with `margin: auto` on the child, not flex alignment —
+  flex-centred overflow clips the top unreachably on short landscape phones.
+- SHEET 00 survey follow-up (owner on desktop Safari: "somehow it also fails
+  at being desktop"): each diagnostic row must be TRUE ON ITS OWN EVIDENCE.
+  Deriving the DEVICE row from userAgentData — a Chromium-only API — made
+  every non-Chromium desktop inherit the engine's absence as a device FAIL,
+  blaming the visitor's machine for the browser's engine. `detectPlatform`
+  now falls back to the UA string for desktop-ness (handheld tokens, plus
+  the iPadOS masquerade tell: Macintosh UA with maxTouchPoints > 1 is an
+  iPad, no real Mac reports touch). Eligibility is provably unchanged —
+  `chromium` can only be true when uaData exists, where the old path still
+  rules — the fallback only keeps the diagnosis honest. Probe matrix now
+  asserts the desktop FLAG per browser, not just eligibility (14 UA cases).
