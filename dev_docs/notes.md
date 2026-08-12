@@ -2917,17 +2917,25 @@ thing looks in the hand rather than against the buffer that has to resolve it.
   PCFSoft (it is, by default). Hardware 2×2 PCF has been on the whole time; an
   override of `setupRenderTarget` is a no-op. Verified in the r185 bundle
   (`setupShadow`, just after the `setupRenderTarget` call).
-- **The gallery deck sawtooth was shadow-SILHOUETTE density, not a missing
-  filter.** Coverage-only, `PCFSoftShadowMap`, and radius-only trials left the
-  same teeth; spatial supersampling reduced them proportionally. Thin
+- **The gallery deck sawtooth was an oriented shadow-SILHOUETTE/filter-support
+  defect, not a missing comparison sampler.** Coverage-only and
+  `PCFSoftShadowMap` trials left the same teeth; spatial supersampling reduced
+  them proportionally. Thin
   75–130 mm mullion shadows looked clean because their two filtered edges
   overlap, while a wide edge exposes the light-space raster grid directly.
   Static L0 is now 15 m / 8192² at tier 2, keeping the whole 10.9 m deck inside
-  its full-weight region. Its radius and base normal bias are scaled by the
-  actual 1.6× world-density gain; coarse/dynamic maps retain radius 1 and their
-  established physical bias. `?view=freedomdeck&pass=nopost` is the regression
-  gate. Cost: ~192 MiB extra tier-2 depth allocation, but no extra texture,
-  sample, or recurring static shadow draw (L0 is cached after load).
+  its full-weight region. A fine-only radius 3.2 covers the residual stair;
+  coarse/dynamic maps retain radius 1. `?view=freedomdeck&pass=nopost` is the
+  edge gate. Cost: ~192 MiB extra tier-2 depth allocation, but no extra texture
+  or recurring static shadow draw (L0 is cached after load).
+- **Directional-light `shadow.bias` is normalized DEPTH, not a world-space
+  epsilon.** The old `-0.0003` across L0's ~379 m camera slab represented about
+  114 mm of peter-panning, plus 8.75 mm normal bias. The Gale lectern begins
+  only 2 mm over the deck, proving the reported moat was a shadow error rather
+  than floating geometry. `CachedShadowClipmapNode` now accepts
+  `depthBiasWorld`, converts it by each camera's `(far-near)`, and exposes both
+  the authored and normalized values in its snapshot. Freedom uses 1.5 mm
+  depth + 1.5 mm L0 normal bias. `?view=freedomshadow` is the contact gate.
 - **Judge shadow filtering on a bare bright plane.** The defect had
   shipped park-wide and was invisible until the Freedom Tower deck existed: 5 m
   of clean near-white plate seen from 2 m, under a 27° sun that stretches every

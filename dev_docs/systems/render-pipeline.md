@@ -241,12 +241,13 @@ fixture's AREA, never its multiplier.
 
 ## 9. Shadow clipmap ladder re-derived for the 260 m world
 
-30/96/560 (three levels, cut for the 500 m dome) → **12/34.8/100.9/260** (four
-levels). Two reasons: the finest level now resolves a kerb (5.9 mm texel on a
-4096 map), and no level makes an outsized jump — the old 96→560 step forced
-level-2 normal bias to 0.75 m, a peter-panning generator at park scale. Base
-normal bias 0.03 → 0.014 (≈2.4 finest texels). `maxDistance` only has to cover
-the dome: everything beyond the glass is analytic or too far to matter.
+30/96/560 (three levels, cut for the 500 m dome) → **15/38.9/100.6/260** (four
+levels). The cached static L0 doubles the tier map size (8192 on tier 2, a
+3.7 mm texel), owns the whole 10.9 m Freedom deck at full weight, and no level
+makes an outsized jump. Base normal bias is 1.5 mm; depth bias is also authored
+as 1.5 mm and converted to normalized depth separately for each clipmap camera.
+`maxDistance` only has to cover the dome: everything beyond the glass is
+analytic or too far to matter.
 
 ## 10. Real lights are rationed, and never toggled
 
@@ -293,9 +294,10 @@ Facts, so nobody re-derives them:
   texture's filters to `LinearFilter` for PCF/PCFSoft immediately after
   `setupRenderTarget` returns, so each tap is a bilinear 2×2 compare. Overriding
   `setupRenderTarget` to set Linear is a **no-op** — it was tried.
-- Static L0 uses a per-level radius of 1.6; every coarse static and moving-caster
-  map remains radius 1. L0 is 1.6× denser in world space, so this preserves the
-  old physical filter width rather than making the sun softer.
+- Static L0 uses a per-level radius of 3.2; every coarse static and moving-caster
+  map remains radius 1. The wider support is deliberate and local to the cached
+  fine map: it covers the last oriented silhouette stair without softening the
+  rest of the park's hierarchy.
 - Level texels at tier 2 / tier 0: L0 3.7 / 7.3 mm, L1 19 / 38 mm, L2 66 / 98 mm,
   L3 254 / 338 mm. On a horizontal floor under the 27° sun, multiply by 2.2 for
   the along-sun footprint.
@@ -303,20 +305,26 @@ Facts, so nobody re-derives them:
   XY, blended over the last 16 % of each box. L0 is now 15 m half-width: its
   full-weight region ends at 11.09 m, beyond the deck's 10.9 m diameter.
 
-**Root cause:** the PCF signal was valid, but its input silhouette was too coarse
-for this receiver. The 27° sun stretches a light-space texel 2.2× across the
-horizontal deck, and a single wide shadow edge exposes that stair directly.
-Thin 75–130 mm rail/mullion shadows looked clean because their two PCF ramps
-overlap; they were never evidence of a different shadow source. Three controlled
-tests established this: expanding L0 coverage alone did not change the teeth;
-switching to `PCFSoftShadowMap` or doubling only `radius` merely widened the same
-steps; increasing spatial density reduced the step size in direct proportion.
+**Edge root cause:** the PCF signal was valid, but its fine-map support was too
+narrow for this receiver after the density increase. The 27° sun stretches a
+light-space texel 2.2× across the horizontal deck, and a single wide shadow edge
+exposes the oriented raster stair directly. Thin 75–130 mm rail/mullion shadows
+looked clean because their two PCF ramps overlap; they were never evidence of a
+different shadow source. Expanding L0 coverage did not change the teeth;
+increasing spatial density reduced their step size, and extending only L0's
+radius from 1.6 to 3.2 finally covered the residual stair.
 
-**Fix:** static L0 is 15 m at 2× its tier map size (8192² on tier 2), while its
-PCF radius and base normal bias are adjusted by the actual 1.6× world-density
-gain. L1–L3 therefore keep their established world-space bias/filter behaviour,
-and dynamic shadows remain at their tier resolutions and radius 1. The map count
-and per-frame static draw count do not increase; L0 is frozen after load. The
+**Contact root cause:** `LightShadow.bias` is normalized projection depth, not
+metres. Reusing `-0.0003` across different clipmap depth slabs turned it into
+about 114 mm of receiver displacement in L0's ~379 m range, before the old
+8.75 mm normal offset. The Gale sign stand begins only 2 mm above the floor, so
+the visible moat was shadow peter-panning rather than floating geometry.
+
+**Fix:** static L0 is 15 m at 2× its tier map size (8192² on tier 2) with radius
+3.2. Normal bias is 1.5 mm at L0 and continues to scale with world texel size;
+depth bias is a constant 1.5 mm converted to each orthographic camera's
+normalized range. L1–L3 and dynamic shadows keep radius 1. The map count and
+per-frame static draw count do not increase; L0 is frozen after load. The
 explicit cost is memory: tier-2 L0's depth attachment is roughly 256 MiB instead
 of 64 MiB (implementation-dependent format allocation).
 
@@ -332,9 +340,10 @@ honest baseline for any palette argument). Raw and filtered AO diagnostics are
 also available as `?pass=aoraw`, `?pass=aodenoised`, and `?pass=aoradius`; all
 are registered in `core/debug.ts`.
 
-`?view=freedomdeck` is the fixed bare-plane shadow contract. Validate `final`
-and `nopost` there after changing the clipmap ladder, map sizes, PCF filter, sun
-direction, or gallery geometry.
+`?view=freedomdeck` is the fixed bare-plane shadow contract;
+`?view=freedomshadow` frames the Gale sign and post bases for contact attachment.
+Validate `final` and `nopost` there after changing the clipmap ladder, map sizes,
+PCF filter, sun direction, bias, or gallery geometry.
 
 ## Verified (2026-08-10, tier 2, 2176×1224, ~4.5 M tris, 766 draws)
 

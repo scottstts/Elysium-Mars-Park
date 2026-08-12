@@ -94,8 +94,12 @@ system must be the polite one or captions clobber.
   tower material. This is the park's only broad, untextured bright receiver;
   its raking wide shadows exposed the rasterized light-space texel staircase
   that narrow rail shadows hid by overlapping their two filtered edges. Static
-  L0 now owns the full 10.9 m deck at a denser grid while preserving the old
-  world-space PCF width. See `render-pipeline.md` §12.
+  L0 now owns the full 10.9 m deck at a denser grid and uses a fine-only 3.2
+  PCF radius to cover the residual oriented stair. See `render-pipeline.md` §12.
+- Detached sign/post shadows were not placement errors: the Gale stand starts
+  only 2 mm above `Z_DECK`, while the old normalized depth bias represented
+  roughly 114 mm in L0. The sun rig now authors 1.5 mm world-space depth and
+  normal offsets, restoring contact without moving tower geometry.
 - `curtainGlassMaterial` and `shaftGlass` were missing the AO-receiver mask
   (`mrt({ normal: vec4(normalView, 0) })`) that every other pane in the park
   carries, so GTAO darkened the GLASS around the leaning rail, the mullions and
@@ -109,8 +113,8 @@ system must be the polite one or captions clobber.
   the park model carries a 1:210 spire, and the amenity blocker keeps
   furniture off the terrace.
 - `?view=freedom` (approach postcard), `?view=freedomup` (under-lattice
-  look-up), and `?view=freedomdeck` (bare-plane shadow regression) are the
-  saved cameras.
+  look-up), `?view=freedomdeck` (bare-plane edge regression), and
+  `?view=freedomshadow` (sign/post contact regression) are the saved cameras.
 - Audio: the cab in flight + the gallery classify as 'interior'
   (`engine.ts`, plan-radius 6 above y 4.5).
 - Gate: `node --experimental-strip-types tools/freedom-audit.mjs` — per-part

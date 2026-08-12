@@ -72,6 +72,7 @@ interface LevelState {
   desiredY: number
   desiredZ: number
   texelWidth: number
+  depthBias: number
   normalBias: number
   valid: boolean
   forceDirty: boolean
@@ -105,6 +106,7 @@ interface DynamicCasterLevel {
   shadowNode: BoundedShadowNode
   center: Vector3
   texelWidth: number
+  depthBias: number
   normalBias: number
   renderCount: number
 }
@@ -114,6 +116,8 @@ export interface ShadowClipmapOptions {
   levelMapSizes: readonly number[]
   /** Per-level PCF radii; omitted entries inherit the source light's radius. */
   levelFilterRadii?: readonly number[]
+  /** Constant receiver depth offset in metres, converted per shadow camera. */
+  depthBiasWorld?: number
   firstRadius?: number
   scaleFactor?: number
   maxDistance?: number
@@ -152,6 +156,7 @@ export interface ShadowClipmapSnapshot {
   staticRefreshes: number
   lastStaticRefreshCpuMs: number
   maxStaticRefreshCpuMs: number
+  depthBiasWorld: number | null
   dynamicCaster: null | {
     layer: number
     halfWidth: number
@@ -165,6 +170,7 @@ export interface ShadowClipmapSnapshot {
       sampledHalfWidth: number
       mapSize: number
       texelWidth: number
+      depthBias: number
       normalBias: number
       filterRadius: number
       committed: [number, number, number]
@@ -184,6 +190,7 @@ export interface ShadowClipmapSnapshot {
     forceDirty: boolean
     age: number
     dirtyReasons: number
+    depthBias: number
     normalBias: number
     filterRadius: number
     renderCount: number
@@ -236,6 +243,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   readonly dynamicCasterHalfWidth: number
   /** Outermost level, retained for snapshot/API compatibility. */
   readonly dynamicCasterMapSize: number
+  readonly depthBiasWorld: number | null
 
   private readonly levelMapSizes: readonly number[]
   private readonly levelFilterRadii: readonly number[]
@@ -271,6 +279,9 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     this.camera = options.camera
     this.levelMapSizes = options.levelMapSizes
     this.levelFilterRadii = options.levelFilterRadii ?? []
+    this.depthBiasWorld = options.depthBiasWorld === undefined
+      ? null
+      : Math.max(0, options.depthBiasWorld)
     this.levels = Math.max(1, this.levelMapSizes.length)
     const firstRadius = Math.max(1, options.firstRadius ?? 28)
     const scaleFactor = Math.max(1.5, options.scaleFactor ?? 3)
@@ -500,7 +511,8 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       const texelWidth = (camera.right - camera.left) / shadow.mapSize.width
       if (index === 0) finestTexel = texelWidth
       const texelScale = finestTexel > 0 ? texelWidth / finestTexel : 1
-      shadow.bias = this.baseBias
+      shadow.bias = this.shadowDepthBias(shadow)
+      state.depthBias = shadow.bias
       shadow.normalBias = this.baseNormalBias * texelScale
       state.texelWidth = texelWidth
       state.normalBias = shadow.normalBias
@@ -669,6 +681,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       staticRefreshes: this.staticRefreshes,
       lastStaticRefreshCpuMs: this.lastStaticRefreshCpuMs,
       maxStaticRefreshCpuMs: this.maxStaticRefreshCpuMs,
+      depthBiasWorld: this.depthBiasWorld,
       dynamicCaster: this.dynamicCasterLayer === null
         ? null
         : {
@@ -690,6 +703,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
                 : level.halfWidth * (1 - this.guardBand),
               mapSize: level.mapSize,
               texelWidth: level.texelWidth,
+              depthBias: level.depthBias,
               normalBias: level.normalBias,
               filterRadius: level.light.shadow.radius,
               committed: [level.center.x, level.center.y, level.center.z],
@@ -709,6 +723,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         forceDirty: state.forceDirty,
         age: state.age,
         dirtyReasons: state.dirtyReasons,
+        depthBias: state.depthBias,
         normalBias: state.normalBias,
         filterRadius: this.lights[index].shadow.radius,
         renderCount: state.renderCount,
@@ -790,6 +805,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         desiredY: Number.NaN,
         desiredZ: Number.NaN,
         texelWidth: 0,
+        depthBias: 0,
         normalBias: 0,
         valid: false,
         forceDirty: false,
@@ -838,6 +854,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         shadowNode: new BoundedShadowNode(light, shadow),
         center: new Vector3(Number.NaN, Number.NaN, Number.NaN),
         texelWidth: 0,
+        depthBias: 0,
         normalBias: 0,
         renderCount: 0,
       })
@@ -877,7 +894,8 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         index === outermostIndex ? halfWidth : halfWidth * (1 - this.guardBand),
         0,
       )
-      shadow.bias = this.baseBias
+      shadow.bias = this.shadowDepthBias(shadow)
+      level.depthBias = shadow.bias
       // Coarser levels still scale by their own world texel. Inner levels do
       // not fall below the old broad-map receiver offset.
       shadow.normalBias = Math.max(
@@ -902,6 +920,18 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         this.dynamicRenderCount++
       }
     }
+  }
+
+  /**
+   * Three's scalar shadow bias is normalized projection depth. Reusing one
+   * value across clipmaps therefore turns the same setting into a different
+   * world-space gap at every camera range. Convert the authored metre offset
+   * per orthographic slab so contact attachment is scale invariant.
+   */
+  private shadowDepthBias(shadow: DirectionalLightShadow): number {
+    if (this.depthBiasWorld === null) return this.baseBias
+    const depthRange = Math.max(1e-6, shadow.camera.far - shadow.camera.near)
+    return -this.depthBiasWorld / depthRange
   }
 }
 

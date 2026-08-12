@@ -62,6 +62,8 @@ export const BOOKMARKS: Record<string, Bookmark> = {
   // textureless deck is the park's strictest sun-shadow filtering test: it
   // reveals clipmap ownership changes that regolith and paving albedo hide.
   freedomdeck: { position: [36.6, 40.45, 58.4], look: [25, 38.7, 62], stage: 'landmark' },
+  // Close stress view for shadow-direction aliasing and contact attachment.
+  freedomshadow: { position: [31.2, 40.2, 53.6], look: [28.6, 38.75, 55.7], stage: 'landmark' },
   // Dev-only wide establishing view (not part of the ten).
   overview: { position: [100, 80, 135], look: [0, 15, 0], stage: 'dev' },
   // Dev-only pipeline calibration gallery.

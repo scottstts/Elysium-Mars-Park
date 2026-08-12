@@ -46,22 +46,21 @@ const CLIPMAP_LEVELS = 4
 
 /**
  * Static L0 is rendered once and then cached, so spatial supersampling costs
- * memory but no recurring shadow draw. Keep the PCF radius and receiver bias
- * proportional to the actual world-space density gain: that preserves their
- * footprint while reducing only the rasterized silhouette's step size.
- * Dynamic maps retain their tier sizes because their narrow/moving shadows
- * never exposed this defect and they refresh continuously.
+ * memory but no recurring shadow draw. Its wider PCF footprint covers the
+ * residual light-space raster stair on broad raking edges; coarse static and
+ * continuously refreshed dynamic maps retain their proven one-texel radius.
  */
 const STATIC_FINE_SHADOW_MAP_SCALE = 2
-const STATIC_FINE_SHADOW_DENSITY_GAIN = 1.6
+const STATIC_FINE_SHADOW_FILTER_RADIUS = 3.2
 
 /**
- * Base normal offset, in metres, at the denser finest level; the node scales
- * it by each level's texel ratio. Dividing the proven 14 mm offset by the
- * actual world-space density gain keeps the outer levels' offsets stable,
- * while L0 retains the same ~2.4-texel acne margin at its denser grid.
+ * Receiver offsets in metres at the finest level. The old -0.0003 depth bias
+ * was normalized projection depth: across L0's ~379 m slab it became a
+ * ~114 mm separation before normal bias was even applied. Keep both offsets
+ * at the millimetre scale; the clipmap converts depth bias per camera range.
  */
-const SHADOW_NORMAL_BIAS = 0.014 / STATIC_FINE_SHADOW_DENSITY_GAIN
+const SHADOW_NORMAL_BIAS = 0.0015
+const SHADOW_DEPTH_BIAS_WORLD = 0.0015
 
 export class SkySystem implements GameSystem {
   readonly id = 'sky'
@@ -88,7 +87,7 @@ export class SkySystem implements GameSystem {
     const sun = this.sun
     sun.castShadow = true
     sun.shadow.mapSize.set(quality.params.shadowMapSizes[0], quality.params.shadowMapSizes[0])
-    sun.shadow.bias = -0.0003
+    sun.shadow.bias = 0
     sun.shadow.normalBias = SHADOW_NORMAL_BIAS
     sun.shadow.radius = 1
     sun.position.copy(sunDirection).multiplyScalar(700)
@@ -110,10 +109,11 @@ export class SkySystem implements GameSystem {
     this.clipmaps = new CachedShadowClipmapNode(sun, {
       camera: ctx.camera,
       levelMapSizes,
-      // Same world-space PCF footprint as radius 1 on the authored L0 map;
-      // only the cached silhouette beneath it is denser. Coarse static and
-      // continuously refreshed dynamic maps retain their proven radius 1.
-      levelFilterRadii: [STATIC_FINE_SHADOW_DENSITY_GAIN],
+      // Only the dense cached L0 gets the wider support needed to hide its
+      // direction-dependent raster staircase. Coarse static and continuously
+      // refreshed dynamic maps retain the source light's radius 1.
+      levelFilterRadii: [STATIC_FINE_SHADOW_FILTER_RADIUS],
+      depthBiasWorld: SHADOW_DEPTH_BIAS_WORLD,
       firstRadius: CLIPMAP_FIRST_RADIUS,
       scaleFactor: CLIPMAP_SCALE_FACTOR,
       maxDistance: CLIPMAP_MAX_DISTANCE,
