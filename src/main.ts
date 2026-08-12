@@ -11,6 +11,7 @@ import { interiorHazeStrength, shaftStrength } from './dome/interiorHaze'
 import { gradeParams } from './render/grade'
 import { penumbraScale } from './dome/latticeField'
 import { ExteriorSystem } from './exterior/exteriorTerrain'
+import { FountainSystem } from './fountain/fountainSystem'
 import { FOG_EXTINCTION_PER_METER } from './exterior/marsAerialPerspective'
 import { PhysicsSystem } from './physics/physicsWorld'
 import { InteractionSystem } from './player/interaction'
@@ -123,6 +124,7 @@ async function boot(): Promise<void> {
     const robots = registry.add(new RobotsSystem(null))
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
+    registry.add(new FountainSystem(physics))
   } else {
     const player = registry.add(new PlayerSystem(physics))
     const interaction = registry.add(new InteractionSystem(player))
@@ -136,6 +138,10 @@ async function boot(): Promise<void> {
     const robots = registry.add(new RobotsSystem(player))
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
+    // The fountain owns its own stone, water and spray; its four coping
+    // planters are instanced by VegetationSystem into the shared foliage
+    // palette, so the two are decoupled and the order here is free.
+    registry.add(new FountainSystem(physics))
     const audio = registry.add(new AudioEngineSystem(player, robots, tram))
     registry.add(new PauseSystem(player, audio))
   }

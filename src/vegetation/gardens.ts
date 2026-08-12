@@ -1,62 +1,56 @@
-import { Group, Mesh, PlaneGeometry, Vector3 } from 'three'
-import { cleanMesh, loft, roundedRect, smoothShade, toYUp, writeInto } from '../archkit/meshdata'
-import type { Vec2, Vec3 } from '../archkit/meshdata'
+import { Vector3 } from 'three'
+import type { Group } from 'three'
+import { writeInto } from '../archkit/meshdata'
 import { PartWriter } from '../archkit/writer'
 import type { Rng } from '../core/prng'
-import { signageMaterial } from '../materials/library'
 import { interiorHeight } from '../world/interiorHeight'
 import { GARDENS, PATHS } from '../world/parkPlan'
 import { pavedSignedDistance } from '../world/pavingPlan'
-import { plantBed, PlantingPalette } from './planting'
+import type { PlantingPalette } from './planting'
 import type { VegetationCollider } from './planting'
 import { placeRock, rockMesh } from './rocks'
 
 /**
- * THE REGOLITH GARDENS — the deliberate counterweight to the planters.
+ * THE ROCK GROUPS — what the old Regolith Gardens are, now that the fountain
+ * has taken the middle of the main zone.
  *
- * Inside a planter wall the park is lush. Out here on open regolith it is
- * MINERAL: raked ground, rock set as sculpture, and a few rationed clumps of
- * sedge inside steel frames. The contrast is the design; densifying these
- * would flatten the whole idea of green being precious.
+ * ## What was removed, and why (2026-08-12)
  *
- * Three systems, in the order the eye reads them:
+ * This module used to emit two more systems: concentric RAKE FURROWS as swept
+ * tube ridges, and steel-edged planting BEDS with info stakes. Both are gone.
+ * The rake read as a set of thin dark circles scribed on flat dirt — at any
+ * real viewing angle the ridges are under a pixel, so the karesansui idea
+ * never arrived and what shipped was a contour map; the beds were four sedge
+ * clumps in a steel picture frame, which read as a construction leftover
+ * rather than as rationed planting. Neither survived the owner's look at the
+ * finished park, and neither is worth re-attempting at this scale: raked
+ * ground needs a normal-mapped GROUND MATERIAL, not geometry, and rationed
+ * planting needs a reason to be where it is.
  *
- *   1. **Raked furrows as real geometry.** Established the hard way
- *      (notes.md S14): rake rings authored as ±13 % albedo are invisible
- *      after grading and haze. These are swept ridges that catch the low sun.
- *      They break around paths, beds and rock — a rake never crosses a walked
- *      or planted surface, and it flows AROUND stone.
- *   2. **Eddy rings.** Tight concentric rings around each rock group, the
- *      karesansui move that turns a scattered boulder into a composed one.
- *   3. **Rock groups.** Odd-numbered clusters (a hero plus one or two
- *      companions), lofted with dipping sedimentary beds — see `rocks.ts`.
+ * ## What is left, and why it stays
+ *
+ * The rock groups. They are the one part of the original idea that worked:
+ * odd-numbered clusters of lofted boulders with dipping sedimentary beds,
+ * composed as a hero plus companions. On open regolith they are the only
+ * thing giving the ground a scale, and around a monumental fountain they do
+ * the job a park's trees would do on Earth — they hold the middle distance.
+ *
+ * They are kept OFF the paving by `pavedSignedDistance`, which now includes
+ * the fountain court, so no boulder can land inside the civic space or on its
+ * doorstep. That is not a special case: it is the same rule that keeps them
+ * off every other pour in the park.
  */
-
-/** Rake pitch, metres. A machine-raked furrow field, not a zen garden. */
-const RAKE_PITCH = 1.25
-const RAKE_RADIUS = 0.05
 
 interface RockGroup {
   x: number
   z: number
-  /** Keep-out for the rake, metres. */
+  /** Keep-out radius, metres. */
   radius: number
-}
-
-interface BedFootprint {
-  x: number
-  z: number
-  halfX: number
-  halfZ: number
-  yaw: number
-  reach: number
 }
 
 export interface GardenStats {
   zones: number
   boulders: number
-  beds: number
-  furrowRuns: number
 }
 
 function clearOfPaths(x: number, z: number, margin: number): boolean {
@@ -77,158 +71,29 @@ function clearOfPaths(x: number, z: number, margin: number): boolean {
   return true
 }
 
-/**
- * A steel-edged bed: 6 mm plate standing 90 mm proud, rooted 180 mm into the
- * regolith. Built as ONE closed swept shell around a rounded-rect path, so
- * the corners are arcs rather than mitres and there is no joint to open.
- */
-function emitBedEdging(
-  writer: PartWriter,
-  bed: BedFootprint,
-  soilY: number,
-): void {
-  const outline = roundedRect(bed.halfX * 2, bed.halfZ * 2, 0.3, 4)
-  const thickness = 0.006
-  const reveal = 0.09
-  const root = 0.18
-  const cos = Math.cos(bed.yaw)
-  const sin = Math.sin(bed.yaw)
-
-  const points = outline.map(([lx, lz]) => ({
-    x: bed.x + lx * cos + lz * sin,
-    z: bed.z - lx * sin + lz * cos,
-  }))
-  const count = points.length
-  const rings: Vec3[][] = []
-  for (let i = 0; i < count; i++) {
-    const previous = points[(i - 1 + count) % count]
-    const next = points[(i + 1) % count]
-    // Right-of-travel normal from the averaged tangent — no mitre spikes on a
-    // rounded outline, and the section keeps its width through the arcs.
-    let nx = next.z - previous.z
-    let nz = -(next.x - previous.x)
-    const length = Math.hypot(nx, nz) || 1
-    nx /= length
-    nz /= length
-    const base = soilY - 0.02
-    // Closed section: a thin plate with a rolled top edge (a raw 6 mm steel
-    // arris at shin height is a real-world hazard AND a shading break).
-    const section: Vec2[] = [
-      [-thickness / 2, -root],
-      [thickness / 2, -root],
-      [thickness / 2, reveal - 0.004],
-      [thickness / 2 - 0.002, reveal],
-      [-thickness / 2 + 0.002, reveal],
-      [-thickness / 2, reveal - 0.004],
-    ]
-    rings.push(
-      section.map(([offset, height]) => {
-        const x = points[i].x + nx * offset
-        const z = points[i].z + nz * offset
-        return [x, z, base + height] as Vec3
-      }),
-    )
-  }
-  const edging = loft(rings, { closeU: true, closeV: true })
-  smoothShade(edging, 36)
-  cleanMesh(edging)
-  toYUp(edging)
-  writeInto(writer, 'steel', edging)
-
-  // Bed soil: a slightly domed prepared surface, 60 mm below the edging top.
-  const steps = 6
-  const point = (u: number, v: number): Vector3 => {
-    const lx = (u - 0.5) * bed.halfX * 2 * 0.985
-    const lz = (v - 0.5) * bed.halfZ * 2 * 0.985
-    const dome = Math.sin(Math.PI * u) * Math.sin(Math.PI * v) * 0.03
-    return new Vector3(bed.x + lx * cos + lz * sin, soilY + dome, bed.z - lx * sin + lz * cos)
-  }
-  for (let i = 0; i < steps; i++) {
-    for (let j = 0; j < steps; j++) {
-      writer.quad(
-        'soil',
-        point(i / steps, j / steps),
-        point((i + 1) / steps, j / steps),
-        point((i + 1) / steps, (j + 1) / steps),
-        point(i / steps, (j + 1) / steps),
-        0.4,
-      )
-    }
-  }
-}
-
-/**
- * A low info stake: a 40 mm post with an angled plate at reading height for
- * someone standing over the bed. The park has no HUD, so what the place calls
- * itself has to be diegetic.
- */
-function emitInfoStake(
-  writer: PartWriter,
-  group: Group,
-  x: number,
-  z: number,
-  groundY: number,
-  yaw: number,
-  lines: string[],
-): void {
-  const height = 0.52
-  writer.box({
-    center: new Vector3(x, groundY + height / 2 - 0.06, z),
-    size: new Vector3(0.045, height + 0.12, 0.045),
-    slot: 'steel',
-    chamfer: 0.004,
-    rotationY: yaw,
-  })
-  // Plate body, tilted back toward the reader.
-  const tilt = -0.62
-  const plateCenter = new Vector3(x, groundY + height, z)
-  const plate = new Mesh(new PlaneGeometry(0.3, 0.19), signageMaterial(lines, { widthPx: 512, aspect: 0.3 / 0.19 }))
-  plate.position.copy(plateCenter)
-  plate.rotation.set(tilt, yaw, 0, 'YXZ')
-  plate.name = 'garden-stake-face'
-  group.add(plate)
-  // The plate's carrier sits BEHIND the face with a 1 mm reveal, so the two
-  // are never coplanar (the sign-on-a-box defect).
-  const backing = plateCenter
-    .clone()
-    .add(
-      new Vector3(0, 0, -0.004)
-        .applyAxisAngle(new Vector3(1, 0, 0), tilt)
-        .applyAxisAngle(new Vector3(0, 1, 0), yaw),
-    )
-  writer.box({
-    center: backing,
-    size: new Vector3(0.32, 0.21, 0.008),
-    slot: 'steel',
-    chamfer: 0.003,
-    rotationY: yaw,
-  })
-}
-
 export function buildRegolithGardens(
-  palette: PlantingPalette,
+  _palette: PlantingPalette,
   writer: PartWriter,
-  group: Group,
+  _group: Group,
   colliders: VegetationCollider[],
   rng: Rng,
 ): GardenStats {
   let boulders = 0
-  let beds = 0
-  let furrowRuns = 0
 
-  GARDENS.forEach((zone, zoneIndex) => {
+  for (const zone of GARDENS) {
     const rocks: RockGroup[] = []
-    const footprints: BedFootprint[] = []
-
-    // ── Rock groups: two or three clusters per zone, odd-numbered members.
     const groupCount = zone.radius > 20 ? 3 : 2
+
     for (let g = 0; g < groupCount; g++) {
       let cx = 0
       let cz = 0
       let placed = false
-      for (let attempt = 0; attempt < 40 && !placed; attempt++) {
+      for (let attempt = 0; attempt < 60 && !placed; attempt++) {
         const angle = rng.range(0, Math.PI * 2)
-        const distance = Math.sqrt(rng.range(0.06, 0.68)) * zone.radius
+        // Biased to the OUTER half of the zone. In the main zone the middle is
+        // now the fountain court; in the south zone it keeps the groups off
+        // the sight line from the Meridian Walk.
+        const distance = Math.sqrt(rng.range(0.34, 0.94)) * zone.radius
         cx = zone.x + Math.cos(angle) * distance
         cz = zone.z + Math.sin(angle) * distance
         if (!clearOfPaths(cx, cz, 4.2)) continue
@@ -275,132 +140,8 @@ export function buildRegolithGardens(
           })
         }
       }
-
-      // Eddy rings: the ripples that compose the group.
-      const outer = Math.max(...rocks.slice(-members).map((r) => r.radius))
-      for (let ring = 0; ring < 3; ring++) {
-        const ringRadius = outer + 0.55 + ring * 0.55
-        furrowRuns += emitRing(writer, cx, cz, ringRadius, rocks, footprints, 0.038)
-      }
     }
-
-    // ── Beds: rationed planting inside steel frames.
-    const bedCount = zone.radius > 20 ? 3 : 2
-    let stakePlaced = false
-    for (let b = 0; b < bedCount; b++) {
-      let bed: BedFootprint | null = null
-      for (let attempt = 0; attempt < 60 && !bed; attempt++) {
-        const angle = rng.range(0, Math.PI * 2)
-        const distance = Math.sqrt(rng.range(0.1, 0.72)) * zone.radius
-        const x = zone.x + Math.cos(angle) * distance
-        const z = zone.z + Math.sin(angle) * distance
-        const halfX = rng.range(1.6, 2.6)
-        const halfZ = rng.range(0.9, 1.5)
-        const reach = Math.hypot(halfX, halfZ)
-        if (!clearOfPaths(x, z, reach + 2.2)) continue
-        if (pavedSignedDistance(x, z) < reach + 2) continue
-        if (rocks.some((r) => Math.hypot(r.x - x, r.z - z) < r.radius + reach + 2)) continue
-        if (footprints.some((f) => Math.hypot(f.x - x, f.z - z) < f.reach + reach + 2)) continue
-        bed = { x, z, halfX, halfZ, yaw: rng.range(0, Math.PI), reach }
-      }
-      if (!bed) continue
-      footprints.push(bed)
-
-      // The prepared surface is flat: sample the footprint and sit above its
-      // high corner so the edging's root stays buried all the way round.
-      let highest = -Infinity
-      for (const sx of [-1, 0, 1]) {
-        for (const sz of [-1, 0, 1]) {
-          const px = bed.x + sx * bed.halfX * Math.cos(bed.yaw) + sz * bed.halfZ * Math.sin(bed.yaw)
-          const pz = bed.z - sx * bed.halfX * Math.sin(bed.yaw) + sz * bed.halfZ * Math.cos(bed.yaw)
-          highest = Math.max(highest, interiorHeight(px, pz))
-        }
-      }
-      const soilY = highest + 0.03
-      emitBedEdging(writer, bed, soilY)
-      plantBed(palette, rng, {
-        x: bed.x,
-        z: bed.z,
-        halfX: bed.halfX - 0.18,
-        halfZ: bed.halfZ - 0.18,
-        yaw: bed.yaw,
-        y: soilY,
-        // Mars-sparse: roughly a fifth of a planter's density.
-        density: rng.range(1.4, 2.1),
-      })
-      beds++
-
-      // One stake per zone — on the first bed that ACTUALLY places, not on
-      // loop index 0, which may have been rejected by the keep-outs.
-      if (!stakePlaced) {
-        stakePlaced = true
-        const stakeX = bed.x + (bed.halfX + 0.42) * Math.cos(bed.yaw)
-        const stakeZ = bed.z - (bed.halfX + 0.42) * Math.sin(bed.yaw)
-        emitInfoStake(
-          writer,
-          group,
-          stakeX,
-          stakeZ,
-          interiorHeight(stakeX, stakeZ),
-          bed.yaw + Math.PI / 2,
-          zoneIndex === 0
-            ? ['REGOLITH GARDEN', 'BED 1 - CAREX SP.', 'SOIL TRIAL 04']
-            : ['SOUTH GARDEN', 'BED 1 - CAREX SP.', 'SOIL TRIAL 11'],
-        )
-      }
-    }
-
-    // ── The rake. Concentric rings on the zone, breaking for everything.
-    const outerLimit = zone.radius * 0.86
-    for (let ringRadius = 2.6; ringRadius < outerLimit; ringRadius += RAKE_PITCH) {
-      furrowRuns += emitRing(writer, zone.x, zone.z, ringRadius, rocks, footprints, RAKE_RADIUS)
-    }
-  })
-
-  return { zones: GARDENS.length, boulders, beds, furrowRuns }
-}
-
-/**
- * One raked ring, broken into runs wherever it would cross a path, a bed, a
- * rock or paving. Returns the number of runs emitted.
- */
-function emitRing(
-  writer: PartWriter,
-  cx: number,
-  cz: number,
-  ringRadius: number,
-  rocks: RockGroup[],
-  beds: BedFootprint[],
-  radius: number,
-): number {
-  // ~0.8 m per station: coarse enough to be cheap, fine enough that the ring
-  // reads as a curve AND that the break-around test resolves a boulder.
-  const segments = Math.max(64, Math.round(ringRadius * 8))
-  let run: Vector3[] = []
-  let emitted = 0
-  const flush = (): void => {
-    if (run.length >= 4) {
-      writer.tube({ path: run, radius, slot: 'soil', radialSegments: 5, uvScale: 0.4 })
-      emitted++
-    }
-    run = []
   }
-  for (let s = 0; s <= segments; s++) {
-    const angle = (s / segments) * Math.PI * 2
-    const x = cx + Math.cos(angle) * ringRadius
-    const z = cz + Math.sin(angle) * ringRadius
-    const blocked =
-      !clearOfPaths(x, z, 1.4) ||
-      pavedSignedDistance(x, z) < 1.2 ||
-      rocks.some((r) => Math.hypot(r.x - x, r.z - z) < r.radius) ||
-      beds.some((b) => Math.hypot(b.x - x, b.z - z) < b.reach + 0.9)
-    if (blocked) {
-      flush()
-      continue
-    }
-    // Sunk so the ridge stands ~8 cm proud of the regolith it is raked from.
-    run.push(new Vector3(x, interiorHeight(x, z) + radius * 0.55, z))
-  }
-  flush()
-  return emitted
+
+  return { zones: GARDENS.length, boulders }
 }

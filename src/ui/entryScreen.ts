@@ -938,8 +938,11 @@ function keyPlanLayer(): string {
   out.push(ci(px(52), py(18), 7 * k, 's2'))
   out.push(ci(px(-52), py(34), 24 * k, 's0 dash'))
   out.push(tx(px(-52), py(34) + 4, 'BOWL', 'ts', 'middle'))
+  // The open-regolith zone (dashed) with THE FOUNTAIN's paved court inside it.
   out.push(ci(px(-38), py(-40), 28 * k, 's0 dash'))
-  out.push(tx(px(-38), py(-40), 'GARDENS', 'ts', 'middle'))
+  out.push(ci(px(-38), py(-40), 12.6 * k, 's2'))
+  out.push(ci(px(-38), py(-40), 7.6 * k, 'f2'))
+  out.push(tx(px(-38), py(-40) - 20, 'THE FOUNTAIN', 'ts', 'middle'))
   for (let i = 0; i < 3; i++) {
     const z = -22 + i * 22
     out.push(rc(px(53), py(z - 4.5), 34 * k, 9 * k, 's2'))

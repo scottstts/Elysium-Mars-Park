@@ -52,8 +52,8 @@ import {
   BOULEVARD,
   COMMONS,
   FIRST_TREE,
+  FOUNTAIN,
   FREEDOM_TOWER,
-  GARDENS,
   HYDRO_TOWER,
   LOOP,
   OVERLOOK_LOUNGE,
@@ -1003,11 +1003,11 @@ function firePointParts(): PartSoup[] {
   return FIREPOINT
 }
 
-let FOUNTAIN: PartSoup[] | null = null
+let DRINKING_FOUNTAIN: PartSoup[] | null = null
 
 /** Drinking fountain: revolved bowl on a cast pedestal, with a foot pedal. */
 function fountainParts(): PartSoup[] {
-  if (FOUNTAIN) return FOUNTAIN
+  if (DRINKING_FOUNTAIN) return DRINKING_FOUNTAIN
   const alloy: MeshData[] = []
   const white: MeshData[] = []
   const dark: MeshData[] = []
@@ -1111,8 +1111,8 @@ function fountainParts(): PartSoup[] {
     ),
   )
   // ONE slot: a bowl growing out of its own pedestal cannot be a clash.
-  FOUNTAIN = bakeParts({ aluminum: [...white, ...alloy, ...dark] })
-  return FOUNTAIN
+  DRINKING_FOUNTAIN = bakeParts({ aluminum: [...white, ...alloy, ...dark] })
+  return DRINKING_FOUNTAIN
 }
 
 let RACK: PartSoup[] | null = null
@@ -2373,7 +2373,7 @@ const GATES: GateSpec[] = [
     fingers: [
       { label: 'FIRST TREE', targetX: 0, targetZ: 0 },
       { label: 'HYDROPONICS', targetX: HYDRO_TOWER.x, targetZ: HYDRO_TOWER.z },
-      { label: 'GARDENS', targetX: GARDENS[0].x, targetZ: GARDENS[0].z },
+      { label: 'THE FOUNTAIN', targetX: FOUNTAIN.x, targetZ: FOUNTAIN.z },
     ],
   },
   {
@@ -2440,7 +2440,7 @@ const GATES: GateSpec[] = [
     approachZ: 0,
     fingers: [
       { label: 'HABS', targetX: -84, targetZ: -44 },
-      { label: 'GARDENS', targetX: GARDENS[0].x, targetZ: GARDENS[0].z },
+      { label: 'THE FOUNTAIN', targetX: FOUNTAIN.x, targetZ: FOUNTAIN.z },
       { label: 'PLAYGROUND', targetX: PLAYGROUND.x, targetZ: PLAYGROUND.z },
     ],
   },
@@ -2458,15 +2458,15 @@ const GATES: GateSpec[] = [
     ],
   },
   {
-    id: 'gardens',
-    title: 'REGOLITH GARDENS',
-    subtitle: 'PLEASE KEEP TO THE PATH',
+    id: 'fountain',
+    title: 'THE FOUNTAIN',
+    subtitle: 'POTABLE · PLEASE DO NOT ENTER THE BASIN',
     x: -18.4,
     z: -22.4,
     approachX: 0,
     approachZ: 0,
     fingers: [
-      { label: 'RAKE WALK', targetX: GARDENS[0].x, targetZ: GARDENS[0].z },
+      { label: 'FOUNTAIN COURT', targetX: FOUNTAIN.x, targetZ: FOUNTAIN.z },
       { label: 'PLAYGROUND', targetX: PLAYGROUND.x, targetZ: PLAYGROUND.z },
     ],
   },
@@ -2660,7 +2660,7 @@ const DESTINATIONS: Array<{ label: string; x: number; z: number }> = [
   { label: 'ASSEMBLY BOWL', x: AMPHITHEATER.x, z: AMPHITHEATER.z },
   { label: 'OVERLOOK', x: OVERLOOK_LOUNGE.x, z: OVERLOOK_LOUNGE.z },
   { label: 'HABS', x: -84, z: -44 },
-  { label: 'GARDENS', x: GARDENS[0].x, z: GARDENS[0].z },
+  { label: 'THE FOUNTAIN', x: FOUNTAIN.x, z: FOUNTAIN.z },
   { label: 'RIM WALK', x: 0, z: PARK.rimWalkRadius },
 ]
 

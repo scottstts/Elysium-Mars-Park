@@ -4,6 +4,7 @@ import {
   BOULEVARD,
   COMMONS,
   FIRST_TREE,
+  FOUNTAIN,
   FREEDOM_TOWER,
   HYDRO_TOWER,
   LOOP,
@@ -393,6 +394,21 @@ function buildRegions(): Region[] {
     cx: FREEDOM_TOWER.x,
     cz: FREEDOM_TOWER.z,
     radius: FREEDOM_TOWER.terraceRadius,
+    curb: true,
+  })
+
+  // Fountain court: the paved disc THE FOUNTAIN's stylobate stands on. Same
+  // law as every other civic object here — a monument fronts onto paving,
+  // never onto raw regolith — and it gives the piece a promenade to be walked
+  // around, which is the whole point of a fountain. The 'gardens-loop' track
+  // is unpaved and passes at 15 m+, so nothing trims against this.
+  list.push({
+    kind: 'disc',
+    id: 'fountain-court',
+    priority: 70,
+    cx: FOUNTAIN.x,
+    cz: FOUNTAIN.z,
+    radius: FOUNTAIN.courtRadius,
     curb: true,
   })
 

@@ -51,7 +51,10 @@ export class RobotsSystem implements GameSystem {
     const gardens = GARDENS[0]
     const gk1Waypoints = Array.from({ length: 8 }, (_, i) => {
       const angle = (i / 8) * Math.PI * 2
-      const radius = gardens.radius * (0.45 + 0.3 * ((i % 3) / 2))
+      // Outside the fountain court's paved disc (r = 12.6) — a groundskeeper
+      // walks the regolith it maintains, not across the civic paving, and the
+      // old 0.45–0.75 band put its route straight through the basin.
+      const radius = gardens.radius * (0.62 + 0.28 * ((i % 3) / 2))
       return groundPoint(gardens.x + Math.cos(angle) * radius, gardens.z + Math.sin(angle) * radius)
     })
     const gk2Waypoints = [

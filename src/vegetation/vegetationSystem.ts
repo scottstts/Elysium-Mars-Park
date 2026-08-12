@@ -5,6 +5,7 @@ import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import { FIRST_TREE } from '../world/parkPlan'
 import { buildFirstTree } from './firstTree'
+import { plantFountainBays } from '../fountain/fountainPlanting'
 import { buildRegolithGardens } from './gardens'
 import { GreenhouseCrops, MistSystem, plantGreenhouses } from './greenhouse'
 import {
@@ -29,7 +30,8 @@ import type { VegetationCollider } from './planting'
  * Ownership:
  *   `firstTree.ts`  the 12 m ginkgo — branches, canopy, bark
  *   `planting.ts`   the shared species palette, the 42 planters, the tree pit
- *   `gardens.ts`    raked furrows, rock groups, steel-edged beds, info stakes
+ *   `gardens.ts`    the open-regolith rock groups
+ *   `../fountain/fountainPlanting.ts` THE FOUNTAIN's four coping planters
  *   `greenhouse.ts` crop trays and the misting cycle
  *   `species.ts`    plant geometry primitives and the instancing sink
  *   `foliageMaterial.ts` every foliage/bark/rock material in the park
@@ -88,7 +90,7 @@ export class VegetationSystem implements GameSystem {
     // ── The 42 arc planters.
     const planterStats = plantPlanters(palette, writer, rng.fork('planters'))
 
-    // ── The Regolith Gardens.
+    // ── The rock groups on the open regolith zones.
     const gardenStats = buildRegolithGardens(
       palette,
       writer,
@@ -96,6 +98,12 @@ export class VegetationSystem implements GameSystem {
       colliders,
       rng.fork('gardens'),
     )
+
+    // ── The Fountain's four coping planters. They plant into the SHARED
+    // palette, not a second one: the park's foliage is a single instancing
+    // sink, and a private palette for four beds would double every foliage
+    // draw call and every foliage material in the world.
+    const fountainPlants = plantFountainBays(palette, rng.fork('fountain-planters'))
 
     // ── Farmside + hydroponics.
     const crops = new GreenhouseCrops()
@@ -126,6 +134,7 @@ export class VegetationSystem implements GameSystem {
         crown: { radius: Number(tree.crown.radius.toFixed(2)) },
         planters: planterStats,
         gardens: gardenStats,
+        fountainPlants,
         crops: { ...cropStats, ...crops.counts() },
         hardTriangles,
       })

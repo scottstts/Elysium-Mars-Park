@@ -43,7 +43,7 @@ Elysium Planitia, ~3°N — the park sits in a **flat valley ringed by rocky hil
 1. **Portal Station (south).** Where you arrive: the tram bursts from the dark connector tube through an irising portal, and the whole Commons unrolls ahead while you're still rolling. The station terrace is the park's front porch and first overlook.
 2. **The First Tree (center).** A single ginkgo, twelve meters tall, in a raised ring of true soil — the only large tree on Mars. A ring of benches. A small collar of groundcover at its base, the densest green outside the greenhouse. The park's heart and its only monument.
 3. **The Meridian Walk.** The main promenade from Portal Station to the First Tree and on to the west rim — the spine every other path hangs off.
-4. **The Regolith Gardens.** Raked regolith in long spiral rakings, excavation boulders placed like sculpture, bounded beds of sparse sedge and hardy groundcover. A Martian dry garden — the park's contemplative core, and proof this is not Earth.
+4. **THE FOUNTAIN.** (2026-08-12 — replaced the Regolith Gardens, whose raked spirals and steel-edged beds never read at any honest viewing angle; see `systems/fountain.md`.) A monumental tiered fountain on a paved court between the plaza and the Residential Arc: a lobed basin with planted coping bays, a stepped island rising out of the water, four draped caryatids carrying two gadrooned tazze, arcing jets and a crown. The excavation boulders stay, set as sculpture on the open regolith around it. It is the park's contemplative core AND the one place a colony spends its water in public.
 5. **The Rim Promenade & Overlook Lounge (west).** A walkway tracing the dome wall where glass meets regolith, facing the afternoon sun and the open plain. The **Overlook Lounge** (enterable): warm interior, long window, chairs aimed at nothing but Mars.
 6. **The Amphitheater.** A bowl of regolith-cast seating facing west through the glass — built for premieres and assemblies that haven't happened yet. Four thousand seats, all empty, all lit.
 7. **Residential Arc (northwest).** Ten hab units with porches facing the park — because humans build porches. One personal touch per porch. The **Common Hab** (enterable): kitchen, mismatched chairs, a board game mid-play. Nearby, a small bright playground, plaque reading *donated by the crew of Ares VII* — built for children not yet born.
@@ -77,12 +77,12 @@ Walk and sprint (a low-G lope); **jump** — real 0.38 g arcs, the standing invi
 1. The portal irises open and the tram rolls into the light — the whole Commons revealed at speed.
 2. The First Tree, lone green against butterscotch sky through glass.
 3. The Rim Promenade: the plain to the horizon, one dust devil drifting, your ghost-reflection in the pane.
-4. The Panewalker crossing the sun, its shadow sweeping the Regolith Gardens.
+4. The Panewalker crossing the sun, its shadow sweeping the open regolith.
 5. Greenhouse Hall interior: grow-light green against low amber sun, mist rolling the aisles.
 6. The Amphitheater's four thousand empty seats in raking light.
 7. The Works from the gallery walk: the machine hall alive, vapor curling in a sunbeam.
 8. A hab porch: jacket on the chair, long shadows, home.
-9. Raked spirals of the Regolith Gardens under the crown of Dome One.
+9. THE FOUNTAIN across its court under the crown of Dome One.
 10. Mid-jump on the Meridian Walk: two floaty seconds, park spread beneath your arc.
 
 ## What this game is NOT

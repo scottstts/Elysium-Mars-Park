@@ -2700,3 +2700,105 @@ plate; do not regress to a hero + button.
   reader's screen-right = forward × up vs the authored +x image (the tower
   blade + deck lintel + lectern plaque mirror; the gallery orientation
   desks do not).
+
+## THE FOUNTAIN (2026-08-12) — water, and two aliasing traps
+
+Replaced the Regolith Gardens' raked rings + steel beds with a monumental
+tiered fountain (`src/fountain/`, `dev_docs/systems/fountain.md`). The lessons
+below are the ones that cost time and are not specific to fountains.
+
+### Winding failures HIDE themselves
+
+Two surfaces shipped inside-out and the symptom was not "it looks wrong", it
+was "it is not there". Hours went into diagnosing a water shader that was
+never running a single fragment. Two rules, both now in the fountain doc:
+
+- **Hand-built polar index buffers.** `(a → b)` is +θ and `(a → c)` is +radius,
+  so `θ̂ × r̂` is +Y: `(a, b, c)` faces UP. The reverse is culled outright.
+- **`archkit` `loft`/`revolve` on an ANNULUS.** `recalcNormals` orients closed
+  components by signed volume (always safe) but OPEN ones by the AUTHORED
+  winding — and an annulus lathe is topologically open even when its profile
+  closes on itself, because the duplicated seam ring is not welded until
+  `cleanMesh` runs later. A lathe whose TOP run goes outward faces DOWN. Run
+  the underside outward and the top back inward.
+
+Diagnostic that finally settled it: swap the material for a plain red
+`MeshBasicMaterial` from the console. If no red appears, it is geometry, not
+shading — stop reading the shader.
+
+### `dFdx` is CONSTANT ACROSS A TRIANGLE
+
+Screen-space derivatives of a linearly interpolated varying are piecewise
+constant. Driving a *steep* fade from them (micro-band attenuation, texture
+detail LOD) therefore quantises to the mesh and stamps its quad grid onto the
+surface — on the fountain's water it read as a wire lattice lying on the basin
+at grazing angles. Fix is an analytic footprint: pixel angle × range ÷
+cos(incidence), computed by projecting the point and the point one metre above
+it and differencing in NDC (`waterSurface.metresPerPixel`). Continuous
+everywhere, exact for any projection, and needs no matrix element access —
+`cameraProjectionMatrix.element()` is not typed in r185 anyway.
+
+The park's other footprint fades (`causticWorldSample`, the ocean LOD in
+SeaPark) use `dFdx` on flat, densely tessellated surfaces where the per-triangle
+step is invisible. On anything with 10 cm cells seen at 80°, it is not.
+
+### Pure sinusoids interfere into a visible lattice
+
+Three tidy capillary bands beat into a perfectly periodic pattern, and any
+downstream amplifier (here the caustic Jacobian, which scales as A·k²) turns
+that beat into a wire mesh. Seven bands at mutually incommensurate wavelengths
+(ratios near √2, φ, √5 — never a simple fraction) with amplitudes falling as
+~λ^(3/4) push the beat period past the object's own diameter. Same trick
+applies to any procedural surface built from summed waves.
+
+### Water: split at the breakup point, not by rendering convenience
+
+Streams drawn as swept alpha-carved sheets read as PLASTIC RIBBONS, however
+good the shader. A texture on a fixed surface cannot separate, cannot be
+overtaken by the parcel behind it, and cannot be seen edge-on. What works is
+the physical split: a short COHERENT length as real geometry (Fresnel opacity
+rising toward the silhouette), then independent ballistic parcels. Motion
+stretch is `d + |v|·τ` with τ an exposure — at fountain speeds that is a 10 cm
+streak off a 4 mm droplet, and it is most of why the result reads as fast.
+Sub-pixel parcels must be clamped up in size with opacity scaled by the AREA
+RATIO, or distant spray aliases into crawling confetti.
+
+It is also far CHEAPER: the ribbon version rasterised its full height whatever
+its alpha said, and cost more than the entire droplet system that replaced it.
+
+### Six hashes, six kinds of regularity
+
+Every hash in the droplet system exists to retire one specific artificial
+uniformity: release phase within its own slot, per-orifice launch scatter,
+size draw, spin direction, intermittency, snaking phase — plus a per-strand
+flow term, because a weir does not shed evenly along its lip. Keep
+intermittency gentle: taking a whole strand to zero reads as "some jets are
+switched off", not as breathing.
+
+### Mars gravity is the strongest single cue, and it is free
+
+3.721 m/s² in every ballistic solve AND in the ripple dispersion
+`ω = √(gk + σk³/ρ)`. Arcs hang ~1.6× longer than Earth's and rings spread ~40 %
+slower. Nobody names it; everybody reads it. Same for the solar disc: half
+Earth's angular size, so caustics genuinely focus tighter.
+
+### Proportion numbers that were wrong the first time
+
+- A tazza's DEPTH RATIO decides bowl-vs-drum: 0.29 is a table on a post, 0.45
+  is a tazza.
+- Flutes/gadroons: fewer and deeper. Sub-pixel flutes only soften a silhouette
+  into mush.
+- Curtain strand count is set from strand WIDTH: 36 lanes at 0.2 half-width is
+  a 96 mm strand, i.e. a picket fence.
+- Jet launch angle is `atan(4·rise/span)`. 72° is a garden sprinkler; civic
+  arcs are ~52°.
+- A canted nozzle head at the launch height with nothing under it FLOATS. The
+  riser from the floor is what makes water read as supplied.
+
+### FPS in the in-app browser pane is not a measurement
+
+The pane throttles compositing when it is not fronted, and after any
+`javascript_tool` interaction. A "1 fps" reading appeared on `?view=firsttree`
+with no fountain in frame. Compare two views in the same session before
+believing a regression, and prefer the GPU-fenced `MessageChannel` harness
+(notes: render-pipeline) for anything load-bearing.

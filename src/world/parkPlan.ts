@@ -99,6 +99,16 @@ export const WATER_TOWER = { x: 66, z: -34, height: 17 }
  */
 export const FREEDOM_TOWER = { x: 33, z: 57, terraceRadius: 12.76, doorAngle: Math.PI + 0.21 }
 
+/**
+ * THE FOUNTAIN — the park's water landmark, seated on the old Regolith
+ * Gardens' centre so the existing `gardens-loop` track already circles it at
+ * 16–22 m. `courtRadius` is the paved disc (pavingPlan `fountain-court`); the
+ * fountain's own stylobate reaches 9.3 m, so the court leaves a 3.3 m
+ * promenade all the way round. Every height in the piece is LOCAL to this
+ * court's paved top — see `fountain/fountainPlan.ts`.
+ */
+export const FOUNTAIN = { x: -38, z: -40, courtRadius: 12.6 }
+
 export const RESIDENTIAL = {
   arcRadius: 88,
   /** Angles (rad, from +X axis, CCW toward −Z i.e. north) for 10 habs. */
@@ -268,6 +278,12 @@ export const PADS: PadSpec[] = [
   { id: 'farmside', x: 70, z: 0, y: 0.6, radius: 26, skirt: 10 },
   // Freedom Tower site: flat ground under the terrace + lattice footing.
   { id: 'freedom-tower', x: FREEDOM_TOWER.x, z: FREEDOM_TOWER.z, y: 0.55, radius: 13, skirt: 7 },
+  // Fountain court: the piece is a 15 m ring of stone holding 0.35 m of
+  // standing water, so the ground under it has to be DEAD flat — a swale
+  // through the basin would tip the water line out of the coping's reveal on
+  // one side. Generous skirt (9 m, eased to 16 m) because this pad lands in
+  // the middle of open regolith with no neighbouring pour to hide a seam.
+  { id: 'fountain', x: FOUNTAIN.x, z: FOUNTAIN.z, y: 0.5, radius: 13.6, skirt: 9 },
   { id: 'works', x: 50, z: -56, y: 0.5, radius: 34, skirt: 12 },
   { id: 'yard', x: 28, z: -70, y: 0.4, radius: 15, skirt: 8 },
   { id: 'playground', x: -22, z: -70, y: 0.4, radius: 10, skirt: 6 },

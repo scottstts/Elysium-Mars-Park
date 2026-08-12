@@ -25,7 +25,7 @@ export const BOOKMARKS: Record<string, Bookmark> = {
   // 3. Rim Promenade: mountains to the horizon through glass, clear of the
   // Overlook Lounge footprint.
   rim: { position: [-104, 3.2, -26], look: [-220, 26, -16], stage: 'S4' },
-  // 4. The Panewalker crossing the sun, shadow sweeping the gardens.
+  // 4. The Panewalker crossing the sun, shadow sweeping the open regolith.
   panewalker: { position: [22, 2.7, -12], look: [-70, 46, 26], stage: 'S11' },
   // 5. Greenhouse Hall interior: grow-light green against low amber sun.
   // In the walking aisle (z offset off the center tray line), not in a tray.
@@ -39,9 +39,13 @@ export const BOOKMARKS: Record<string, Bookmark> = {
   // 8. A hab porch: chair, personal touch, long shadows, home. Close-in on
   // hab 3's porch (arc r=88, porch faces the park center).
   porch: { position: [-66.3, 1.8, -38.4], look: [-70.5, 1.5, -41.9], stage: 'S8' },
-  // 9. Raked spirals of the Regolith Gardens under the crown — slight
-  // elevation, tilted down so the concentric ridge rings actually read.
-  gardens: { position: [-20, 3.8, -26], look: [-44, -0.3, -50], stage: 'S5' },
+  // 9. THE FOUNTAIN across its court — eye height on the approach from the
+  // plaza side, so the composition stacks the way the reference does: coping,
+  // water, island, figures, both tazze and the crown against the dome. Framed
+  // from 17 m out — just past the court's curb. Closer clips the crown off the
+  // top of a 58 deg frame; further and a 10 m piece over a 15 m basin stops
+  // filling it.
+  fountain: { position: [-26.2, 2.15, -28.2], look: [-38, 4.6, -40], stage: 'S5' },
   // 10. Mid-jump on the Meridian Walk, park spread beneath the arc —
   // eye at the true 0.38 g apex (+1.24 m over standing height).
   jump: { position: [-3, 3.9, 58], look: [0, 3.8, 0], stage: 'S6' },
@@ -69,7 +73,7 @@ const REQUIRED = [
   'amphitheater',
   'works',
   'porch',
-  'gardens',
+  'fountain',
   'jump',
 ] as const
 
