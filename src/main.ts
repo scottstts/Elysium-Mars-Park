@@ -11,6 +11,7 @@ import { interiorHazeStrength, shaftStrength } from './dome/interiorHaze'
 import { gradeParams } from './render/grade'
 import { penumbraScale } from './dome/latticeField'
 import { ExteriorSystem } from './exterior/exteriorTerrain'
+import { StarshipSystem } from './starship/starshipSystem'
 import { FountainSystem } from './fountain/fountainSystem'
 import { FOG_EXTINCTION_PER_METER } from './exterior/marsAerialPerspective'
 import { PhysicsSystem } from './physics/physicsWorld'
@@ -108,6 +109,10 @@ async function boot(): Promise<void> {
   if (flags.debug) registry.add(new DebugOverlaySystem())
   const sky = registry.add(new SkySystem())
   registry.add(new ExteriorSystem(pipeline))
+  // Beyond the glass, with the terrain: the launch site is exterior scenery,
+  // has no colliders and no interactions, and only has to exist before
+  // `sealStaticShadowCasters` records the static bundle below.
+  registry.add(new StarshipSystem())
   registry.add(new DomeSystem(pipeline))
   const physics = registry.add(new PhysicsSystem())
   // Groundworks registers AFTER physics: its planter walls are real colliders,

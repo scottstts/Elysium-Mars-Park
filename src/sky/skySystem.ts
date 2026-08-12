@@ -35,14 +35,35 @@ import { ENVIRONMENT_INTENSITY, SUN_LIGHT_INTENSITY, sunColor, sunDirection } fr
  *     15 · 2.59³ ≈ 260, so no level makes an outsized jump. The old set
  *     jumped 96 → 560 (5.8×), which forced level-2 normal bias to 0.75 m —
  *     a peter-panning generator at park scale.
- *  3. maxDistance only has to cover the dome: 260 m is the full diameter, and
- *     everything beyond the glass is either analytic (the lattice net) or too
- *     far for a shadow map to matter.
+ *  3. maxDistance used to only have to cover the dome — 260 m is its full
+ *     diameter, and everything beyond the glass was either analytic (the
+ *     lattice net) or too far for a shadow map to matter. THE LAUNCH SITE
+ *     BROKE THAT. It stands 215 m outside, is 147 m tall, and is backlit, so
+ *     it is read almost entirely by its own self-shadowing; from the far (NE)
+ *     rim of the park its light-space distance reaches ~270 m, past the old
+ *     outermost level, and the whole stack would have flipped to flat-lit as
+ *     the player walked north.
+ *
+ *     A FIFTH RUNG rather than a wider fourth. 15 · 2.59³ ≈ 260.6 keeps every
+ *     existing level's half-width EXACTLY where it was tuned; the new level
+ *     alone stretches out. Simply raising maxDistance on four levels would
+ *     have grown L3's texel ~46 % for one object's benefit. The cost is one
+ *     more cached map at the coarsest tier size and one more sample per lit
+ *     pixel — the maps are static and re-render only on recentre.
+ *
+ *     THE NUMBER IS NOT `maxDistance`. A level stops contributing at
+ *     `halfWidth · (1 − guardBand)` and starts FADING a further `blendRatio`
+ *     before that, so the usable reach is `maxDistance · 0.88 · 0.84`, not
+ *     `maxDistance`. Worst light-space distance from the park floor to the
+ *     stack is 298 m (measured, tools/starship-site-audit.mjs), so 380 would
+ *     have left the far rim inside the fade band at ~76 % weight. 440 puts
+ *     the fade edge at 325 m with real margin, and only costs texel width on
+ *     the outermost rung — which nothing but the spaceport uses.
  */
 const CLIPMAP_FIRST_RADIUS = 15
 const CLIPMAP_SCALE_FACTOR = 2.59
-const CLIPMAP_MAX_DISTANCE = 260
-const CLIPMAP_LEVELS = 4
+const CLIPMAP_MAX_DISTANCE = 440
+const CLIPMAP_LEVELS = 5
 
 /**
  * Static L0 is rendered once and then cached, so spatial supersampling costs
@@ -123,8 +144,15 @@ export class SkySystem implements GameSystem {
       // thing under the shell) clipped through the shadow camera's near
       // plane whenever the camera stood low, and the tower's shadow ended in
       // a hard mid-lattice line (owner report). 50 / sin 27° ≈ 110 m, plus
-      // the z-recentre quantum and headroom: 150.
-      lightMargin: 150,
+      // the z-recentre quantum and headroom: was 150.
+      //
+      // The OLIT crown stands 146 m: 146 / sin 27° ≈ 322 m by the same rule,
+      // and clipping it would cut the tower's shadow off two thirds of the way
+      // up — the exact defect above, on the tallest object in the world. 360
+      // keeps the same ~12 % headroom. This only widens each shadow camera's
+      // depth slab; `shadowDepthBias` divides by that slab, so the WORLD-space
+      // receiver offset is unchanged and nothing else has to be retuned.
+      lightMargin: 360,
       // The frozen world never expires; robots/tram render into their own
       // small continuously-refreshed maps on the dynamic caster layer.
       dynamicLevels: 0,

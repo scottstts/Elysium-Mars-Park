@@ -1,5 +1,6 @@
 import { sunDirection } from '../sky/sun'
 import { interiorHeight } from '../world/interiorHeight'
+import { STARSHIP_PAD, starshipPadWeight } from '../starship/starshipSite'
 
 /**
  * Exterior Elysium terrain — pure, deterministic, cheap.
@@ -375,7 +376,16 @@ export function exteriorHeight(x: number, z: number): number {
   // overlap into a double surface.
   if (r < INTERIOR_BLEND_END) {
     const w = 1 - smoothClamp((r - INTERIOR_BLEND_START) / (INTERIOR_BLEND_END - INTERIOR_BLEND_START))
-    return interiorHeight(x, z) * w + height * (1 - w)
+    height = interiorHeight(x, z) * w + height * (1 - w)
   }
-  return height
+
+  // ---- The spaceport launch platform, graded flat and applied LAST.
+  // Last because it has to WIN. The pad straddles r 177–261, and the apron
+  // blend above still mixes in 66 % of interiorHeight at its near corner —
+  // grading before that would leave the pour riding the dome's own falloff
+  // instead of being level, which is exactly what a 68 × 62 m concrete raft
+  // cannot do. Same mechanism as the dome apron and the corridor above it:
+  // the colonists cut and filled this site before they poured on it.
+  const pad = starshipPadWeight(x, z)
+  return pad > 0 ? height * (1 - pad) + STARSHIP_PAD.y * pad : height
 }

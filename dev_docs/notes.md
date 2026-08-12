@@ -3147,3 +3147,132 @@ breathing over the pause menu. Feed a `uniform` from `ctx.time.sim` in a
 system's `update()` instead — and feed it `sim % period`, not raw seconds: a
 float32 uniform loses sub-frame resolution after a few hours of clock and the
 animation visibly quantises. (The Optimus visor pulse, `LED_PERIOD = 2 s`.)
+
+## Second external port: the launch site (2026-08-12, Starship / OLIT)
+
+Full write-up: `dev_docs/systems/starship.md`. The generator + parity-harness
+method from the Optimus port held up unchanged on a second, quite different
+reference (1,888 lines, 186 patches, 352,746 triangles, bit-identical). What
+was NEW this time:
+
+### Prove parity by running BOTH builds in one process
+
+Optimus used checksums (counts + weighted sums). Better, when the reference is
+a self-contained `<script>`: **evaluate the reference itself** with `new
+Function` against a stub `THREE`, run the port beside it, and compare the raw
+`Float32Array`s element for element. `tools/starship-parity.mjs` — no checksum
+to argue about, and it catches a reordering that a sum would not.
+The demo's TSL surface only has to *exist* for this (materials are never
+called), so a `Proxy` returning itself for every name is enough.
+
+### A second Blender kit is the right answer, not one merged kit
+
+`procgen/sslib/` sits beside `procgen/blenderkit/`. Different Blender library
+(sslib.py's `MB`/prism/lathe vs optlib.py's curves/CSG/bevel), different node
+implementation (raw **WGSL** vs TSL), different output (non-indexed + groups vs
+indexed + welded). Merging them would put one demo's pixels at the mercy of the
+other's edits. **Extend the kit your source came from; do not unify.**
+
+### `positionLocal` in a ported material makes the SCENE GRAPH load-bearing
+
+Blender's *Texture Coordinate > Object* ports to `positionLocal`. Any port using
+it must keep its geometry in the source's own local frame, with the source's own
+per-object transform, under a Z-up→Y-up parent — and the world placement goes in
+a group OUTSIDE that. Bake the transform into the vertices (or collapse the two
+groups into one Euler) and the texture space moves: the surfaces still render,
+they just stop looking like the reference. Four of this demo's twenty materials
+read it.
+
+### Raw WGSL (`wgsl` / `wgslFn`) is available and is sometimes the honest choice
+
+First use in the project. Blender's lookup3 hash / Perlin / fBm / HexGrid go in
+verbatim as WGSL functions injected with `wgsl()` and wrapped with `wgslFn(code,
+[dep])`. TSL's `mx_noise` is a **different noise basis** — substituting it is
+not a port. Cost: it compiles only at render time, so nothing about it can be
+checked headlessly. Typing is loose (`Node`, not `Node<'float'>`); cast at the
+wrapper, once.
+
+### A reference build's own defects survive the port — find them and SAY so
+
+Parity means importing the source's mistakes. This one seats six OLM leg
+footings and the QD block flush ON the pad slab instead of 20 mm into it:
+**91.2 m² of coincident horizontal face**, the class this project bans. Kept
+(parity was the brief; the deck is seen at 0.25° from 215 m), reported, and the
+two-number fix written down.
+
+Worth building for this: a **coincident-plane census** that buckets horizontal
+triangles by world Y to the millimetre, then RASTERIZES each candidate pair to
+get true overlap. Sharing a plane is not the defect — two parts 23 m apart in
+plan shared a Y here and are harmless. Overlapping on one is. Record known
+demo-inherited planes as a baseline so the gate still fails on anything the
+port introduces itself.
+
+### Grading a site into `exteriorHeight`: apply it LAST
+
+`exteriorHeight` ends with a blend toward `interiorHeight` (66 % of it even at
+r 177). Anything that must be genuinely FLAT — a launch platform, any future
+pour out there — has to be applied **after** that blend or it rides the dome's
+own falloff. Measured 0.00 mm across 69 × 63 m once moved to the end.
+
+Two more rules for exterior pads: make the skirt wide (30 m here) because the
+valley mesh is polar with ~10 m radial rows and a tight ramp reads as a
+staircase; and add the footprint to **both** boulder-scatter loops — the
+existing corridor sweep only covers |x| < 58–70 and says nothing about a site
+off to the side.
+
+### Extending the shadow ladder: add a RUNG, do not stretch the last one
+
+A 147 m caster 215 m outside the dome left the outermost clipmap level (260 m)
+from the far rim — the whole stack flipped to flat-lit as the player walked
+north. `CLIPMAP_LEVELS 4 → 5` with `maxDistance 260 → 380` keeps every tuned
+half-width exactly where it was (`15 · 2.59³ ≈ 260.6`) and adds one level for
+the new range. Widening the fourth instead would have coarsened L3's texel 46 %
+for one object. Cost: one cached map + one sample per lit pixel.
+
+`lightMargin` scales with the tallest caster by the file's own `h / sin(27°)`
+rule — 144 m crown → 317 m → set 360. It only widens the depth slab, and
+`shadowDepthBias` divides by that slab, so the world-space receiver offset is
+unchanged and no other shadow constant needs retuning.
+
+### Skip LOD when the object can never be approached
+
+Optimus gets three LODs (890 k tris, 1 m away). This gets none: 353 k tris that
+never come closer than 215 m or subtend more than ~35°. A coarser tier would
+save draw work the frame does not miss and cost a second 34 MB vertex buffer.
+Do cull **per part** rather than per assembly — from inside the dome the ship is
+on screen while the pad under it is not.
+
+### Shadows on METAL are mostly cast shadows — the receiver decides, not the caster
+
+Shipped the launch site with `castShadow`/`receiveShadow` on the stack and
+nothing else, reasoning that the ground shadow was invisible anyway because the
+exterior terrain does not receive. Owner report: *"i don't see the shadow."*
+Both halves of that were wrong in an instructive way.
+
+- **A metal asset barely self-shades.** `metalness 1.0` has no diffuse term;
+  almost all of its appearance is environment reflection, which a shadow map
+  does not attenuate. Giving a stainless rocket `castShadow` and calling it
+  done changes nearly nothing about how it looks.
+- **So the shadow you are buying is the CAST one, on the ground** — 287 m of
+  tower shadow at 27° elevation, sweeping across exactly the sightline from
+  inside the dome. If the ground does not receive, the whole feature is
+  invisible and the object reads as a decal pasted on the terrain.
+
+`exteriorTerrain`'s valley now has `receiveShadow = true`. **Before enabling a
+caster, check what it is going to land ON.**
+
+And the follow-on: once a floor starts receiving, everything standing on it
+that does not cast becomes the new artifact. 2 600 boulders needed shadows
+too — through a **detail-1 proxy on `STATIC_SHADOW_PROXY_LAYER`, limited to
+r < 510** (camera ≤ 122 + outermost level 440 = nothing further can reach a
+map). 109 k triangles instead of 832 k, identical silhouettes.
+
+### The clipmap's usable reach is NOT `maxDistance` — it is `maxDistance · 0.88 · 0.84`
+
+`levelData.z` is `halfWidth · (1 − guardBand)` (guardBand 0.12) and the shader
+fades a further `blendRatio` (0.16) before that. A gate written against
+`maxDistance` says "covered" while the object is actually sitting in the fade
+band at 76 % weight. The metric is also a **Chebyshev** distance in the
+clipmap's own light basis (`lookAt(ORIGIN, lightDirection, +Y).invert()`), so
+an audit that invents its own perpendicular axes gets a different number.
+Replicate both or the check is theatre — `tools/starship-site-audit.mjs`.

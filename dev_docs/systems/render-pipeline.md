@@ -239,15 +239,42 @@ just above the brightest ordinary lit surface (white paint in full sun peaks
 `floorLens` 2.6, `interiorGlow` 2.0, `utilityLight` 5.0) implement it. Scale a
 fixture's AREA, never its multiplier.
 
-## 9. Shadow clipmap ladder re-derived for the 260 m world
+## 9. Shadow clipmap ladder re-derived for the 260 m world, then extended
 
 30/96/560 (three levels, cut for the 500 m dome) → **15/38.9/100.6/260** (four
 levels). The cached static L0 doubles the tier map size (8192 on tier 2, a
 3.7 mm texel), owns the whole 10.9 m Freedom deck at full weight, and no level
 makes an outsized jump. Base normal bias is 1.5 mm; depth bias is also authored
 as 1.5 mm and converted to normalized depth separately for each clipmap camera.
-`maxDistance` only has to cover the dome: everything beyond the glass is
-analytic or too far to matter.
+
+`maxDistance` used to only have to cover the dome — everything beyond the glass
+was analytic or too far to matter. **The launch site broke that** (2026-08-12):
+a 147 m backlit stack 215 m outside the glass is read almost entirely by its own
+self-shadowing, and from the far rim its light-space distance reaches 298 m.
+
+Now **15/38.9/100.6/260.6/440**, five levels. A fifth RUNG, not a wider fourth:
+`15 · 2.59³ ≈ 260.6` leaves every tuned half-width exactly where it was, and
+only the new level stretches out. Raising `maxDistance` on four levels would
+have grown L3's texel ~46 % for one object's benefit. Cost is one more cached
+map at the coarsest tier size and one more sample per lit pixel; static maps
+re-render only on recentre.
+
+**A level's usable reach is `halfWidth · (1 − guardBand) · (1 − blendRatio)`,
+not `halfWidth`** — 0.88 · 0.84 = 0.739 of it. `levelData.z` is the guard-banded
+half-width and the shader fades a further `blendRatio` inside that. Sizing the
+outermost rung against `maxDistance` left the spaceport in the fade band at 76 %
+weight while looking correct on paper. The metric is a CHEBYSHEV distance in the
+clipmap's own light basis, so anything checking reach has to use that basis too.
+
+**The valley floor now receives** (`exteriorTerrain`), which it did not before —
+see `systems/starship.md` §6 for why a metalness-1.0 asset makes that the
+difference between a shadow and no shadow. It is the one flag to revert if
+terrain shadow sampling costs too much.
+
+`lightMargin` 150 → **360**, by the file's own `h / sin(27°)` rule against the
+144 m OLIT crown (317 m). This only widens each shadow camera's depth slab, and
+`shadowDepthBias` divides by that slab, so the world-space receiver offset is
+unchanged and nothing above needed retuning.
 
 ## 10. Real lights are rationed, and never toggled
 

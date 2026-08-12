@@ -36,6 +36,15 @@ import type { GameSystem } from '../runtime/system'
 import type { RenderPipelineSystem } from '../render/pipeline'
 import { applyMarsAerialPerspective } from './marsAerialPerspective'
 import { TERRAIN_INNER_RADIUS, exteriorHeight, mountainMask } from './terrainHeight'
+import { insideStarshipPad } from '../starship/starshipSite'
+import { markStaticShadowProxy } from '../render/layers'
+
+/**
+ * Boulders inside this radius get a shadow stand-in. The camera never leaves
+ * the park floor (r ≤ 122) and the outermost clipmap level spans 380 m, so
+ * nothing past 510 m can ever land in a shadow map.
+ */
+const BOULDER_SHADOW_RADIUS = 510
 
 /**
  * Everything beyond the glass: the valley floor and its mountain ring out to
@@ -89,7 +98,28 @@ export class ExteriorSystem implements GameSystem {
 
     // ---- The valley: one graded polar mesh from the park floor edge out.
     const terrain = new Mesh(buildValleyGeometry(), createValleyMaterial())
-    terrain.receiveShadow = false
+    // THE VALLEY RECEIVES. It did not until the launch site landed on it, and
+    // the reason it has to now is the whole point of putting a 147 m stack out
+    // there: the vehicle is metalness 1.0 and the tower 0.64, so neither has
+    // much diffuse to self-shade — on this asset a shadow map reads almost
+    // entirely as CAST shadow on the ground. The OLIT's is 287 m long at the
+    // frozen 27° sun and sweeps east-north-east straight across the regolith
+    // between the pad and the tunnel, which is exactly the sightline from
+    // inside the dome. On a non-receiving floor all of that was thrown away
+    // and the complex read as a decal pasted on the valley.
+    //
+    // The tube already cast (connectorTube), and the dome's analytic lattice
+    // net rides the same shadow node — `latticeSunVisibility` is a ray-sphere
+    // test gated on `smoothstep(-0.5, 0.5, t)`, so it returns 1 out here on the
+    // sun side and correctly projects the rib net onto the floor on the far
+    // side. Both of those now land too.
+    //
+    // COST: shadow sampling over every terrain pixel, and the terrain is a
+    // large slice of the frame from anywhere near the glass. It is bounded —
+    // the clipmaps only reach 380 m from the camera, everything past that
+    // samples out of range and returns lit — but it is not free. This flag is
+    // the single revert if the frame budget says no.
+    terrain.receiveShadow = true
     terrain.castShadow = false
     // Everything is inside the mesh's own radius, so the bounding sphere test
     // is worthless and the sort key is meaningless — draw it first, always.
@@ -145,9 +175,14 @@ export class ExteriorSystem implements GameSystem {
         const cluster = 0.5 + 0.5 * Math.sin(x * 0.0121 + z * 0.0074) * Math.cos(z * 0.0093 - x * 0.0051)
         if (rng.float() > 0.24 + cluster * 0.86) continue
         if (Math.abs(x) < 58 && z > 118 && z < 760) continue
+        if (insideStarshipPad(x, z)) continue
         break
       }
       if (Math.abs(x) < 58 && z > 118 && z < 760) continue
+      // The launch platform is swept the same way the road corridor is: a
+      // boulder on the concrete — or half-buried in the apron ramp that grades
+      // up to it — reads as terrain punching through the pour.
+      if (insideStarshipPad(x, z)) continue
       // Mostly cobbles, a rare hero block.
       const roll = rng.float()
       const size = roll > 0.985 ? 3.6 + rng.float() * 4.4 : 0.32 + roll * roll * 3.1
@@ -176,6 +211,7 @@ export class ExteriorSystem implements GameSystem {
       }
       if (!placed) continue
       if (Math.abs(x) < 70 && z > 118 && z < 900) continue
+      if (insideStarshipPad(x, z)) continue
       const roll = rng.float()
       push(x, z, 0.5 + roll * roll * 4.2)
     }
@@ -219,12 +255,72 @@ export class ExteriorSystem implements GameSystem {
         meshes[v].count = written[v]
         meshes[v].instanceMatrix.needsUpdate = true
         meshes[v].castShadow = false
-        meshes[v].receiveShadow = false
+        // Receiving is nearly free on something this small on screen, and once
+        // the valley floor takes shadow a lit rock standing in the OLIT's is
+        // worse than no shadow at all.
+        meshes[v].receiveShadow = true
         this.group.add(meshes[v])
       }
     }
     emit(near, 2, 4)
     emit(far, 1, 3)
+    this.emitBoulderShadowProxy(near)
+  }
+
+  /**
+   * Boulders cast through a SEPARATE, cheaper stand-in, not by flipping
+   * `castShadow` on the visible instances — the same trick the Optimus figures
+   * use (`render/layers.ts`).
+   *
+   * Two reasons the visible meshes are the wrong caster. The cached bundle is
+   * recorded with `frustumCulled = false`, so every instance runs its vertex
+   * stage on every level refresh whether it is in that level's box or not; and
+   * the near tier is 2 600 icosahedra at detail 2 — 832 k triangles of rock
+   * added to a bundle that re-records as the player walks. Both go away here:
+   *
+   *   - detail 1, not 2 (80 tris vs 320). A 1 m boulder's SILHOUETTE at 27°
+   *     elevation is the same either way; nothing else about it is used.
+   *   - only the boulders a clipmap can ever reach. The camera never leaves
+   *     the park floor (r ≤ 122) and the outermost level spans 380 m, so a
+   *     rock past r 510 cannot contribute a visible shadow at any time.
+   *
+   * One variant for all of them: a rock's shadow does not need four silhouettes.
+   */
+  private emitBoulderShadowProxy(data: number[]): void {
+    const count = data.length / 7
+    const matrix = new Matrix4()
+    const position = new Vector3()
+    const rotation = new Quaternion()
+    const scale = new Vector3()
+    const axis = new Vector3()
+    const kept: Matrix4[] = []
+    for (let i = 0; i < count; i++) {
+      const x = data[i * 7]
+      const z = data[i * 7 + 1]
+      if (x * x + z * z > BOULDER_SHADOW_RADIUS * BOULDER_SHADOW_RADIUS) continue
+      const size = data[i * 7 + 2]
+      axis.set(data[i * 7 + 3] - 0.5, data[i * 7 + 4] - 0.5, data[i * 7 + 5] - 0.5).normalize()
+      rotation.setFromAxisAngle(axis, data[i * 7 + 6] * Math.PI * 2)
+      position.set(x, exteriorHeight(x, z) - size * 0.3, z)
+      scale.set(
+        size * (0.82 + data[i * 7 + 3] * 0.42),
+        size * (0.62 + data[i * 7 + 4] * 0.48),
+        size * (0.86 + data[i * 7 + 5] * 0.34),
+      )
+      kept.push(matrix.compose(position, rotation, scale).clone())
+    }
+    if (kept.length === 0) return
+    const proxy = new InstancedMesh(deformedRock(1, 1), new MeshStandardNodeMaterial(), kept.length)
+    for (let i = 0; i < kept.length; i++) proxy.setMatrixAt(i, kept[i])
+    proxy.instanceMatrix.needsUpdate = true
+    proxy.name = 'exterior:boulder-shadow-proxy'
+    proxy.castShadow = true
+    proxy.receiveShadow = false
+    // Bundled draws are immutable once recorded; this one must never be culled
+    // out from under the clipmap camera that recorded it.
+    proxy.frustumCulled = false
+    markStaticShadowProxy(proxy)
+    this.group.add(proxy)
   }
 
   dispose(ctx: GameContext): void {

@@ -137,11 +137,56 @@ elevation along the sun bearing 14.1° (sun sits at 27°).
   regolith. A **size ceiling rising with radius** models a cleared apron —
   without it the dome is ringed by 6 m blocks standing 20 m off the glass.
   The graded spaceport corridor is swept clear.
-- Dust devils ×3, retuned to the valley: one coming up the south pass on the
-  arrival sightline, one crossing the east floor, one high on the NW range
-  front. Motion is allowed under the frozen-afternoon rule (machines and dust
-  move; the SUN does not).
-- Bloom threshold 1.6 so the dust lobes never bloom; only disc + halo do.
+- **The launch platform is swept too, in BOTH loops.** The corridor sweep is
+  `|x| < 58` (floor) / `|x| < 70` (talus) and says nothing about a site off to
+  the side; the pad spans `|x|` 53–121. `insideStarshipPad()` covers the
+  concrete plus a 6 m verge — a boulder half-buried in the apron ramp reads as
+  terrain punching through the pour just as badly as one on the deck.
+- Dust devils were CUT: the drifting translucent columns read as moving beams
+  of light through the glass whenever one crossed near the dome (owner report),
+  and an unlit billboard tornado has no honest fix at that distance. The
+  valley's weather is the aerial dust medium.
+
+### The valley RECEIVES shadows (2026-08-12) — and boulders cast a cheap proxy
+
+`terrain.receiveShadow` was `false` until the launch site landed on it. It had
+to change: that asset is metalness 1.0 / 0.64, so it barely self-shades and its
+shadow map reads almost entirely as a 287 m CAST shadow on the ground, sweeping
+the exact sightline from inside the dome. On a non-receiving floor the whole
+complex looked pasted on. Full reasoning in `systems/starship.md` §6.
+
+Consequences worth knowing:
+
+- The connector tube already cast, and the dome's analytic lattice net rides
+  the same shadow node — both now land on the valley. `latticeSunVisibility` is
+  gated on `smoothstep(-0.5, 0.5, t)`, so it correctly returns 1 out on the sun
+  side and projects the rib net onto the floor on the far side.
+- Boulders now cast through a **detail-1 proxy on
+  `STATIC_SHADOW_PROXY_LAYER`**, not by flipping `castShadow` on the visible
+  instances: the cached bundle is `frustumCulled = false`, so every instance
+  pays its vertex stage on every refresh. Limited to r < 510 (camera ≤ 122 +
+  outermost clipmap 440). 1 365 of 2 600 rocks, 109 k tris instead of 832 k.
+- **`terrain.receiveShadow` is the single revert** if terrain shadow sampling
+  turns out to cost too much: it is a large slice of the frame near the glass,
+  bounded only by the clipmaps' 440 m reach.
+
+### The graded launch platform (`starship/starshipSite.ts`)
+
+`exteriorHeight` grades a flat site for the launch complex, the same mechanism
+it already uses for the dome apron and the spaceport corridor. Two things about
+it generalise to any future pour out there:
+
+- **It is applied LAST, after the interior blend.** That blend still mixes in
+  66 % of `interiorHeight` at r 177; grading before it leaves the pad riding
+  the dome's own falloff instead of being level. Measured 0.00 mm across
+  69 × 63 m once moved to the end of the function.
+- **The skirt is wide (30 m).** The valley mesh is polar with ~10 m radial rows
+  out here, so a tighter ramp comes out as a staircase rather than an apron.
+  Its inner tip dies at x −19.3, well short of the arrival tube — which reads
+  `exteriorHeight` for its own ground line and would otherwise have moved.
+
+Level −0.44 is the footprint's own mean, so cut and fill balance (0.58 / 1.05 m,
+≤ 3.5 % apron grade). Full write-up: `dev_docs/systems/starship.md`.
 
 ### Two engine traps found here (both cost real time)
 

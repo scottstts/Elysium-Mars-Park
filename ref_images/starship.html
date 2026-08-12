@@ -1,0 +1,2145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Starship / OLIT — Blender build ported to three.js TSL (WebGPU)</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0d10;color:#c8ced6;
+            font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}
+  #c{display:block;width:100%;height:100%}
+  #hud{position:fixed;left:12px;top:10px;pointer-events:none;text-shadow:0 1px 2px #000;
+       opacity:.8;white-space:pre}
+  #load{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+        background:#0b0d10;z-index:5;letter-spacing:.06em}
+  #err{position:fixed;inset:0;display:none;padding:24px;background:#160c0c;color:#f2b8b8;
+       z-index:9;white-space:pre-wrap;overflow:auto}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="load">building mesh…</div>
+<div id="err"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three":         "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+    "three/webgpu":  "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+    "three/tsl":     "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+  Fn, wgsl, wgslFn, float, vec2, vec3, vec4, color, uv, positionLocal, positionView,
+  normalView, mix, clamp, max, min, floor, fract, abs, sign, dFdx, dFdy, cross, dot,
+  normalize, screenUV, length
+} from 'three/tsl';
+
+const elErr = document.getElementById('err');
+function fail(e){ elErr.style.display='block'; elErr.textContent = (e && e.stack) || String(e); console.error(e); }
+window.addEventListener('error', ev => fail(ev.error || ev.message));
+
+/* ==========================================================================
+   0.  python-ish scalar / vector helpers
+   ========================================================================== */
+const PI = Math.PI, TAU = 2 * Math.PI;
+const sin = Math.sin, cos = Math.cos, tan = Math.tan, sqrt = Math.sqrt;
+const radians = d => d * Math.PI / 180;
+
+/* python round(): half-to-even */
+function pyround(x){
+  const f = Math.floor(x), d = x - f;
+  if (d > 0.5) return f + 1;
+  if (d < 0.5) return f;
+  return (f % 2 === 0) ? f : f + 1;
+}
+
+class Vec {
+  constructor(x = 0, y = 0, z = 0){ this.x = x; this.y = y; this.z = z; }
+  add(o){ return new Vec(this.x + o.x, this.y + o.y, this.z + o.z); }
+  sub(o){ return new Vec(this.x - o.x, this.y - o.y, this.z - o.z); }
+  mul(s){ return new Vec(this.x * s, this.y * s, this.z * s); }
+  neg(){ return new Vec(-this.x, -this.y, -this.z); }
+  dot(o){ return this.x * o.x + this.y * o.y + this.z * o.z; }
+  cross(o){ return new Vec(this.y * o.z - this.z * o.y,
+                           this.z * o.x - this.x * o.z,
+                           this.x * o.y - this.y * o.x); }
+  get length(){ return Math.sqrt(this.dot(this)); }
+  normalized(){ const l = this.length; return l > 0 ? this.mul(1 / l) : new Vec(0, 0, 0); }
+  slice2(){ return [this.x, this.y]; }            // mathutils Vector[:2]
+}
+/* accepts Vec | [x,y,z] */
+function V(p){ return (p instanceof Vec) ? p : new Vec(p[0], p[1], p[2]); }
+
+/* ==========================================================================
+   1.  sslib.py  —  MeshBuilder + primitives
+   ========================================================================== */
+class MB {
+  constructor(){ this.v = []; this.f = []; this.uv = []; this.sm = []; this.mat = []; }
+  add_v(p){
+    if (p instanceof Vec) this.v.push([p.x, p.y, p.z]);
+    else this.v.push([p[0], p[1], p[2]]);
+    return this.v.length - 1;
+  }
+  /* add_f(idx, uv=None, smooth=False, mat=0) */
+  add_f(idx, uvq = null, smooth = false, mat = 0){
+    this.f.push(idx.slice());
+    this.uv.push(uvq);
+    this.sm.push(smooth);
+    this.mat.push(mat);
+  }
+  offset(){ return this.v.length; }
+}
+
+function _basis(p0, p1, up_hint){
+  const d = V(p1).sub(V(p0));
+  const L = d.length;
+  if (L < 1e-9) throw new Error('zero-length beam');
+  const z = d.mul(1 / L);
+  let up = V(up_hint);
+  if (Math.abs(up.dot(z)) > 0.999) up = (Math.abs(z.z) < 0.9) ? new Vec(0, 0, 1) : new Vec(1, 0, 0);
+  let x = up.cross(z);
+  if (x.length < 1e-9) x = new Vec(1, 0, 0);
+  x = x.normalized();
+  const y = z.cross(x).normalized();
+  return [x, y, z, L];
+}
+
+function prism(mb, p0, p1, section, o = {}){
+  const up     = o.up     !== undefined ? o.up     : [0, 0, 1];
+  const cap0   = o.cap0   !== undefined ? o.cap0   : true;
+  const cap1   = o.cap1   !== undefined ? o.cap1   : true;
+  const mat    = o.mat    !== undefined ? o.mat    : 0;
+  const smooth = o.smooth !== undefined ? o.smooth : false;
+  const ext0   = o.ext0   !== undefined ? o.ext0   : 0.0;
+  const ext1   = o.ext1   !== undefined ? o.ext1   : 0.0;
+  const twist  = o.twist  !== undefined ? o.twist  : 0.0;
+  const scale1 = o.scale1 !== undefined ? o.scale1 : 1.0;
+
+  const [x, y, z] = _basis(p0, p1, up);
+  const a = V(p0).sub(z.mul(ext0));
+  const b = V(p1).add(z.mul(ext1));
+  const n = section.length;
+  const i0 = mb.offset();
+  const ct = cos(twist), st = sin(twist);
+  for (const [sx, sy] of section) mb.add_v(a.add(x.mul(sx)).add(y.mul(sy)));
+  for (const [sx, sy] of section){
+    const rx = (sx * ct - sy * st) * scale1;
+    const ry = (sx * st + sy * ct) * scale1;
+    mb.add_v(b.add(x.mul(rx)).add(y.mul(ry)));
+  }
+  for (let k = 0; k < n; k++){
+    const k2 = (k + 1) % n;
+    mb.add_f([i0 + k, i0 + k2, i0 + n + k2, i0 + n + k], null, smooth, mat);
+  }
+  if (cap0){ const r = []; for (let i = i0 + n - 1; i > i0 - 1; i--) r.push(i); mb.add_f(r, null, false, mat); }
+  if (cap1){ const r = []; for (let i = i0 + n; i < i0 + 2 * n; i++) r.push(i); mb.add_f(r, null, false, mat); }
+  return i0;
+}
+
+/* --- 2D section profiles ------------------------------------------------- */
+const sec_box = (w, h) => [[-w/2, -h/2], [w/2, -h/2], [w/2, h/2], [-w/2, h/2]];
+
+function sec_i(w, h, tw, tf){
+  const hw = w/2, hh = h/2, hb = tw/2, hf = tf;
+  return [[-hw,-hh],[hw,-hh],[hw,-hh+hf],[hb,-hh+hf],[hb,hh-hf],[hw,hh-hf],
+          [hw,hh],[-hw,hh],[-hw,hh-hf],[-hb,hh-hf],[-hb,-hh+hf],[-hw,-hh+hf]];
+}
+
+function sec_tube(r, n = 12){
+  const p = [];
+  for (let k = 0; k < n; k++) p.push([r * cos(TAU * k / n), r * sin(TAU * k / n)]);
+  return p;
+}
+
+/* --- lathe --------------------------------------------------------------- */
+function lathe(mb, profile, segs, o = {}){
+  const mat        = o.mat        !== undefined ? o.mat        : 0;
+  const cap_bottom = o.cap_bottom !== undefined ? o.cap_bottom : false;
+  const cap_top    = o.cap_top    !== undefined ? o.cap_top    : false;
+  const smooth     = o.smooth     !== undefined ? o.smooth     : true;
+  const tile_w     = o.tile_w     !== undefined ? o.tile_w     : null;
+  const a0         = o.a0         !== undefined ? o.a0         : 0.0;
+  const a1         = o.a1         !== undefined ? o.a1         : TAU;
+  const center     = o.center     !== undefined ? o.center     : [0.0, 0.0];
+  const flip       = o.flip       !== undefined ? o.flip       : false;
+  const sharp_idx  = o.sharp_idx  !== undefined ? o.sharp_idx  : [];
+
+  const n = profile.length;
+  const closed = Math.abs((a1 - a0) - TAU) < 1e-6;
+  const ns = closed ? segs : segs + 1;
+  const cx = center[0], cy = center[1];
+
+  const vs = [0.0];
+  for (let k = 1; k < n; k++){
+    const dr = profile[k][0] - profile[k-1][0];
+    const dz = profile[k][1] - profile[k-1][1];
+    vs.push(vs[vs.length-1] + sqrt(dr*dr + dz*dz));
+  }
+  const us = [];
+  for (let k = 0; k < n; k++){
+    const r = Math.max(profile[k][0], 1e-4);
+    let circ = (a1 - a0) * r;
+    if (tile_w){ const ntiles = Math.max(1, pyround(circ / tile_w)); circ = ntiles * tile_w; }
+    us.push(circ);
+  }
+
+  const i0 = mb.offset();
+  for (let k = 0; k < n; k++){
+    const r = profile[k][0], z = profile[k][1];
+    for (let s = 0; s < ns; s++){
+      const a = a0 + (a1 - a0) * s / segs;
+      mb.add_v([cx + r * cos(a), cy + r * sin(a), z]);
+    }
+  }
+  for (let k = 0; k < n - 1; k++){
+    const m = mat;
+    const sm = smooth && (sharp_idx.indexOf(k) === -1);
+    const lim = closed ? ns : ns - 1;
+    for (let s = 0; s < lim; s++){
+      const s2 = (s + 1) % ns;
+      const A = i0 + k * ns + s;
+      const B = i0 + k * ns + s2;
+      const C = i0 + (k + 1) * ns + s2;
+      const D = i0 + (k + 1) * ns + s;
+      const u0 = us[k] * s / segs;
+      const u1 = us[k] * (s + 1) / segs;
+      const u2 = us[k+1] * (s + 1) / segs;
+      const u3 = us[k+1] * s / segs;
+      let quad = [A, B, C, D];
+      let uvq  = [[u0, vs[k]], [u1, vs[k]], [u2, vs[k+1]], [u3, vs[k+1]]];
+      if (flip){ quad = quad.slice().reverse(); uvq = uvq.slice().reverse(); }
+      mb.add_f(quad, uvq, sm, m);
+    }
+  }
+  if (cap_bottom && profile[0][0] > 1e-5){
+    const ring = []; for (let s = 0; s < ns; s++) ring.push(i0 + s);
+    mb.add_f(flip ? ring : ring.slice().reverse(), null, false, mat);
+  }
+  if (cap_top && profile[n-1][0] > 1e-5){
+    const ring = []; for (let s = 0; s < ns; s++) ring.push(i0 + (n - 1) * ns + s);
+    mb.add_f(flip ? ring.slice().reverse() : ring, null, false, mat);
+  }
+  return i0;
+}
+
+/* --- profile helpers ----------------------------------------------------- */
+function ring_stack(z0, z1, r, ring_h, lip = 0.010, groove = 0.030){
+  const prof = [[r, z0]];
+  let z = z0;
+  while (z + ring_h < z1 - 1e-6){
+    z += ring_h;
+    prof.push([r, z - groove]);
+    prof.push([r + lip, z - groove * 0.5]);
+    prof.push([r + lip, z + groove * 0.5]);
+    prof.push([r, z + groove]);
+  }
+  prof.push([r, z1]);
+  return prof;
+}
+/* ==========================================================================
+   2.  MB.build()  ->  BufferGeometry, reproducing Blender's evaluated mesh
+       * from_pydata drops degenerate faces (done in MB.build)
+       * mesh.validate() drops polys that reuse the same vertex set
+       * shade_auto_smooth(angle): every face smooth + "Smooth by Angle"
+         (edges above the angle become sharp), otherwise per-face use_smooth
+       * corner normals = angle-weighted average over the fan bounded by
+         sharp edges;  flat faces keep the face normal
+       * quads tessellate (0,1,2)(0,2,3) like BKE_mesh_recalc_looptris,
+         n-gons by ear clipping (BLI_polyfill)
+   ========================================================================== */
+function newell(Vs, f){
+  let nx = 0, ny = 0, nz = 0;
+  const n = f.length;
+  for (let i = 0; i < n; i++){
+    const a = Vs[f[i]], b = Vs[f[(i + 1) % n]];
+    nx += (a[1] - b[1]) * (a[2] + b[2]);
+    ny += (a[2] - b[2]) * (a[0] + b[0]);
+    nz += (a[0] - b[0]) * (a[1] + b[1]);
+  }
+  const l = Math.hypot(nx, ny, nz);
+  return l > 0 ? [nx / l, ny / l, nz / l] : [0, 0, 0];
+}
+
+function earClip(pts){
+  const n = pts.length;
+  let idx = []; for (let i = 0; i < n; i++) idx.push(i);
+  const tris = [];
+  const ar = (a, b, c) => (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0]);
+  let guard = 0;
+  while (idx.length > 3 && guard++ < 20000){
+    let clipped = false;
+    for (let i = 0; i < idx.length; i++){
+      const L = idx.length;
+      const i0 = idx[(i - 1 + L) % L], i1 = idx[i], i2 = idx[(i + 1) % L];
+      const a = pts[i0], b = pts[i1], c = pts[i2];
+      if (ar(a, b, c) <= 1e-14) continue;
+      let ok = true;
+      for (const j of idx){
+        if (j === i0 || j === i1 || j === i2) continue;
+        const p = pts[j];
+        if (ar(a, b, p) >= 0 && ar(b, c, p) >= 0 && ar(c, a, p) >= 0){ ok = false; break; }
+      }
+      if (!ok) continue;
+      tris.push([i0, i1, i2]);
+      idx.splice(i, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped){ for (let i = 1; i < idx.length - 1; i++) tris.push([idx[0], idx[i], idx[i+1]]); idx = []; break; }
+  }
+  if (idx.length === 3) tris.push([idx[0], idx[1], idx[2]]);
+  return tris;
+}
+
+function triangulate(Vs, f, nrm){
+  const n = f.length;
+  if (n === 3) return [[0, 1, 2]];
+  if (n === 4) return [[0, 1, 2], [0, 2, 3]];
+  let nz = new Vec(nrm[0], nrm[1], nrm[2]);
+  if (nz.length < 1e-12) nz = new Vec(0, 0, 1);
+  const p0 = V(Vs[f[0]]);
+  let e = V(Vs[f[1]]).sub(p0);
+  let ax = e.sub(nz.mul(e.dot(nz)));
+  if (ax.length < 1e-9){
+    ax = Math.abs(nz.z) < 0.9 ? new Vec(0, 0, 1).cross(nz) : new Vec(1, 0, 0).cross(nz);
+  }
+  ax = ax.normalized();
+  const ay = nz.cross(ax);
+  const pts = f.map(vi => { const q = V(Vs[vi]).sub(p0); return [q.dot(ax), q.dot(ay)]; });
+  return earClip(pts);
+}
+
+function buildGeometry(mb, smoothAngleDeg){
+  const Vs = mb.v;
+
+  /* --- 1. degenerate faces (MB.build) ---------------------------------- */
+  const pass1 = [];
+  for (let i = 0; i < mb.f.length; i++){
+    const f = mb.f[i];
+    if (f.length < 3) continue;
+    if (new Set(f).size !== f.length) continue;
+    pass1.push(i);
+  }
+  /* --- 2. duplicate polys (mesh.validate) ------------------------------ */
+  const seen = new Set(), keep = [];
+  for (const i of pass1){
+    const key = mb.f[i].slice().sort((a, b) => a - b).join(',');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    keep.push(i);
+  }
+
+  const F = keep.map(i => mb.f[i]);
+  const FUV = keep.map(i => mb.uv[i]);
+  const FM = keep.map(i => mb.mat[i]);
+  const auto = (smoothAngleDeg !== null && smoothAngleDeg !== undefined);
+  const FS = keep.map(i => auto ? true : mb.sm[i]);
+  const nf = F.length;
+
+  const FN = new Float32Array(nf * 3);
+  for (let i = 0; i < nf; i++){
+    const n = newell(Vs, F[i]);
+    FN[i*3] = n[0]; FN[i*3+1] = n[1]; FN[i*3+2] = n[2];
+  }
+
+  /* --- corner tables ---------------------------------------------------- */
+  let totalCorners = 0;
+  const loopStart = new Int32Array(nf);
+  for (let i = 0; i < nf; i++){ loopStart[i] = totalCorners; totalCorners += F[i].length; }
+  const cornerFace = new Int32Array(totalCorners);
+  const cornerVert = new Int32Array(totalCorners);
+  for (let i = 0; i < nf; i++){
+    const f = F[i], s = loopStart[i];
+    for (let k = 0; k < f.length; k++){ cornerFace[s+k] = i; cornerVert[s+k] = f[k]; }
+  }
+
+  /* --- edges -> sharpness ---------------------------------------------- */
+  const KEY = 2097152;                     // 2^21, safe for < 2M verts / object
+  const emap = new Map();
+  for (let i = 0; i < nf; i++){
+    const f = F[i], L = f.length;
+    for (let k = 0; k < L; k++){
+      const a = f[k], b = f[(k + 1) % L];
+      const key = a < b ? a * KEY + b : b * KEY + a;
+      const e = emap.get(key);
+      if (e === undefined) emap.set(key, [i]);
+      else e.push(i);
+    }
+  }
+  const cosT = auto ? Math.cos(radians(smoothAngleDeg)) : -2.0;
+  const nv = Vs.length;
+  const vPairs = new Array(nv);
+  for (const [key, fl] of emap){
+    if (fl.length !== 2) continue;
+    const f1 = fl[0], f2 = fl[1];
+    if (!FS[f1] || !FS[f2]) continue;
+    const d = FN[f1*3]*FN[f2*3] + FN[f1*3+1]*FN[f2*3+1] + FN[f1*3+2]*FN[f2*3+2];
+    if (d < cosT) continue;                 // sharp by angle
+    const a = Math.floor(key / KEY), b = key % KEY;
+    (vPairs[a] || (vPairs[a] = [])).push(f1, f2);
+    (vPairs[b] || (vPairs[b] = [])).push(f1, f2);
+  }
+  emap.clear();
+
+  /* --- vertex -> corners (CSR) ----------------------------------------- */
+  const vstart = new Int32Array(nv + 1);
+  for (let c = 0; c < totalCorners; c++) vstart[cornerVert[c] + 1]++;
+  for (let i = 0; i < nv; i++) vstart[i+1] += vstart[i];
+  const vcorner = new Int32Array(totalCorners);
+  const fill = vstart.slice(0, nv);
+  for (let c = 0; c < totalCorners; c++) vcorner[fill[cornerVert[c]]++] = c;
+
+  /* --- corner normals --------------------------------------------------- */
+  const CN = new Float32Array(totalCorners * 3);
+  const par = new Int32Array(64);
+  const find = (p, i) => { while (p[i] !== i) { p[i] = p[p[i]]; i = p[i]; } return i; };
+  for (let v = 0; v < nv; v++){
+    const s = vstart[v], e = vstart[v+1];
+    const cn = e - s;
+    if (cn === 0) continue;
+    let P = par;
+    if (cn > P.length) P = par.length < cn ? new Int32Array(cn) : par;
+    if (P.length < cn) P = new Int32Array(cn);
+    const local = new Map();
+    for (let i = 0; i < cn; i++){ P[i] = i; local.set(cornerFace[vcorner[s+i]], i); }
+    const pl = vPairs[v];
+    if (pl){
+      for (let i = 0; i < pl.length; i += 2){
+        const l1 = local.get(pl[i]), l2 = local.get(pl[i+1]);
+        if (l1 === undefined || l2 === undefined) continue;
+        const r1 = find(P, l1), r2 = find(P, l2);
+        if (r1 !== r2) P[r1] = r2;
+      }
+    }
+    const acc = new Map();
+    for (let i = 0; i < cn; i++){
+      const c = vcorner[s+i], fi = cornerFace[c];
+      if (!FS[fi]) continue;
+      const f = F[fi], L = f.length, k = c - loopStart[fi];
+      const pA = Vs[f[(k - 1 + L) % L]], pC = Vs[f[k]], pB = Vs[f[(k + 1) % L]];
+      const e1x = pA[0]-pC[0], e1y = pA[1]-pC[1], e1z = pA[2]-pC[2];
+      const e2x = pB[0]-pC[0], e2y = pB[1]-pC[1], e2z = pB[2]-pC[2];
+      const l1 = Math.hypot(e1x, e1y, e1z), l2 = Math.hypot(e2x, e2y, e2z);
+      let w = 0;
+      if (l1 > 1e-12 && l2 > 1e-12){
+        let cd = (e1x*e2x + e1y*e2y + e1z*e2z) / (l1 * l2);
+        w = Math.acos(cd < -1 ? -1 : cd > 1 ? 1 : cd);
+      }
+      const r = find(P, i);
+      let a = acc.get(r);
+      if (a === undefined){ a = [0, 0, 0]; acc.set(r, a); }
+      a[0] += FN[fi*3] * w; a[1] += FN[fi*3+1] * w; a[2] += FN[fi*3+2] * w;
+    }
+    for (const a of acc.values()){
+      const l = Math.hypot(a[0], a[1], a[2]);
+      if (l > 1e-20){ a[0] /= l; a[1] /= l; a[2] /= l; }
+    }
+    for (let i = 0; i < cn; i++){
+      const c = vcorner[s+i], fi = cornerFace[c];
+      if (!FS[fi]){ CN[c*3] = FN[fi*3]; CN[c*3+1] = FN[fi*3+1]; CN[c*3+2] = FN[fi*3+2]; continue; }
+      const a = acc.get(find(P, i));
+      if (a && (a[0] || a[1] || a[2])){ CN[c*3] = a[0]; CN[c*3+1] = a[1]; CN[c*3+2] = a[2]; }
+      else { CN[c*3] = FN[fi*3]; CN[c*3+1] = FN[fi*3+1]; CN[c*3+2] = FN[fi*3+2]; }
+    }
+  }
+
+  /* --- emit, grouped by material --------------------------------------- */
+  const perMat = new Map();
+  for (let i = 0; i < nf; i++) perMat.set(FM[i], (perMat.get(FM[i]) || 0) + F[i].length - 2);
+  const order = [...perMat.keys()].sort((a, b) => a - b);
+  let total = 0; const off = new Map();
+  for (const m of order){ off.set(m, total); total += perMat.get(m); }
+
+  const pos = new Float32Array(total * 9);
+  const nor = new Float32Array(total * 9);
+  const uvs = new Float32Array(total * 6);
+  const cur = new Map(); for (const m of order) cur.set(m, off.get(m));
+
+  for (let i = 0; i < nf; i++){
+    const f = F[i], s = loopStart[i], m = FM[i];
+    const fu = FUV[i];
+    const tris = triangulate(Vs, f, [FN[i*3], FN[i*3+1], FN[i*3+2]]);
+    for (const t of tris){
+      let ti = cur.get(m); cur.set(m, ti + 1);
+      for (let j = 0; j < 3; j++){
+        const k = t[j], c = s + k, vi = f[k];
+        const p = Vs[vi];
+        const o9 = ti * 9 + j * 3, o6 = ti * 6 + j * 2;
+        pos[o9] = p[0]; pos[o9+1] = p[1]; pos[o9+2] = p[2];
+        nor[o9] = CN[c*3]; nor[o9+1] = CN[c*3+1]; nor[o9+2] = CN[c*3+2];
+        const q = (fu && k < fu.length) ? fu[k] : null;
+        uvs[o6] = q ? q[0] : 0; uvs[o6+1] = q ? q[1] : 0;
+      }
+    }
+  }
+
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal',   new THREE.BufferAttribute(nor, 3));
+  g.setAttribute('uv',       new THREE.BufferAttribute(uvs, 2));
+  for (const m of order) g.addGroup(off.get(m) * 3, perMat.get(m) * 3, m);
+  g.computeBoundingSphere();
+  g.userData.tris = total;
+  return g;
+}
+/* ==========================================================================
+   3.  mats.py  ->  TSL.  Blender's Perlin/fBm noise, white noise, the HexGrid
+       node group and the Bump node are reproduced verbatim in WGSL so the
+       procedural patterns match the Blender build texel for texel.
+   ========================================================================== */
+const BL = wgsl(`
+fn bl_rot(x: u32, k: u32) -> u32 { return (x << k) | (x >> (32u - k)); }
+
+fn bl_final(a0: u32, b0: u32, c0: u32) -> u32 {
+  var a = a0; var b = b0; var c = c0;
+  c = c ^ b; c = c - bl_rot(b, 14u);
+  a = a ^ c; a = a - bl_rot(c, 11u);
+  b = b ^ a; b = b - bl_rot(a, 25u);
+  c = c ^ b; c = c - bl_rot(b, 16u);
+  a = a ^ c; a = a - bl_rot(c,  4u);
+  b = b ^ a; b = b - bl_rot(a, 14u);
+  c = c ^ b; c = c - bl_rot(b, 24u);
+  return c;
+}
+fn bl_hash2(kx: u32, ky: u32) -> u32 {
+  let s: u32 = 0xdeadbeefu + (2u << 2u) + 13u;
+  return bl_final(s + kx, s + ky, s);
+}
+fn bl_hash3(kx: u32, ky: u32, kz: u32) -> u32 {
+  let s: u32 = 0xdeadbeefu + (3u << 2u) + 13u;
+  return bl_final(s + kx, s + ky, s + kz);
+}
+fn bl_hv2f(k: vec2<f32>) -> f32 {
+  return f32(bl_hash2(bitcast<u32>(k.x), bitcast<u32>(k.y))) / 4294967295.0;
+}
+fn bl_hv3f(k: vec3<f32>) -> f32 {
+  return f32(bl_hash3(bitcast<u32>(k.x), bitcast<u32>(k.y), bitcast<u32>(k.z))) / 4294967295.0;
+}
+
+fn bl_fade(t: f32) -> f32 { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+fn bl_neg_if(v: f32, c: u32) -> f32 { if (c != 0u) { return -v; } return v; }
+
+fn bl_grad2(h0: u32, x: f32, y: f32) -> f32 {
+  let h = h0 & 7u;
+  var u = y; if (h < 4u) { u = x; }
+  var t = x; if (h < 4u) { t = y; }
+  let v = 2.0 * t;
+  return bl_neg_if(u, h & 1u) + bl_neg_if(v, h & 2u);
+}
+fn bl_grad3(h0: u32, x: f32, y: f32, z: f32) -> f32 {
+  let h = h0 & 15u;
+  var u = y; if (h < 8u) { u = x; }
+  var vt = z; if (h == 12u || h == 14u) { vt = x; }
+  var v = vt; if (h < 4u) { v = y; }
+  return bl_neg_if(u, h & 1u) + bl_neg_if(v, h & 2u);
+}
+
+fn bl_perlin2(p: vec2<f32>) -> f32 {
+  let Xi = floor(p);
+  let Xf = p - Xi;
+  let u = bl_fade(Xf.x); let v = bl_fade(Xf.y);
+  let X = bitcast<u32>(i32(Xi.x)); let Y = bitcast<u32>(i32(Xi.y));
+  let X1 = X + 1u; let Y1 = Y + 1u;
+  let x0 = Xf.x; let x1 = Xf.x - 1.0;
+  let y0 = Xf.y; let y1 = Xf.y - 1.0;
+  let v00 = bl_grad2(bl_hash2(X , Y ), x0, y0);
+  let v10 = bl_grad2(bl_hash2(X1, Y ), x1, y0);
+  let v01 = bl_grad2(bl_hash2(X , Y1), x0, y1);
+  let v11 = bl_grad2(bl_hash2(X1, Y1), x1, y1);
+  return mix(mix(v00, v10, u), mix(v01, v11, u), v);
+}
+fn bl_perlin3(p: vec3<f32>) -> f32 {
+  let Xi = floor(p);
+  let Xf = p - Xi;
+  let u = bl_fade(Xf.x); let v = bl_fade(Xf.y); let w = bl_fade(Xf.z);
+  let X = bitcast<u32>(i32(Xi.x)); let Y = bitcast<u32>(i32(Xi.y)); let Z = bitcast<u32>(i32(Xi.z));
+  let X1 = X + 1u; let Y1 = Y + 1u; let Z1 = Z + 1u;
+  let x0 = Xf.x; let x1 = Xf.x - 1.0;
+  let y0 = Xf.y; let y1 = Xf.y - 1.0;
+  let z0 = Xf.z; let z1 = Xf.z - 1.0;
+  let a = mix(mix(bl_grad3(bl_hash3(X , Y , Z ), x0, y0, z0),
+                  bl_grad3(bl_hash3(X1, Y , Z ), x1, y0, z0), u),
+              mix(bl_grad3(bl_hash3(X , Y1, Z ), x0, y1, z0),
+                  bl_grad3(bl_hash3(X1, Y1, Z ), x1, y1, z0), u), v);
+  let b = mix(mix(bl_grad3(bl_hash3(X , Y , Z1), x0, y0, z1),
+                  bl_grad3(bl_hash3(X1, Y , Z1), x1, y0, z1), u),
+              mix(bl_grad3(bl_hash3(X , Y1, Z1), x0, y1, z1),
+                  bl_grad3(bl_hash3(X1, Y1, Z1), x1, y1, z1), u), v);
+  return mix(a, b, w);
+}
+fn bl_snoise2(p: vec2<f32>) -> f32 { return bl_perlin2(p) * 0.6616; }
+fn bl_snoise3(p: vec3<f32>) -> f32 { return bl_perlin3(p) * 0.9820; }
+
+fn bl_fbm2(p: vec2<f32>, detail: f32, roughness: f32, lacunarity: f32) -> f32 {
+  var fscale = 1.0; var amp = 1.0; var maxamp = 0.0; var sum = 0.0;
+  let octaves = clamp(detail, 0.0, 15.0);
+  let n = i32(octaves);
+  for (var i: i32 = 0; i <= n; i = i + 1) {
+    sum = sum + bl_snoise2(p * fscale) * amp;
+    maxamp = maxamp + amp;
+    amp = amp * roughness;
+    fscale = fscale * lacunarity;
+  }
+  let rmd = octaves - floor(octaves);
+  if (rmd != 0.0) {
+    let sum2 = sum + bl_snoise2(p * fscale) * amp;
+    return mix(0.5 * sum / maxamp + 0.5, 0.5 * sum2 / (maxamp + amp) + 0.5, rmd);
+  }
+  return 0.5 * sum / maxamp + 0.5;
+}
+fn bl_fbm3(p: vec3<f32>, detail: f32, roughness: f32, lacunarity: f32) -> f32 {
+  var fscale = 1.0; var amp = 1.0; var maxamp = 0.0; var sum = 0.0;
+  let octaves = clamp(detail, 0.0, 15.0);
+  let n = i32(octaves);
+  for (var i: i32 = 0; i <= n; i = i + 1) {
+    sum = sum + bl_snoise3(p * fscale) * amp;
+    maxamp = maxamp + amp;
+    amp = amp * roughness;
+    fscale = fscale * lacunarity;
+  }
+  let rmd = octaves - floor(octaves);
+  if (rmd != 0.0) {
+    let sum2 = sum + bl_snoise3(p * fscale) * amp;
+    return mix(0.5 * sum / maxamp + 0.5, 0.5 * sum2 / (maxamp + amp) + 0.5, rmd);
+  }
+  return 0.5 * sum / maxamp + 0.5;
+}
+fn bl_rv2(seed: f32) -> vec2<f32> {
+  return vec2<f32>(100.0 + bl_hv2f(vec2<f32>(seed, 0.0)) * 100.0,
+                   100.0 + bl_hv2f(vec2<f32>(seed, 1.0)) * 100.0);
+}
+fn bl_rv3(seed: f32) -> vec3<f32> {
+  return vec3<f32>(100.0 + bl_hv2f(vec2<f32>(seed, 0.0)) * 100.0,
+                   100.0 + bl_hv2f(vec2<f32>(seed, 1.0)) * 100.0,
+                   100.0 + bl_hv2f(vec2<f32>(seed, 2.0)) * 100.0);
+}
+fn bl_tex2(co: vec2<f32>, detail: f32, roughness: f32, lacunarity: f32, distortion: f32) -> f32 {
+  var p = co;
+  if (distortion != 0.0) {
+    p = p + vec2<f32>(bl_snoise2(p + bl_rv2(0.0)) * distortion,
+                      bl_snoise2(p + bl_rv2(1.0)) * distortion);
+  }
+  return bl_fbm2(p, detail, roughness, lacunarity);
+}
+fn bl_tex3(co: vec3<f32>, detail: f32, roughness: f32, lacunarity: f32, distortion: f32) -> f32 {
+  var p = co;
+  if (distortion != 0.0) {
+    p = p + vec3<f32>(bl_snoise3(p + bl_rv3(0.0)) * distortion,
+                      bl_snoise3(p + bl_rv3(1.0)) * distortion,
+                      bl_snoise3(p + bl_rv3(2.0)) * distortion);
+  }
+  return bl_fbm3(p, detail, roughness, lacunarity);
+}
+fn bl_hex(co: vec3<f32>, scale: f32) -> vec4<f32> {
+  let S = vec3<f32>(1.0, 1.7320508, 1.0);
+  let hf = vec3<f32>(0.5, 0.8660254, 0.0);
+  let p = co / vec3<f32>(scale, scale, scale) + vec3<f32>(512.0, 512.0, 0.0);
+  let a = (p - S * floor(p / S)) - hf;
+  let ps = p - hf;
+  let b = (ps - S * floor(ps / S)) - hf;
+  var gv = a;
+  if (length(a) >= length(b)) { gv = b; }
+  let sc = vec3<f32>(0.02, 0.02, 1.0);
+  let snap = floor((p - gv) / sc) * sc;
+  let q = abs(gv);
+  let d = max(q.x, dot(q, vec3<f32>(0.5, 0.8660254, 0.0)));
+  return vec4<f32>(0.5 - d, bl_hv3f(snap), bl_hv3f(snap + vec3<f32>(17.3, 5.1, 3.7)), 0.0);
+}
+`);
+
+const wNoise2 = wgslFn(`fn bl_noise2(co: vec2<f32>, detail: f32, roughness: f32, lacunarity: f32, distortion: f32) -> f32 { return bl_tex2(co, detail, roughness, lacunarity, distortion); }`, [BL]);
+const wNoise3 = wgslFn(`fn bl_noise3(co: vec3<f32>, detail: f32, roughness: f32, lacunarity: f32, distortion: f32) -> f32 { return bl_tex3(co, detail, roughness, lacunarity, distortion); }`, [BL]);
+const wWhite3 = wgslFn(`fn bl_white3(co: vec3<f32>) -> f32 { return bl_hv3f(co); }`, [BL]);
+const wHex    = wgslFn(`fn bl_hexgrid(co: vec3<f32>, scale: f32) -> vec4<f32> { return bl_hex(co, scale); }`, [BL]);
+
+/* Blender Noise Texture node (Scale is folded into the Mapping node upstream) */
+const N2 = (co, detail, rough, dist = 0.0) =>
+  wNoise2({ co, detail: float(detail), roughness: float(rough), lacunarity: float(2.0), distortion: float(dist) });
+const N3 = (co, detail, rough, dist = 0.0) =>
+  wNoise3({ co, detail: float(detail), roughness: float(rough), lacunarity: float(2.0), distortion: float(dist) });
+
+/* Blender ColorRamp, LINEAR, greyscale stops */
+function rampF(fac, stops){
+  let res = float(stops[0][1]);
+  for (let i = 0; i < stops.length - 1; i++){
+    const p0 = stops[i][0], p1 = stops[i+1][0];
+    res = mix(res, float(stops[i+1][1]), fac.sub(p0).div(p1 - p0).clamp(0, 1));
+  }
+  return res;
+}
+const madd  = (a, b, c) => a.mul(b).add(c);                 // Math > Multiply Add
+const maddC = (a, b, c) => a.mul(b).add(c).clamp(0, 1);     // ... with Clamp
+
+/* Blender Bump node (gpu_shader_material_bump.glsl), evaluated in view space:
+   the construction is invariant under the rigid world->view transform.       */
+const blBump = Fn(([height, strength, dist]) => {
+  const N = normalize(normalView);
+  const dPdx = dFdx(positionView), dPdy = dFdy(positionView);
+  const Rx = cross(dPdy, N), Ry = cross(N, dPdx);
+  const det = dot(dPdx, Rx);
+  const surfgrad = Rx.mul(dFdx(height)).add(Ry.mul(dFdy(height)));
+  const r = normalize(N.mul(abs(det)).sub(surfgrad.mul(sign(det)).mul(dist)));
+  return normalize(mix(N, r, max(strength, 0.0)));
+});
+
+const UV3 = () => vec3(uv().x, uv().y, 0.0);
+const OBJ = () => positionLocal;                            // Texture Coordinate > Object
+
+function newmat(name, spec){
+  let m;
+  if (spec !== undefined && Math.abs(spec - 0.5) > 1e-6){
+    m = new THREE.MeshPhysicalNodeMaterial();
+    m.ior = 1.5;
+    m.specularIntensity = spec / 0.5;                       // F0 = 0.08 * spec  (Blender)
+  } else {
+    m = new THREE.MeshStandardNodeMaterial();
+  }
+  m.name = name;
+  m.side = THREE.DoubleSide;                                // use_backface_culling = False
+  m.flatShading = false;
+  return m;
+}
+
+/* ---- 1. stainless steel hull ------------------------------------------- */
+function mat_steel(name, { ring_h = 1.83, base = 0.60, rough = 0.255,
+                           tint = [1.0, 0.995, 0.985], dirt = 0.0, seed = 0.0 } = {}){
+  const m = newmat(name);
+  const U = uv().x, Vv = uv().y;
+
+  const ridx = Vv.div(ring_h);
+  const wn = wWhite3({ co: vec3(floor(ridx), float(seed), float(0.0)) });
+
+  const frac = fract(ridx);
+  const d0 = min(frac, float(1.0).sub(frac));
+  const seam = rampF(d0, [[0.0, 1.0], [0.030, 0.0]]);
+
+  const uidx = U.add(wn.mul(7.07)).div(7.07);
+  const ufr = fract(uidx);
+  const ud = min(ufr, float(1.0).sub(ufr));
+  const vsw = rampF(ud, [[0.0, 1.0], [0.0045, 0.0]]).mul(0.40);
+  const seam2 = max(seam, vsw);
+
+  const n_grain = N2(vec2(U.mul(340.0), Vv.mul(2.2)), 3.0, 0.62);
+  const n_mot   = N2(vec2(U.mul(0.65), Vv.mul(0.42)), 5.0, 0.55, 0.35);
+  const n_spk   = N2(vec2(U.mul(26.0), Vv.mul(26.0)), 8.0, 0.75);
+
+  const r0 = madd(n_grain, 0.085, float(rough - 0.042));
+  const r1 = madd(n_mot, 0.075, r0);
+  const r2 = madd(wn, 0.045, r1);
+  const rspk = madd(n_spk, 0.05, r2);
+  m.roughnessNode = maddC(seam2, 0.26, rspk);
+
+  const c0 = madd(wn, 0.055, float(base - 0.027));
+  const c1 = madd(n_mot, 0.05, c0);
+  const c2 = maddC(seam2, -0.16, c1);
+  const col = vec3(c2.mul(tint[0]), c2.mul(tint[1]), c2.mul(tint[2]));
+  if (dirt > 0.0){
+    const n_d = N2(vec2(U.mul(0.22), Vv.mul(0.13)), 8.0, 0.68);
+    const dr = rampF(n_d, [[0.42, 1.0], [0.72, 0.0]]);
+    const dcol = mix(col, vec3(0.16, 0.135, 0.12), dr);
+    m.colorNode = mix(col, dcol, float(dirt));
+  } else {
+    m.colorNode = col;
+  }
+  m.metalnessNode = float(1.0);
+  m.normalNode = blBump(madd(n_grain, 0.35, n_mot), float(0.26), float(0.09));
+  return m;
+}
+
+/* ---- 2. TPS hex tiles --------------------------------------------------- */
+function mat_tiles(name, { tile = 0.166, dark = 0.020, rough = 0.52 } = {}){
+  const m = newmat(name, 0.26);
+  const U = uv().x, Vv = uv().y;
+  const hx = wHex({ co: UV3(), scale: float(tile) });
+  const edge = hx.x, rnd = hx.y, rnd2 = hx.z;
+
+  const gap  = rampF(edge, [[0.0, 0.0], [0.055, 1.0]]);
+  const gapS = rampF(edge, [[0.0, 0.0], [0.16, 1.0]]);
+  const n_w = N2(vec2(U.mul(0.30), Vv.mul(0.18)), 8.0, 0.62);
+  const n_f = N2(vec2(U.mul(80.0), Vv.mul(80.0)), 6.0, 0.7);
+
+  const c0 = madd(rnd, 0.013, float(dark));
+  const c1 = madd(n_w, 0.012, c0);
+  const c2 = madd(n_f, 0.008, c1);
+  const c3 = madd(gap, 0.55, float(0.45));
+  const cf = c2.mul(c3);
+  m.colorNode = vec3(cf.mul(1.0), cf.mul(0.985), cf.mul(0.965));
+
+  const r0 = madd(rnd2, 0.16, float(rough - 0.08));
+  const r1 = madd(n_f, 0.13, r0);
+  const r2 = madd(n_w, 0.10, r1);
+  m.roughnessNode = maddC(gapS, -0.14, r2);
+  m.metalnessNode = float(0.0);
+
+  const hgap = madd(rnd, 0.22, float(0.55)).mul(gapS);
+  m.normalNode = blBump(madd(n_f, 0.16, hgap), float(0.40), float(0.016));
+  return m;
+}
+
+/* ---- 3. tower structural steel ------------------------------------------ */
+function mat_tower(name, { base = 0.052, rough = 0.66, rust = 0.5, metal = 0.55 } = {}){
+  const m = newmat(name);
+  const g = OBJ();
+  const n1 = N3(g.mul(0.55), 9.0, 0.62, 0.4);
+  const n2 = N3(g.mul(6.5),  8.0, 0.72);
+  const n3 = N3(g.mul(0.11), 6.0, 0.5, 0.6);
+
+  const rmix = rampF(n1, [[0.44, 0.0], [0.66, 1.0]]).mul(rust);
+  const bc = madd(n2, 0.014, madd(n3, 0.030, float(base)));
+  const grey = vec3(bc.mul(1.0), bc.mul(0.985), bc.mul(0.955));
+  m.colorNode = mix(grey, vec3(0.085, 0.043, 0.021), rmix);
+
+  const r1 = madd(n1, 0.13, madd(n2, 0.18, float(rough - 0.09)));
+  m.roughnessNode = maddC(rmix, 0.16, r1);
+  m.metalnessNode = maddC(rmix, -0.42, float(metal));
+  m.normalNode = blBump(madd(n2, 0.6, n1), float(0.30), float(0.05));
+  return m;
+}
+
+/* ---- 4. raptor engine metal --------------------------------------------- */
+function mat_engine(name, { base = 0.075, rough = 0.34, warm = 0.0 } = {}){
+  const m = newmat(name);
+  const g = OBJ();
+  const n1 = N3(g.mul(2.4), 8.0, 0.6);
+  const n2 = N3(g.mul(26.0), 6.0, 0.7);
+  const c2 = madd(n2, 0.018, madd(n1, 0.045, float(base)));
+  const tint = [1.0, 0.94 + 0.05 * (1 - warm), 0.88 + 0.10 * (1 - warm)];
+  m.colorNode = vec3(c2.mul(tint[0]), c2.mul(tint[1]), c2.mul(tint[2]));
+  m.roughnessNode = maddC(n1, 0.12, madd(n2, 0.16, float(rough - 0.08)));
+  m.metalnessNode = float(1.0);
+  m.normalNode = blBump(n2, float(0.22), float(0.02));
+  return m;
+}
+
+/* ---- 5. concrete --------------------------------------------------------- */
+function mat_concrete(name, { base = 0.30, rough = 0.85 } = {}){
+  const m = newmat(name, 0.13);
+  const g = OBJ();
+  const n1 = N3(g.mul(0.30), 10.0, 0.65, 0.3);
+  const n2 = N3(g.mul(3.2),   9.0, 0.7);
+  const n3 = N3(g.mul(26.0),  6.0, 0.6);
+  const c3 = madd(n3, 0.022, madd(n2, 0.045, madd(n1, 0.085, float(base - 0.042))));
+  const stain = rampF(n1, [[0.30, 1.0], [0.56, 0.0]]);
+  const c4 = maddC(stain, -base * 0.55, c3);
+  m.colorNode = vec3(c4.mul(1.0), c4.mul(0.982), c4.mul(0.948));
+  m.roughnessNode = maddC(n2, 0.10, float(rough - 0.05));
+  m.metalnessNode = float(0.0);
+  m.normalNode = blBump(madd(n3, 0.5, n2), float(0.45), float(0.06));
+  return m;
+}
+
+/* ---- 7. flat / painted helpers ------------------------------------------ */
+function mat_flat(name, col, rough = 0.55, metal = 0.0, spec = 0.5){
+  const m = newmat(name, spec);
+  m.colorNode = vec3(col[0], col[1], col[2]);
+  m.roughnessNode = float(rough);
+  m.metalnessNode = float(metal);
+  return m;
+}
+function mat_painted(name, col, rough = 0.5, metal = 0.1, wear = 0.35, scale = 1.5){
+  const m = newmat(name);
+  const g = OBJ();
+  const n1 = N3(g.mul(scale), 9.0, 0.6);
+  const n2 = N3(g.mul(scale * 14), 6.0, 0.7);
+  const wmul = rampF(n1, [[0.45, 0.0], [0.68, 1.0]]).mul(wear);
+  m.colorNode = mix(vec3(col[0], col[1], col[2]), vec3(0.05, 0.04, 0.035), wmul);
+  m.roughnessNode = maddC(n2, 0.16, float(rough - 0.08));
+  m.metalnessNode = float(metal);
+  m.normalNode = blBump(n2, float(0.18), float(0.02));
+  return m;
+}
+
+function buildMaterials(){
+  const M = {};
+  M.steel       = mat_steel('Steel_Hull',   { base: 0.60,  rough: 0.245, dirt: 0.0 });
+  M.steel_ship  = mat_steel('Steel_Ship',   { base: 0.615, rough: 0.235, dirt: 0.0, seed: 3.7 });
+  M.steel_dirty = mat_steel('Steel_Sooted', { base: 0.44,  rough: 0.34,  dirt: 0.55, seed: 8.1 });
+  M.steel_hot   = mat_steel('Steel_HotStage', { base: 0.40, rough: 0.40,
+                                                tint: [1.0, 0.93, 0.85], dirt: 0.35, seed: 11.2 });
+  M.tiles       = mat_tiles('TPS_Tiles',      { tile: 0.205, dark: 0.0165, rough: 0.575 });
+  M.tiles_nose  = mat_tiles('TPS_Tiles_Nose', { tile: 0.205, dark: 0.0180, rough: 0.60 });
+  M.tower       = mat_tower('Tower_Steel',      { base: 0.058, rough: 0.645, rust: 0.22, metal: 0.64 });
+  M.tower_dark  = mat_tower('Tower_Steel_Dark', { base: 0.040, rough: 0.695, rust: 0.18, metal: 0.58 });
+  M.gridfin     = mat_engine('GridFin_Steel', { base: 0.105, rough: 0.435, warm: 0.25 });
+  M.engine      = mat_engine('Raptor_Metal',  { base: 0.070, rough: 0.335 });
+  M.engine_hot  = mat_engine('Raptor_Nozzle', { base: 0.048, rough: 0.30, warm: 0.65 });
+  M.concrete    = mat_concrete('Concrete',      { base: 0.088, rough: 0.90 });
+  M.concrete_dk = mat_concrete('Concrete_Dark', { base: 0.050, rough: 0.84 });
+  M.black      = mat_flat('Matte_Black', [0.018, 0.018, 0.019], 0.62, 0.25);
+  M.dark_metal = mat_flat('Dark_Metal',  [0.045, 0.045, 0.048], 0.42, 1.0);
+  M.grate      = mat_flat('Grating',     [0.038, 0.036, 0.034], 0.72, 0.75);
+  M.white      = mat_flat('White_Paint', [0.60, 0.60, 0.585],   0.44, 0.0);
+  M.orange     = mat_painted('Orange_Paint', [0.42, 0.115, 0.012], 0.46, 0.08, 0.30, 2.5);
+  M.yellow     = mat_painted('Yellow_Paint', [0.42, 0.30, 0.02],  0.48, 0.05, 0.35, 2.5);
+  M.glass      = mat_flat('Glass_Dark', [0.02, 0.025, 0.03], 0.12, 0.0, 0.85);
+  return M;
+}
+/* ==========================================================================
+   4.  ship.py
+   ========================================================================== */
+const SHIP = {};
+SHIP.R = 4.5;
+SHIP.SHIP_H = 50.3;
+SHIP.NOSE_L = 12.70;
+SHIP.BARREL_TOP = SHIP.SHIP_H - SHIP.NOSE_L;
+SHIP.RING = 1.83;
+SHIP.SEG = 192;
+SHIP.NS_TPS = 136;
+SHIP.TPS_T = 0.060;
+SHIP.TPS_GAP = 0.014;
+SHIP.AFT_FLAP = { z_bot: 1.05, z_top: 14.25, chord: 6.15, sweep_deg: 41.0, t_root: 0.72,
+                  t_tip: 0.14, phi_deg: 0.0, bot_sweep_deg: 5.0 };
+SHIP.FWD_FLAP = { z_bot: 37.30, z_top: 44.70, chord: 5.35, sweep_deg: 43.0, t_root: 0.62,
+                  t_tip: 0.12, phi_deg: 0.0, bot_sweep_deg: 6.0 };
+const OGIVE_MIX = 0.33;
+
+function nose_pts(n = 96){
+  const Lz = SHIP.NOSE_L, Rr = SHIP.R, a = OGIVE_MIX;
+  const rho = (Rr * Rr + Lz * Lz) / (2.0 * Rr);
+  const pts = [];
+  for (let k = 0; k <= n; k++){
+    const h = Lz * Math.pow(k / n, 0.94);
+    const og = sqrt(Math.max(rho * rho - h * h, 0.0)) + Rr - rho;
+    const cone = Rr * (1.0 - h / Lz);
+    const t = Math.min(h / (Lz * 0.16), 1.0);
+    const s = t * t * (3 - 2 * t);
+    const y = og * (1.0 - (1.0 - a) * s) + cone * ((1.0 - a) * s);
+    pts.push([Math.max(y, 0.0), h]);
+  }
+  while (pts.length > 3 && pts[pts.length - 1][0] < 0.26) pts.pop();
+  const rt = pts[pts.length - 1][0], ht = pts[pts.length - 1][1];
+  for (let k = 1; k <= 8; k++){
+    const ang = (PI / 2) * k / 8;
+    pts.push([rt * cos(ang), ht + rt * 1.15 * sin(ang)]);
+  }
+  return pts;
+}
+
+function ship_hull_profile(seams = true){
+  const R = SHIP.R, RING = SHIP.RING, BT = SHIP.BARREL_TOP;
+  const lip = seams ? 0.0045 : 0.0;
+  let p = [[R - 0.12, 0.0], [R - 0.12, 0.06], [R, 0.17]];
+  p = p.concat(ring_stack(0.17, BT, R, RING, lip, 0.013).slice(1));
+  const npts = nose_pts();
+  let acc = 0.0, last = npts[0];
+  const out = [];
+  for (let i = 1; i < npts.length; i++){
+    const r = npts[i][0], h = npts[i][1];
+    acc += sqrt((r - last[0]) ** 2 + (h - last[1]) ** 2);
+    if (seams && acc > RING && r > 0.6){ acc = 0.0; out.push([r + 0.004, h]); }
+    out.push([r, h]);
+    last = [r, h];
+  }
+  for (const [r, h] of out) p.push([r, BT + h]);
+  return p;
+}
+
+let _SMOOTH = null;
+function hull_r(z){
+  if (_SMOOTH === null) _SMOOTH = ship_hull_profile(false);
+  if (z <= SHIP.BARREL_TOP) return SHIP.R;
+  for (let i = 0; i < _SMOOTH.length - 1; i++){
+    const [r0, z0] = _SMOOTH[i], [r1, z1] = _SMOOTH[i + 1];
+    if (z0 <= z && z <= z1 && z1 > z0) return r0 + (r1 - r0) * (z - z0) / (z1 - z0);
+  }
+  return Math.max(_SMOOTH[_SMOOTH.length - 1][0], 0.05);
+}
+
+function offset_profile(prof, d){
+  const n = prof.length, out = [];
+  for (let i = 0; i < n; i++){
+    const i0 = Math.max(i - 1, 0), i1 = Math.min(i + 1, n - 1);
+    const dr = prof[i1][0] - prof[i0][0];
+    const dz = prof[i1][1] - prof[i0][1];
+    const m = sqrt(dr * dr + dz * dz) || 1.0;
+    out.push([prof[i][0] + (dz / m) * d, prof[i][1] - (dr / m) * d]);
+  }
+  return out;
+}
+
+function tps_shell(mb, prof0, half_fn, thick, mat_out, mat_side, jitter, ns = SHIP.NS_TPS, gap = SHIP.TPS_GAP){
+  let outer = offset_profile(prof0, thick);
+  let inner = offset_profile(prof0, gap);
+  const n = prof0.length;
+  outer = outer.map((p, k) => [Math.max(p[0], prof0[k][0] + thick * 0.72), p[1]]);
+  inner = inner.map((p, k) => [Math.max(p[0], prof0[k][0] + gap * 0.72), p[1]]);
+  const prof = inner;
+  const halves = [];
+  for (let k = 0; k < n; k++){
+    let h = half_fn(k, prof[k][0], prof[k][1]);
+    if (jitter) h += jitter * ((((k * 1367 + 41) % 97) / 97.0) - 0.5);
+    halves.push(Math.min(h, radians(178.5)));
+  }
+  const vlen = [0.0];
+  for (let k = 1; k < n; k++)
+    vlen.push(vlen[k-1] + sqrt((prof[k][0]-prof[k-1][0])**2 + (prof[k][1]-prof[k-1][1])**2));
+  const O = [], I = [];
+  for (let k = 0; k < n; k++){
+    const h = halves[k];
+    const ro = outer[k][0], zo = outer[k][1];
+    const ri = prof[k][0], zi = prof[k][1];
+    const rowO = [], rowI = [];
+    for (let s = 0; s <= ns; s++){
+      const a = -h + 2 * h * s / ns;
+      rowO.push(mb.add_v([ro * sin(a), -ro * cos(a), zo]));
+      rowI.push(mb.add_v([ri * sin(a), -ri * cos(a), zi]));
+    }
+    O.push(rowO); I.push(rowI);
+  }
+  for (let k = 0; k < n - 1; k++){
+    const r0 = outer[k][0], r1 = outer[k+1][0];
+    const h0 = halves[k], h1 = halves[k+1];
+    for (let s = 0; s < ns; s++){
+      const A = O[k][s], B = O[k][s+1], C = O[k+1][s+1], D = O[k+1][s];
+      const u0 = (-h0 + 2 * h0 * s / ns) * r0;
+      const u1 = (-h0 + 2 * h0 * (s + 1) / ns) * r0;
+      const u2 = (-h1 + 2 * h1 * (s + 1) / ns) * r1;
+      const u3 = (-h1 + 2 * h1 * s / ns) * r1;
+      mb.add_f([A, B, C, D],
+               [[u0, vlen[k]], [u1, vlen[k]], [u2, vlen[k+1]], [u3, vlen[k+1]]], true, mat_out);
+      mb.add_f([I[k+1][s], I[k+1][s+1], I[k][s+1], I[k][s]],
+               [[u3, vlen[k+1]], [u2, vlen[k+1]], [u1, vlen[k]], [u0, vlen[k]]], true, mat_side);
+    }
+  }
+  for (let k = 0; k < n - 1; k++){
+    for (const [side, flip] of [[0, false], [ns, true]]){
+      const q = [O[k][side], O[k+1][side], I[k+1][side], I[k][side]];
+      mb.add_f(flip ? q : q.slice().reverse(),
+               [[0, vlen[k]], [0, vlen[k+1]], [.03, vlen[k+1]], [.03, vlen[k]]], false, mat_side);
+    }
+  }
+  for (const [k, rev] of [[0, true], [n - 1, false]]){
+    for (let s = 0; s < ns; s++){
+      const q = [O[k][s], O[k][s+1], I[k][s+1], I[k][s]];
+      mb.add_f(rev ? q : q.slice().reverse(), [[0,0],[.02,0],[.02,.03],[0,.03]], false, mat_side);
+    }
+  }
+}
+
+function flap_solid(mb, hinge_r, az, p){
+  const { z_bot, z_top, chord, sweep_deg, t_root, t_tip, phi_deg, bot_sweep_deg,
+          mat_top, mat_bot, mat_edge } = p;
+  const nspan = p.nspan !== undefined ? p.nspan : 28;
+  const nchord = p.nchord !== undefined ? p.nchord : 20;
+  const sgn = az >= 0 ? 1.0 : -1.0;
+  const a = radians(az);
+  const rad = new Vec(sin(a), -cos(a), 0.0);
+  const tan_lee = new Vec(cos(a) * sgn, sin(a) * sgn, 0.0);
+  const up = new Vec(0, 0, 1);
+  const phi = radians(phi_deg);
+  const cdir = rad.mul(cos(phi)).add(tan_lee.mul(sin(phi))).normalized();
+  let ndir = cdir.cross(up).normalized();
+  if (ndir.dot(tan_lee.neg()) < 0) ndir = ndir.neg();
+  const hr = (typeof hinge_r === 'function') ? hinge_r : (() => hinge_r);
+  const swp = tan(radians(sweep_deg)), bswp = tan(radians(bot_sweep_deg));
+  const zt = u => z_top - u * chord * swp;
+  const zb = u => z_bot + u * chord * bswp;
+  const half_t = u => {
+    let base = 0.5 * (t_root + (t_tip - t_root) * u);
+    if (u > 0.90){ const k = (u - 0.90) / 0.10; base *= sqrt(Math.max(1.0 - k * k, 0.0)); }
+    return Math.max(base, 0.004);
+  };
+  const top = [], bot = [];
+  for (let i = 0; i <= nchord; i++){
+    const u = i / nchord;
+    const rowT = [], rowB = [];
+    for (let j = 0; j <= nspan; j++){
+      const v = j / nspan;
+      const z = zb(u) + (zt(u) - zb(u)) * v;
+      const base = rad.mul(hr(z)).add(cdir.mul(u * chord)).add(up.mul(z));
+      const ht = half_t(u);
+      const e = Math.min(v, 1 - v) * 2.0;
+      let ef = e < 0.020 ? sqrt(Math.max(1.0 - (1.0 - Math.min(e / 0.020, 1.0)) ** 2, 0.0)) : 1.0;
+      ef = Math.max(ef, 0.04);
+      rowT.push(mb.add_v(base.add(ndir.mul(ht * ef))));
+      rowB.push(mb.add_v(base.sub(ndir.mul(ht * ef))));
+    }
+    top.push(rowT); bot.push(rowB);
+  }
+  const quad = (rows, i, j, flip, mat) => {
+    const A = rows[i][j], B = rows[i+1][j], C = rows[i+1][j+1], D = rows[i][j+1];
+    const uu = (i / nchord) * chord, uu2 = ((i + 1) / nchord) * chord;
+    const vv = (j / nspan) * (z_top - z_bot), vv2 = ((j + 1) / nspan) * (z_top - z_bot);
+    const uvq = [[uu, vv], [uu2, vv], [uu2, vv2], [uu, vv2]];
+    if (flip) mb.add_f([D, C, B, A], uvq.slice().reverse(), true, mat);
+    else mb.add_f([A, B, C, D], uvq, true, mat);
+  };
+  for (let i = 0; i < nchord; i++)
+    for (let j = 0; j < nspan; j++){ quad(top, i, j, false, mat_top); quad(bot, i, j, true, mat_bot); }
+  const i = nchord;
+  for (let j = 0; j < nspan; j++)
+    mb.add_f([top[i][j], bot[i][j], bot[i][j+1], top[i][j+1]],
+             [[0,0],[.1,0],[.1,.1],[0,.1]], true, mat_edge);
+  for (const [j, flip] of [[0, true], [nspan, false]]){
+    for (let k = 0; k < nchord; k++){
+      const q = [top[k][j], top[k+1][j], bot[k+1][j], bot[k][j]];
+      mb.add_f(flip ? q : q.slice().reverse(), [[0,0],[.1,0],[.1,.1],[0,.1]], true, mat_edge);
+    }
+  }
+  for (let j = 0; j < nspan; j++)
+    mb.add_f([top[0][j+1], bot[0][j+1], bot[0][j], top[0][j]],
+             [[0,0],[.1,0],[.1,.1],[0,.1]], false, mat_edge);
+}
+
+function hinge_fairing(mb, az, z0, z1, r_fn, rt, mat, seg = 26, nz = 22){
+  const a = radians(az);
+  const rad = new Vec(sin(a), -cos(a), 0.0);
+  const up = new Vec(0, 0, 1);
+  const side = new Vec(-rad.y, rad.x, 0.0);
+  const idx = [];
+  for (let i = 0; i <= nz; i++){
+    const t = i / nz;
+    const z = z0 + (z1 - z0) * t;
+    const rr = (typeof r_fn === 'function') ? r_fn(z) : r_fn;
+    const e = Math.min(t, 1 - t) * (z1 - z0);
+    const cap = e >= rt ? 1.0 : sqrt(Math.max(1.0 - (1.0 - e / rt) ** 2, 0.03));
+    const c = rad.mul(rr).add(up.mul(z));
+    const row = [];
+    for (let k = 0; k < seg; k++){
+      const ang = TAU * k / seg;
+      row.push(mb.add_v(c.add(rad.mul(rt * cap * cos(ang))).add(side.mul(rt * cap * sin(ang)))));
+    }
+    idx.push(row);
+  }
+  for (let i = 0; i < idx.length - 1; i++)
+    for (let k = 0; k < seg; k++){
+      const k2 = (k + 1) % seg;
+      mb.add_f([idx[i][k], idx[i][k2], idx[i+1][k2], idx[i+1][k]],
+               [[0,0],[1,0],[1,1],[0,1]], true, mat);
+    }
+  mb.add_f(idx[0].slice().reverse(), null, false, mat);
+  mb.add_f(idx[idx.length - 1].slice(), null, false, mat);
+}
+
+function raptor(mb, x, y, z, exit_r, len, mat_body, mat_noz, seg = 32, vac = false){
+  const throat_r = exit_r * (vac ? 0.235 : 0.34);
+  const z_exit = z - len * 0.80;
+  const z_thr = z - len * 0.235;
+  const prof = [];
+  const n = 24;
+  for (let k = 0; k <= n; k++){
+    const t = k / n;
+    const zz = z_exit + (z_thr - z_exit) * t;
+    const s = 1.0 - t;
+    prof.push([throat_r + (exit_r - throat_r) * Math.pow(s, 0.58), zz]);
+  }
+  prof.push([throat_r * 1.30, z_thr + 0.045 * len]);
+  prof.push([throat_r * 2.00, z_thr + 0.105 * len]);
+  prof.push([throat_r * 2.10, z_thr + 0.175 * len]);
+  prof.push([throat_r * 2.10, z - 0.012 * len]);
+  lathe(mb, prof, seg, { mat: mat_noz, center: [x, y], smooth: true, cap_top: true });
+  const lip = [[exit_r, z_exit], [exit_r * 1.030, z_exit + exit_r * 0.055],
+               [exit_r * 1.030, z_exit + exit_r * 0.115], [exit_r * 0.982, z_exit + exit_r * 0.150]];
+  lathe(mb, lip, seg, { mat: mat_body, center: [x, y], smooth: true });
+  const ph = [[throat_r * 2.10, z - 0.010 * len], [throat_r * 2.55, z + 0.030 * len],
+              [throat_r * 2.55, z + 0.095 * len]];
+  lathe(mb, ph, Math.max(16, Math.floor(seg / 2)), { mat: mat_body, center: [x, y], smooth: true, cap_top: true });
+  for (let k = 0; k < 2; k++){
+    const aa = k * PI + 0.7;
+    const px = x + throat_r * 2.35 * cos(aa), py = y + throat_r * 2.35 * sin(aa);
+    prism(mb, [px, py, z + 0.004 * len], [px, py, z + 0.082 * len],
+          sec_tube(throat_r * 0.80, 12), { up: [0, 0, 1], mat: mat_body, smooth: true });
+  }
+}
+
+const hull_pt = (a, r, z) => [r * sin(a), -r * cos(a), z];
+
+function surface_patch(mb, a_c, z_c, w, h, r, bulge, mat, na = 8, nz = 1, smooth = true){
+  nz = 1;
+  const dw = w / r;
+  const top = [], base = [];
+  for (let j = 0; j <= nz; j++){
+    const z = z_c - h / 2 + h * j / nz;
+    const rt = [], rb = [];
+    for (let k = 0; k <= na; k++){
+      const a = a_c - dw / 2 + dw * k / na;
+      rt.push(mb.add_v(hull_pt(a, r + bulge, z)));
+      rb.push(mb.add_v(hull_pt(a, r + 0.004, z)));
+    }
+    top.push(rt); base.push(rb);
+  }
+  for (let j = 0; j < nz; j++)
+    for (let k = 0; k < na; k++)
+      mb.add_f([top[j][k], top[j][k+1], top[j+1][k+1], top[j+1][k]],
+               [[0,0],[1,0],[1,1],[0,1]], smooth, mat);
+  for (let k = 0; k < na; k++){
+    mb.add_f([top[0][k+1], top[0][k], base[0][k], base[0][k+1]], [[0,0],[1,0],[1,.1],[0,.1]], false, mat);
+    mb.add_f([top[nz][k], top[nz][k+1], base[nz][k+1], base[nz][k]], [[0,0],[1,0],[1,.1],[0,.1]], false, mat);
+  }
+  for (let j = 0; j < nz; j++){
+    mb.add_f([top[j][0], top[j+1][0], base[j+1][0], base[j][0]], [[0,0],[1,0],[1,.1],[0,.1]], false, mat);
+    mb.add_f([top[j+1][na], top[j][na], base[j][na], base[j+1][na]], [[0,0],[1,0],[1,.1],[0,.1]], false, mat);
+  }
+  const ring = base[0].concat(base[nz].slice().reverse());
+  const ruv = [];
+  for (let i = 0; i <= na; i++) ruv.push([i / na, 0.0]);
+  for (let i = na; i >= 0; i--) ruv.push([i / na, 1.0]);
+  mb.add_f(ring, ruv, false, mat);
+}
+
+function shipBuild(){
+  const S_STEEL = 0, S_TILE = 1, S_TILEN = 2, S_BLACK = 3, S_ENG = 4, S_NOZ = 5, S_DKM = 6, S_DIRTY = 7;
+  const slots = ['steel_ship', 'tiles', 'tiles_nose', 'black', 'engine', 'engine_hot', 'dark_metal', 'steel_dirty'];
+  const R = SHIP.R, BT = SHIP.BARREL_TOP, SEG = SHIP.SEG;
+  const prof = ship_hull_profile(true);
+  const objs = [];
+  let mb;
+
+  /* hull */
+  mb = new MB();
+  lathe(mb, prof, SEG, { mat: S_STEEL, smooth: true, tile_w: 0.205 });
+  lathe(mb, [[R - 0.12, 0.0], [R - 0.34, 0.02], [R - 0.34, 1.9]], SEG, { mat: S_DIRTY, smooth: true });
+  objs.push({ name: 'Ship_Hull', mb, smooth: 18, slots });
+
+  /* TPS tile shell */
+  const half_fn = (k, r, z) => {
+    if (z <= BT) return radians(104.0);
+    const t = (z - BT) / SHIP.NOSE_L;
+    return radians(104.0 + 74.0 * Math.min(1.0, Math.pow(t / 0.60, 0.85)));
+  };
+  mb = new MB();
+  const sm = ship_hull_profile(false);
+  let i_start = 0;
+  for (let i = 0; i < sm.length; i++){ if (sm[i][1] >= 1.30){ i_start = i; break; } }
+  tps_shell(mb, sm.slice(i_start), half_fn, SHIP.TPS_T, S_TILE, S_BLACK, radians(1.7));
+  objs.push({ name: 'Ship_TPS', mb, smooth: 34, slots });
+
+  /* flaps */
+  mb = new MB();
+  const AFT_AZ = 90.0, FWD_AZ = 90.0;
+  const hr = z => hull_r(z) + 0.10;
+  for (const s of [1, -1]){
+    flap_solid(mb, hr, s * AFT_AZ, Object.assign({}, SHIP.AFT_FLAP,
+      { mat_top: S_TILE, mat_bot: S_STEEL, mat_edge: S_BLACK }));
+    flap_solid(mb, hr, s * FWD_AZ, Object.assign({}, SHIP.FWD_FLAP,
+      { mat_top: S_TILE, mat_bot: S_STEEL, mat_edge: S_BLACK }));
+    hinge_fairing(mb, s * AFT_AZ, SHIP.AFT_FLAP.z_bot - 0.42, SHIP.AFT_FLAP.z_top + 0.34, hr, 0.58, S_BLACK);
+    hinge_fairing(mb, s * FWD_AZ, SHIP.FWD_FLAP.z_bot - 0.36, SHIP.FWD_FLAP.z_top + 0.28, hr, 0.50, S_BLACK);
+  }
+  objs.push({ name: 'Ship_Flaps', mb, smooth: 36, slots });
+
+  /* engines */
+  mb = new MB();
+  const zb = 3.45;
+  for (let k = 0; k < 3; k++){
+    const a = TAU * k / 3 + radians(60);
+    raptor(mb, 0.95 * cos(a), 0.95 * sin(a), zb, 0.65, 3.10, S_ENG, S_NOZ);
+  }
+  for (let k = 0; k < 3; k++){
+    const a = TAU * k / 3;
+    raptor(mb, 2.64 * cos(a), 2.64 * sin(a), zb + 0.30, 1.20, 4.60, S_ENG, S_NOZ, 32, true);
+  }
+  lathe(mb, [[0.0, zb + 1.05], [4.14, zb + 1.05], [4.14, zb + 1.30]], 64, { mat: S_DKM, smooth: false });
+  objs.push({ name: 'Ship_Engines', mb, smooth: 30, slots });
+
+  /* surface details */
+  mb = new MB();
+  for (const [a0, w, z0, z1, bul] of [[radians(180.0), 0.62, 1.9, 36.4, 0.19],
+                                      [radians(166.0), 0.34, 2.4, 34.6, 0.11]]){
+    const n = 10, rows = [];
+    for (const z of [z0, z1]){
+      const row = [];
+      for (let k = 0; k <= n; k++){
+        const aa = a0 - (w / R) / 2 + (w / R) * k / n;
+        const b = bul * sqrt(Math.max(0.0, 1 - (2 * k / n - 1) ** 2));
+        row.push(mb.add_v(hull_pt(aa, R + 0.012 + b, z)));
+      }
+      rows.push(row);
+    }
+    for (let k = 0; k < n; k++)
+      mb.add_f([rows[0][k], rows[0][k+1], rows[1][k+1], rows[1][k]],
+               [[0,0],[.2,0],[.2,1],[0,1]], true, S_STEEL);
+    mb.add_f(rows[0].slice().reverse(), null, false, S_STEEL);
+    mb.add_f(rows[1].slice(), null, false, S_STEEL);
+  }
+  for (const [aa, zz, w, h] of [[150, 8.0, 1.15, 1.55], [212, 12.5, 1.0, 1.4],
+                                [196, 30.5, 0.85, 1.05], [164, 17.4, 0.8, 1.0]])
+    surface_patch(mb, radians(aa), zz, w, h, R, 0.038, S_DKM);
+  for (const aa of [150, 210])
+    surface_patch(mb, radians(aa), 43.0, 0.55, 0.42, hull_r(43.0), 0.030, S_DKM, 5, 1);
+  objs.push({ name: 'Ship_Details', mb, smooth: 34, slots });
+
+  return objs;
+}
+/* ==========================================================================
+   5.  booster.py
+   ========================================================================== */
+const BST = { R: 4.5, BOOST_H: 71.0, HS_H: 1.92, RING: 1.83, SEG: 192,
+              GF_Z: 65.30, GF_N: 4, GF_AZ0: 45.0, CH_Z: 61.20 };
+BST.BODY_TOP = BST.BOOST_H - BST.HS_H;
+
+function booster_hull_profile(){
+  const R = BST.R;
+  let p = [[R - 0.14, 0.0], [R - 0.14, 0.05], [R, 0.16]];
+  p = p.concat(ring_stack(0.16, BST.BODY_TOP, R, BST.RING, 0.005, 0.014).slice(1));
+  p.push([R, BST.BODY_TOP + 0.02]);
+  p.push([R + 0.05, BST.BODY_TOP + 0.06]);
+  return p;
+}
+
+function hot_stage(mb, z0, m_ring, m_lat, m_dark, n_zig = 24, seg = BST.SEG){
+  const R = BST.R, HS_H = BST.HS_H;
+  const ro = R + 0.055;
+  lathe(mb, [[R, z0 - 0.10], [ro, z0 - 0.02], [ro, z0 + 0.40], [ro - 0.02, z0 + 0.46]],
+        seg, { mat: m_ring, smooth: true });
+  lathe(mb, [[ro - 0.02, z0 + 1.42], [ro, z0 + 1.50], [ro, z0 + HS_H], [R - 0.06, z0 + HS_H]],
+        seg, { mat: m_ring, smooth: true });
+  lathe(mb, [[R - 0.34, z0 + 0.30], [R - 0.34, z0 + 1.60]], Math.floor(seg / 2),
+        { mat: m_dark, smooth: true });
+  const dome = [];
+  for (let k = 0; k <= 12; k++){
+    const t = (PI / 2) * k / 12;
+    dome.push([(R - 0.34) * cos(t), z0 + 0.15 + 1.05 * sin(t)]);
+  }
+  lathe(mb, dome, Math.floor(seg / 2), { mat: m_dark, smooth: true });
+
+  const zb = z0 + 0.44, zt = z0 + 1.46;
+  const bw = 0.20, bt = 0.115;
+  for (let k = 0; k < n_zig; k++){
+    const a0 = TAU * k / n_zig, a1 = TAU * (k + 0.5) / n_zig, a2 = TAU * (k + 1) / n_zig;
+    const p0 = [ro * cos(a0), ro * sin(a0), zb];
+    const p1 = [ro * cos(a1), ro * sin(a1), zt];
+    const p2 = [ro * cos(a2), ro * sin(a2), zb];
+    for (const [pa, pb] of [[p0, p1], [p1, p2]]){
+      const up = [cos((a0 + a2) / 2), sin((a0 + a2) / 2), 0.0];
+      prism(mb, pa, pb, sec_box(bw, bt), { up, mat: m_lat, smooth: false });
+    }
+    prism(mb, [p0[0], p0[1], zb - 0.02], [p0[0], p0[1], zb + 0.30],
+          sec_box(0.16, 0.11), { up: [cos(a0), sin(a0), 0], mat: m_lat });
+  }
+}
+
+function grid_fin(mb, az_deg, z, m_frame, m_lat, m_dark,
+                  span = 4.35, width = 3.90, thick = 0.74, roll = 0.0, r_in = null){
+  const R = BST.R;
+  const a = radians(az_deg);
+  const rad = new Vec(cos(a), sin(a), 0.0);
+  const tng = new Vec(-sin(a), cos(a), 0.0);
+  const up = new Vec(0, 0, 1);
+  const rr = radians(roll);
+  const wv = tng.mul(cos(rr)).add(up.mul(sin(rr))).normalized();
+  const tv = up.mul(cos(rr)).sub(tng.mul(sin(rr))).normalized();
+  const r0 = r_in ? r_in : R + 0.42;
+  const origin = rad.mul(r0).add(up.mul(z));
+  const P = (s, w) => origin.add(rad.mul(s)).add(wv.mul(w));
+
+  const hw = width / 2;
+  const fw = 0.27;
+  for (const w of [hw - fw / 2, -hw + fw / 2])
+    prism(mb, P(0.0, w), P(span, w), sec_box(fw, thick), { up: tv, mat: m_frame, smooth: false });
+  for (const s of [span - fw / 2, fw / 2])
+    prism(mb, P(s, -hw + fw), P(s, hw - fw), sec_box(fw, thick), { up: tv, mat: m_frame, smooth: false });
+
+  const cell = 0.455, tlat = 0.048;
+  const nw = Math.max(2, pyround((width - 2 * fw) / cell));
+  const ns = Math.max(2, pyround((span - 2 * fw) / cell));
+  for (let i = 1; i < nw; i++){
+    const w = -hw + fw + (width - 2 * fw) * i / nw;
+    prism(mb, P(fw * 0.6, w), P(span - fw * 0.6, w), sec_box(tlat, thick * 0.90),
+          { up: tv, mat: m_lat, smooth: false });
+  }
+  for (let i = 1; i < ns; i++){
+    const s = fw + (span - 2 * fw) * i / ns;
+    prism(mb, P(s, -hw + fw * 0.6), P(s, hw - fw * 0.6), sec_box(tlat, thick * 0.90),
+          { up: tv, mat: m_lat, smooth: false });
+  }
+  prism(mb, rad.mul(R - 0.20).add(up.mul(z)), origin.add(rad.mul(0.55)), sec_tube(0.44, 20),
+        { up, mat: m_frame, smooth: true });
+  prism(mb, origin.add(rad.mul(0.10)), origin.add(rad.mul(0.85)), sec_tube(0.62, 16),
+        { up: tv, mat: m_frame, smooth: true });
+}
+
+function blister(mb, az_deg, z, mat, hgt, wid, out, pz = 0.62, pa = 0.55, NZ = 14, NA = 20, z_bias = 0.0){
+  const R = BST.R;
+  const a = radians(az_deg);
+  const rows = [];
+  for (let i = 0; i <= NZ; i++){
+    const t = -1.0 + 2.0 * i / NZ;
+    const zz = z + t * hgt / 2;
+    let ez = Math.abs(t) < 1 ? (1.0 - Math.pow(Math.abs(t), 1.0 / pz)) : 0.0;
+    ez = Math.pow(Math.max(ez, 0.0), pz);
+    const row = [];
+    for (let j = 0; j <= NA; j++){
+      const s = -1.0 + 2.0 * j / NA;
+      let ea = Math.abs(s) < 1 ? (1.0 - Math.pow(Math.abs(s), 1.0 / pa)) : 0.0;
+      ea = Math.pow(Math.max(ea, 0.0), pa);
+      const b = out * ez * ea;
+      const da = (wid / 2 / R) * s;
+      row.push(mb.add_v([(R + b) * cos(a + da), (R + b) * sin(a + da), zz + z_bias * b]));
+    }
+    rows.push(row);
+  }
+  for (let i = 0; i < NZ; i++)
+    for (let j = 0; j < NA; j++)
+      mb.add_f([rows[i][j], rows[i][j+1], rows[i+1][j+1], rows[i+1][j]],
+               [[0,0],[1,0],[1,1],[0,1]], true, mat);
+}
+
+const gf_fairing = (mb, az_deg, z, mat) =>
+  blister(mb, az_deg, z, mat, 4.10, 3.60, 0.34, 0.78, 0.68);
+
+function chine(mb, az_deg, z, mat, ln = 5.40, out = 0.62, wid = 1.90){
+  const R = BST.R;
+  const a = radians(az_deg);
+  const NZ = 18, NA = 6;
+  const rows = [];
+  for (let i = 0; i <= NZ; i++){
+    const t = i / NZ;
+    const zz = z - ln * 0.62 + ln * t;
+    const env = Math.pow(Math.min(t / 0.30, 1.0), 0.85) * Math.pow(Math.min((1 - t) / 0.42, 1.0), 1.25);
+    const row = [];
+    for (let j = 0; j <= NA; j++){
+      const s = -1.0 + 2.0 * j / NA;
+      const b = out * env * Math.pow(1.0 - Math.abs(s), 0.85);
+      const da = (wid / 2 / R) * s;
+      row.push(mb.add_v([(R + 0.008 + b) * cos(a + da), (R + 0.008 + b) * sin(a + da), zz]));
+    }
+    rows.push(row);
+  }
+  for (let i = 0; i < NZ; i++)
+    for (let j = 0; j < NA; j++)
+      mb.add_f([rows[i][j], rows[i][j+1], rows[i+1][j+1], rows[i+1][j]],
+               [[0,0],[1,0],[1,1],[0,1]],
+               !(j === (NA / 2 - 1) || j === (NA / 2)), mat);
+}
+
+function raceway(mb, az_deg, z0, z1, w, bul, mat, n = 12){
+  const R = BST.R;
+  const a0 = radians(az_deg);
+  const rows = [];
+  for (const z of [z0, z1]){
+    const row = [];
+    for (let k = 0; k <= n; k++){
+      const aa = a0 - (w / R) / 2 + (w / R) * k / n;
+      const b = bul * Math.pow(sqrt(Math.max(0.0, 1 - (2 * k / n - 1) ** 2)), 0.7);
+      row.push(mb.add_v([(R + 0.012 + b) * cos(aa), (R + 0.012 + b) * sin(aa), z]));
+    }
+    rows.push(row);
+  }
+  for (let k = 0; k < n; k++)
+    mb.add_f([rows[0][k], rows[0][k+1], rows[1][k+1], rows[1][k]],
+             [[0,0],[.2,0],[.2,1],[0,1]], true, mat);
+  mb.add_f(rows[0].slice().reverse(), null, false, mat);
+  mb.add_f(rows[1].slice(), null, false, mat);
+}
+
+function boosterBuild(){
+  const B_ST = 0, B_DIRTY = 1, B_HOT = 2, B_BLK = 3, B_ENG = 4, B_NOZ = 5, B_DKM = 6, B_GF = 7;
+  const slots = ['steel', 'steel_dirty', 'steel_hot', 'black', 'engine', 'engine_hot', 'dark_metal', 'gridfin'];
+  const R = BST.R;
+  const objs = [];
+  let mb;
+
+  mb = new MB();
+  lathe(mb, booster_hull_profile(), BST.SEG, { mat: B_ST, smooth: true, tile_w: 0.205 });
+  objs.push({ name: 'Booster_Hull', mb, smooth: 18, slots });
+
+  mb = new MB();
+  hot_stage(mb, BST.BODY_TOP, B_HOT, B_HOT, B_BLK);
+  objs.push({ name: 'Booster_HotStage', mb, smooth: 36, slots });
+
+  mb = new MB();
+  for (let k = 0; k < BST.GF_N; k++){
+    const az = BST.GF_AZ0 + 360.0 * k / BST.GF_N;
+    gf_fairing(mb, az, BST.GF_Z, B_ST);
+    grid_fin(mb, az, BST.GF_Z, B_GF, B_GF, B_BLK);
+  }
+  objs.push({ name: 'Booster_GridFins', mb, smooth: 30, slots });
+
+  mb = new MB();
+  for (let k = 0; k < 4; k++) chine(mb, BST.GF_AZ0 + 45.0 + 90.0 * k, BST.CH_Z, B_ST);
+  objs.push({ name: 'Booster_Chines', mb, smooth: 34, slots });
+
+  mb = new MB();
+  const zb = 2.42, ez = 0.62;
+  for (const [n, r, off] of [[3, 1.00, 0.0], [10, 2.66, 18.0], [20, 3.90, 0.0]])
+    for (let k = 0; k < n; k++){
+      const a = TAU * k / n + radians(off);
+      raptor(mb, r * cos(a), r * sin(a), zb, ez, 3.10, B_ENG, B_NOZ, 24);
+    }
+  lathe(mb, [[0.0, zb + 0.42], [4.30, zb + 0.42], [4.30, zb + 0.70]], 96, { mat: B_DKM, smooth: false });
+  lathe(mb, [[R - 0.14, 0.02], [R - 0.30, 0.10], [R - 0.30, zb + 0.5]], 96, { mat: B_DKM, smooth: true });
+  objs.push({ name: 'Booster_Engines', mb, smooth: 30, slots });
+
+  mb = new MB();
+  raceway(mb, 0.0, 3.0, BST.BODY_TOP - 1.0, 0.72, 0.24, B_ST);
+  raceway(mb, 12.0, 4.0, BST.BODY_TOP - 3.0, 0.36, 0.13, B_ST);
+  raceway(mb, 350.0, 5.0, 62.0, 0.30, 0.11, B_ST);
+  for (const [aa, zz, w, h] of [[100, 6.0, 1.2, 1.5], [190, 10.0, 1.0, 1.3],
+                                [280, 40.0, 0.9, 1.1], [150, 55.0, 0.9, 1.1],
+                                [25, 30.0, 0.8, 1.0], [60, 18.5, 0.9, 1.15],
+                                [245, 24.0, 0.85, 1.05], [320, 50.0, 0.8, 1.0]])
+    surface_patch(mb, radians(aa) + PI / 2, zz, w, h, R, 0.040, B_DKM);
+  objs.push({ name: 'Booster_Details', mb, smooth: 34, slots });
+
+  return objs;
+}
+/* ==========================================================================
+   6.  tower.py
+   ========================================================================== */
+const TW = {
+  W: 12.20, SEC_H: 14.60, N_SEC: 9, BASE_Z: 2.00, BAYS: 4,
+  COL: 1.18, MIDP: 0.46, CHORD: [0.86, 1.00, 0.11, 0.14],
+  DIAG_W: 0.52, DIAG_T: 0.30,
+  ARM_Z: 126.0, ARM_LEN: 26.5, ARM_SPLAY: 10.0, ARM_PIVOT_Y: 5.60,
+  ARM_D_ROOT: 5.10, ARM_D_TIP: 2.65, ARM_W_ROOT: 3.45, ARM_W_TIP: 2.45,
+  QD_Z: 94.6, TOWER_X: -17.50, PAD_TS: [0.40, 0.60], PAD_L: 1.55, PAD_H: 0.85,
+  PAD_DZ: 0.28, PAD_SEAT: 0.60, VEHICLE_X: 0.0
+};
+TW.HW = TW.W / 2;
+TW.TRUSS_TOP = TW.BASE_Z + TW.SEC_H * TW.N_SEC;
+TW.CROWN_TOP = TW.TRUSS_TOP + 6.10;
+TW.ROD_TOP = 146.0;
+TW.BAY_H = TW.SEC_H / TW.BAYS;
+
+function pad_geom(t = TW.PAD_SEAT, sgn = 1){
+  const px = TW.TOWER_X + TW.HW + 1.1;
+  const a = radians(sgn * TW.ARM_SPLAY);
+  const dist = TW.ARM_LEN * t;
+  const x = px + dist * cos(a);
+  const y = sgn * TW.ARM_PIVOT_Y + dist * sin(a);
+  const d = TW.ARM_D_ROOT + (TW.ARM_D_TIP - TW.ARM_D_ROOT) * t;
+  const top_chord = d * (1.0 - 0.72);
+  return [x, y, top_chord + TW.PAD_DZ + TW.PAD_H / 2, top_chord + 0.22];
+}
+
+const corners = () => { const H = TW.HW; return [[H, H], [-H, H], [-H, -H], [H, -H]]; };
+function faces(){
+  const c = corners(), out = [];
+  for (let i = 0; i < 4; i++){
+    const a = c[i], b = c[(i + 1) % 4];
+    const n = new Vec((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, 0).normalized();
+    out.push([a, b, n]);
+  }
+  return out;
+}
+
+function railing(mb, pts, z, h, mat, post_every = 2.2){
+  const n = pts.length;
+  for (let i = 0; i < n; i++){
+    const a = new Vec(pts[i][0], pts[i][1], z);
+    const b = new Vec(pts[(i + 1) % n][0], pts[(i + 1) % n][1], z);
+    const d = b.sub(a);
+    const ln = d.length;
+    if (ln < 1e-6) continue;
+    const u = d.mul(1 / ln);
+    const side = new Vec(-u.y, u.x, 0);
+    for (const hh of [h, h * 0.55])
+      prism(mb, a.add(new Vec(0, 0, hh)), b.add(new Vec(0, 0, hh)), sec_box(0.07, 0.07),
+            { up: [0, 0, 1], mat, smooth: false });
+    const m = Math.max(1, Math.trunc(ln / post_every));
+    for (let k = 0; k <= m; k++){
+      const p = a.add(u.mul(ln * k / m));
+      prism(mb, p, p.add(new Vec(0, 0, h)), sec_box(0.07, 0.07), { up: side, mat, smooth: false });
+    }
+  }
+}
+
+function build_truss(mb, m_col, m_beam, m_diag, m_grate){
+  const c = corners(), COL = TW.COL, HW = TW.HW, BASE_Z = TW.BASE_Z, TRUSS_TOP = TW.TRUSS_TOP;
+  for (const [x, y] of c)
+    prism(mb, [x, y, BASE_Z - 0.6], [x, y, TRUSS_TOP], sec_box(COL, COL),
+          { up: [0, 1, 0], mat: m_col, smooth: false });
+  const nlev = TW.N_SEC * TW.BAYS;
+  for (let lv = 0; lv <= nlev; lv++){
+    const z = BASE_Z + lv * TW.BAY_H;
+    for (const [a, b] of faces())
+      prism(mb, [a[0], a[1], z], [b[0], b[1], z], sec_i(...TW.CHORD),
+            { up: [0, 0, 1], mat: m_beam, smooth: false, ext0: -COL / 2, ext1: -COL / 2 });
+    if (lv % TW.BAYS === 0){
+      prism(mb, [c[0][0], c[0][1], z], [c[2][0], c[2][1], z], sec_i(0.60, 0.78, 0.09, 0.11),
+            { up: [0, 0, 1], mat: m_beam, smooth: false, ext0: -COL / 2, ext1: -COL / 2 });
+      prism(mb, [c[1][0], c[1][1], z], [c[3][0], c[3][1], z], sec_i(0.60, 0.78, 0.09, 0.11),
+            { up: [0, 0, 1], mat: m_beam, smooth: false, ext0: -COL / 2, ext1: -COL / 2 });
+    }
+  }
+  for (const [a, b, n] of faces()){
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    prism(mb, [mx, my, BASE_Z], [mx, my, TRUSS_TOP], sec_box(TW.MIDP, TW.MIDP),
+          { up: [n.x, n.y, 0], mat: m_col, smooth: false });
+  }
+  for (let lv = 0; lv < nlev; lv++){
+    const z0 = BASE_Z + lv * TW.BAY_H + 0.50;
+    const z1 = BASE_Z + (lv + 1) * TW.BAY_H - 0.50;
+    for (const [a, b, n] of faces()){
+      const ax = a[0] - n.x * 0.05, ay = a[1] - n.y * 0.05;
+      const bx = b[0] - n.x * 0.05, by = b[1] - n.y * 0.05;
+      let ux = bx - ax, uy = by - ay;
+      const ln = sqrt(ux * ux + uy * uy);
+      ux /= ln; uy /= ln;
+      const ins = COL * 0.44, mid = TW.MIDP * 0.55;
+      for (const [s0, s1] of [[ins, ln / 2 - mid], [ln / 2 + mid, ln - ins]]){
+        const q0 = [ax + ux * s0, ay + uy * s0, z0];
+        const q1 = [ax + ux * s1, ay + uy * s1, z1];
+        const q2 = [ax + ux * s1, ay + uy * s1, z0];
+        const q3 = [ax + ux * s0, ay + uy * s0, z1];
+        prism(mb, q0, q1, sec_box(TW.DIAG_W, TW.DIAG_T), { up: [n.x, n.y, 0], mat: m_diag, smooth: false });
+        prism(mb, q2, q3, sec_box(TW.DIAG_W, TW.DIAG_T), { up: [n.x, n.y, 0], mat: m_diag, smooth: false });
+      }
+    }
+  }
+  for (let s = 0; s < TW.N_SEC; s++){
+    const z = BASE_Z + s * TW.SEC_H;
+    const k = HW - COL * 0.62;
+    if (s % 2 === 0){
+      const i0 = mb.offset();
+      for (const [x, y] of [[k, k], [-k, k], [-k, -k], [k, -k]]) mb.add_v([x, y, z + 0.04]);
+      mb.add_f([i0, i0+1, i0+2, i0+3], [[0,0],[4,0],[4,4],[0,4]], false, m_grate);
+      mb.add_f([i0+3, i0+2, i0+1, i0], [[0,0],[4,0],[4,4],[0,4]], false, m_grate);
+    }
+    for (let f = 0; f < 4; f++){
+      const zz0 = z + f * (TW.SEC_H / 4);
+      const zz1 = zz0 + TW.SEC_H / 4;
+      const sgn = f % 2 === 0 ? 1 : -1;
+      prism(mb, [-k + 0.9, sgn * (k - 1.1), zz0], [k - 2.6, -sgn * (k - 1.1), zz1],
+            sec_box(1.25, 0.16), { up: [0, 0, 1], mat: m_grate, smooth: false });
+    }
+  }
+  for (let lv = 0; lv < nlev; lv += 2){
+    const z = BASE_Z + lv * TW.BAY_H;
+    const k = HW - COL * 0.62;
+    const i0 = mb.offset();
+    for (const [x, y] of [[k, k - 3.2], [k - 3.6, k - 3.2], [k - 3.6, k], [k, k]])
+      mb.add_v([x, y, z + 0.03]);
+    mb.add_f([i0, i0+1, i0+2, i0+3], [[0,0],[2,0],[2,2],[0,2]], false, m_grate);
+    mb.add_f([i0+3, i0+2, i0+1, i0], [[0,0],[2,0],[2,2],[0,2]], false, m_grate);
+  }
+  const runs = [[HW - 1.9, -HW + 1.9], [-HW + 1.9, HW - 1.9], [-HW + 2.0, -HW + 2.0]];
+  for (const [cx, cy] of runs)
+    for (const [dx, dy, rr, top] of [[0.0, 0.0, 0.34, 12.0], [0.85, 0.15, 0.24, 30.0],
+                                     [0.20, 0.90, 0.20, 8.0], [0.75, 0.85, 0.16, 46.0]])
+      prism(mb, [cx + dx, cy + dy, BASE_Z], [cx + dx, cy + dy, TRUSS_TOP - top],
+            sec_tube(rr, 8), { up: [0, 0, 1], mat: m_diag, smooth: true });
+  for (let lv = 0; lv < nlev; lv += 3){
+    const z = BASE_Z + lv * TW.BAY_H + TW.BAY_H * 0.5;
+    for (const [cx, cy] of runs)
+      prism(mb, [cx - 0.4, cy - 0.4, z], [cx + 1.2, cy + 1.2, z], sec_box(0.30, 0.22),
+            { up: [0, 0, 1], mat: m_beam, smooth: false });
+  }
+}
+
+function build_rails(mb, m_col, m_beam, m_dark, face_x = 1){
+  const xf = TW.HW * face_x, BASE_Z = TW.BASE_Z, TRUSS_TOP = TW.TRUSS_TOP;
+  for (const y of [3.35, -3.35]){
+    prism(mb, [xf + 0.55, y, BASE_Z], [xf + 0.55, y, TRUSS_TOP - 1.0], sec_box(1.10, 1.35),
+          { up: [0, 1, 0], mat: m_col, smooth: false });
+    const nst = Math.trunc((TRUSS_TOP - BASE_Z) / 4.0);
+    for (let k = 0; k < nst; k++){
+      const z = BASE_Z + 2.0 + k * 4.0;
+      prism(mb, [xf - 0.1, y, z], [xf + 1.1, y, z], sec_box(0.55, 0.30),
+            { up: [0, 0, 1], mat: m_beam, smooth: false });
+    }
+  }
+  const ex = -TW.HW + 1.35;
+  for (const y of [-1.55, 1.55])
+    prism(mb, [ex, y, BASE_Z], [ex, y, TRUSS_TOP - 4.0], sec_box(0.34, 0.34),
+          { up: [1, 0, 0], mat: m_col, smooth: false });
+  prism(mb, [ex + 0.55, 0.0, 46.0], [ex + 0.55, 0.0, 49.4], sec_box(2.10, 2.90),
+        { up: [0, 1, 0], mat: m_dark, smooth: false });
+}
+
+function build_crown(mb, m_col, m_beam, m_diag, m_grate, m_dark){
+  const c = corners(), COL = TW.COL, HW = TW.HW;
+  const z0 = TW.TRUSS_TOP, z1 = TW.CROWN_TOP;
+  for (const [x, y] of c)
+    prism(mb, [x, y, z0 - 0.2], [x, y, z1], sec_box(COL * 0.94, COL * 0.94),
+          { up: [0, 1, 0], mat: m_col, smooth: false });
+  const lvls = [z0, z0 + (z1 - z0) * 0.5, z1];
+  for (const zz of lvls){
+    for (const [a, b] of faces())
+      prism(mb, [a[0], a[1], zz], [b[0], b[1], zz], sec_i(0.74, 0.90, 0.09, 0.12),
+            { up: [0, 0, 1], mat: m_beam, smooth: false, ext0: -COL / 2, ext1: -COL / 2 });
+    prism(mb, [c[0][0], c[0][1], zz], [c[2][0], c[2][1], zz], sec_i(0.56, 0.72, 0.09, 0.11),
+          { up: [0, 0, 1], mat: m_beam, smooth: false, ext0: -COL / 2, ext1: -COL / 2 });
+  }
+  for (let i = 0; i < 2; i++){
+    const za = lvls[i] + 0.5, zbb = lvls[i + 1] - 0.5;
+    for (const [a, b, n] of faces()){
+      let ux = b[0] - a[0], uy = b[1] - a[1];
+      const ln = sqrt(ux * ux + uy * uy); ux /= ln; uy /= ln;
+      const ins = 0.45;
+      prism(mb, [a[0] + ux * ins, a[1] + uy * ins, za], [b[0] - ux * ins, b[1] - uy * ins, zbb],
+            sec_box(TW.DIAG_W, TW.DIAG_T), { up: [n.x, n.y, 0], mat: m_diag, smooth: false });
+      prism(mb, [b[0] - ux * ins, b[1] - uy * ins, za], [a[0] + ux * ins, a[1] + uy * ins, zbb],
+            sec_box(TW.DIAG_W, TW.DIAG_T), { up: [n.x, n.y, 0], mat: m_diag, smooth: false });
+    }
+  }
+  for (const zz of [lvls[1], z1]){
+    const i0 = mb.offset();
+    const kk = HW - COL * 0.55;
+    for (const [x, y] of [[kk, kk], [-kk, kk], [-kk, -kk], [kk, -kk]]) mb.add_v([x, y, zz + 0.52]);
+    mb.add_f([i0, i0+1, i0+2, i0+3], [[0,0],[4,0],[4,4],[0,4]], false, m_grate);
+    mb.add_f([i0+3, i0+2, i0+1, i0], [[0,0],[4,0],[4,4],[0,4]], false, m_grate);
+    railing(mb, [[kk, kk], [-kk, kk], [-kk, -kk], [kk, -kk]], zz + 0.54, 1.15, m_beam);
+  }
+  const px = HW + 2.9;
+  const i0 = mb.offset();
+  for (const [x, y] of [[px, 4.2], [HW, 4.2], [HW, -4.2], [px, -4.2]]) mb.add_v([x, y, z1 + 0.52]);
+  mb.add_f([i0, i0+1, i0+2, i0+3], [[0,0],[2,0],[2,2],[0,2]], false, m_grate);
+  mb.add_f([i0+3, i0+2, i0+1, i0], [[0,0],[2,0],[2,2],[0,2]], false, m_grate);
+  railing(mb, [[px, 4.2], [px, -4.2]], z1 + 0.54, 1.1, m_beam);
+  for (const y of [4.2, -4.2])
+    prism(mb, [HW, y, z1 - 2.6], [px, y, z1 + 0.5], sec_box(0.34, 0.38),
+          { up: [0, 1, 0], mat: m_col, smooth: false });
+  for (const [mx, my] of [[HW - 1.1, HW - 1.1], [-HW + 1.1, -HW + 1.1]])
+    prism(mb, [mx, my, z1], [mx, my, TW.ROD_TOP], sec_tube(0.26, 8),
+          { up: [0, 0, 1], mat: m_col, smooth: true, scale1: 0.30 });
+  for (const [bx, by, bw, bd, bh] of [[2.4, -3.4, 3.4, 2.6, 2.3], [-3.4, 2.6, 2.6, 2.2, 1.7],
+                                      [-3.0, -3.4, 2.0, 2.0, 1.2]])
+    prism(mb, [bx, by, z1 + 0.54], [bx, by, z1 + 0.54 + bh], sec_box(bw, bd),
+          { up: [0, 1, 0], mat: m_dark, smooth: false });
+}
+
+function chopstick(mb, pivot, yaw_deg, len, m_col, m_beam, m_diag, m_grate, m_dark){
+  const d_root = TW.ARM_D_ROOT, d_tip = TW.ARM_D_TIP, w_root = TW.ARM_W_ROOT, w_tip = TW.ARM_W_TIP;
+  const o = V(pivot);
+  const a = radians(yaw_deg);
+  const f = new Vec(cos(a), sin(a), 0.0);
+  const s = new Vec(-sin(a), cos(a), 0.0);
+  const u = new Vec(0, 0, 1.0);
+  const P = (t, sw, du) => {
+    const d = d_root + (d_tip - d_root) * t;
+    const w = w_root + (w_tip - w_root) * t;
+    return o.add(f.mul(len * t)).add(s.mul(sw * w / 2)).add(u.mul(du * d - d * 0.72));
+  };
+  const NB_ = 9;
+  for (const sw of [-1, 1])
+    for (const du of [0, 1]){
+      const pts = [];
+      for (let i = 0; i <= NB_; i++) pts.push(P(i / NB_, sw, du));
+      for (let i = 0; i < NB_; i++){
+        const sec = du ? sec_box(0.52, 0.62) : sec_box(0.42, 0.48);
+        prism(mb, pts[i], pts[i + 1], sec, { up: u, mat: m_col, smooth: false });
+      }
+    }
+  for (let i = 0; i <= NB_; i++){
+    const t = i / NB_;
+    for (const sw of [-1, 1])
+      prism(mb, P(t, sw, 0), P(t, sw, 1), sec_box(0.30, 0.34), { up: f, mat: m_beam, smooth: false });
+    prism(mb, P(t, -1, 1), P(t, 1, 1), sec_box(0.34, 0.34), { up: u, mat: m_beam, smooth: false });
+    prism(mb, P(t, -1, 0), P(t, 1, 0), sec_box(0.28, 0.28), { up: u, mat: m_beam, smooth: false });
+  }
+  for (let i = 0; i < NB_; i++){
+    const t0 = i / NB_, t1 = (i + 1) / NB_;
+    for (const sw of [-1, 1]){
+      prism(mb, P(t0, sw, 0), P(t1, sw, 1), sec_box(0.24, 0.26), { up: s, mat: m_diag, smooth: false });
+      prism(mb, P(t0, sw, 1), P(t1, sw, 0), sec_box(0.24, 0.26), { up: s, mat: m_diag, smooth: false });
+    }
+    prism(mb, P(t0, -1, 0), P(t1, 1, 0), sec_box(0.22, 0.22), { up: u, mat: m_diag, smooth: false });
+  }
+  const rows = [];
+  for (let i = 0; i <= NB_; i++){
+    const t = i / NB_;
+    rows.push([mb.add_v(P(t, -1, 1).add(u.mul(0.22))), mb.add_v(P(t, 1, 1).add(u.mul(0.22)))]);
+  }
+  for (let i = 0; i < NB_; i++){
+    mb.add_f([rows[i][0], rows[i][1], rows[i+1][1], rows[i+1][0]], [[0,0],[2,0],[2,3],[0,3]], false, m_grate);
+    mb.add_f([rows[i+1][0], rows[i+1][1], rows[i][1], rows[i][0]], [[0,0],[2,0],[2,3],[0,3]], false, m_grate);
+  }
+  for (const t of TW.PAD_TS){
+    const c0 = P(t, -0.62, 1).add(u.mul(TW.PAD_DZ));
+    const c1 = P(t, 0.62, 1).add(u.mul(TW.PAD_DZ));
+    prism(mb, c0, c1, sec_box(TW.PAD_L, TW.PAD_H), { up: u, mat: m_dark, smooth: false });
+  }
+  prism(mb, o.add(s.mul(1.9)).add(u.mul(d_root * 0.10)), o.sub(s.mul(1.9)).add(u.mul(d_root * 0.10)),
+        sec_tube(0.85, 16), { up: u, mat: m_col, smooth: true });
+  const mast = o.add(u.mul(d_root * 0.95)).sub(f.mul(0.9));
+  for (const sw of [-0.72, 0.72]){
+    prism(mb, mast.add(s.mul(sw * 1.5)), P(0.50, sw, 1), sec_box(0.46, 0.52),
+          { up: s, mat: m_col, smooth: false });
+    prism(mb, mast.add(s.mul(sw * 1.5)), P(0.22, sw, 1), sec_box(0.34, 0.40),
+          { up: s, mat: m_col, smooth: false });
+  }
+  prism(mb, mast.sub(s.mul(1.6)), mast.add(s.mul(1.6)), sec_box(0.48, 0.52),
+        { up: u, mat: m_col, smooth: false });
+}
+
+function carriage(mb, z, m_col, m_beam, m_diag, m_grate){
+  const xf = TW.HW, y0 = 6.30, d = 5.40;
+  for (const y of [y0, -y0])
+    prism(mb, [xf + 0.4, y, z - d * 0.75], [xf + 0.4, y, z + d * 0.75], sec_box(1.30, 1.40),
+          { up: [0, 1, 0], mat: m_col, smooth: false });
+  for (const zz of [z - d * 0.75, z - d * 0.15, z + d * 0.45, z + d * 0.75])
+    prism(mb, [xf + 0.4, -y0, zz], [xf + 0.4, y0, zz], sec_i(0.62, 0.80, 0.09, 0.12),
+          { up: [0, 0, 1], mat: m_beam, smooth: false });
+  for (const y of [3.35, -3.35])
+    prism(mb, [xf + 0.55, y, z - d * 0.7], [xf + 0.55, y, z + d * 0.7], sec_box(1.25, 1.55),
+          { up: [0, 1, 0], mat: m_col, smooth: false });
+  for (const y of [y0, -y0])
+    for (const zz of [z - d * 0.7, z + d * 0.7])
+      prism(mb, [xf + 0.55, y * 0.53, zz], [xf + 0.4, y, zz], sec_box(0.5, 0.55),
+            { up: [0, 0, 1], mat: m_diag, smooth: false });
+}
+
+function qd_arm(mb, z, reach, m_col, m_beam, m_diag, m_grate, m_dark, depth = 2.6, wid = 2.4){
+  const o = new Vec(TW.HW + 0.5, 0.0, z);
+  const f = new Vec(1, 0, 0), s = new Vec(0, 1, 0), u = new Vec(0, 0, 1);
+  const P = (t, sw, du) => {
+    const w = wid * (1.0 - 0.15 * t);
+    return o.add(f.mul(reach * t)).add(s.mul(sw * w / 2)).add(u.mul(du * depth));
+  };
+  const N = 4;
+  for (const sw of [-1, 1])
+    for (const du of [0, 1])
+      for (let i = 0; i < N; i++)
+        prism(mb, P(i / N, sw, du), P((i + 1) / N, sw, du), sec_box(0.26, 0.30),
+              { up: u, mat: m_col, smooth: false });
+  for (let i = 0; i <= N; i++){
+    const t = i / N;
+    for (const sw of [-1, 1])
+      prism(mb, P(t, sw, 0), P(t, sw, 1), sec_box(0.18, 0.20), { up: f, mat: m_beam, smooth: false });
+    prism(mb, P(t, -1, 1), P(t, 1, 1), sec_box(0.20, 0.20), { up: u, mat: m_beam, smooth: false });
+    if (i < N)
+      for (const sw of [-1, 1])
+        prism(mb, P(t, sw, 0), P(t + 1 / N, sw, 1), sec_box(0.15, 0.16),
+              { up: s, mat: m_diag, smooth: false });
+  }
+  const rows = [];
+  for (let i = 0; i <= N; i++)
+    rows.push([mb.add_v(P(i / N, -1, 1).add(u.mul(0.18))), mb.add_v(P(i / N, 1, 1).add(u.mul(0.18)))]);
+  for (let i = 0; i < N; i++){
+    mb.add_f([rows[i][0], rows[i][1], rows[i+1][1], rows[i+1][0]], [[0,0],[2,0],[2,2],[0,2]], false, m_grate);
+    mb.add_f([rows[i+1][0], rows[i+1][1], rows[i][1], rows[i][0]], [[0,0],[2,0],[2,2],[0,2]], false, m_grate);
+  }
+  railing(mb, [P(0, -1, 1).add(u.mul(0.2)).slice2(), P(1, -1, 1).add(u.mul(0.2)).slice2(),
+               P(1, 1, 1).add(u.mul(0.2)).slice2(), P(0, 1, 1).add(u.mul(0.2)).slice2()],
+          z + depth + 0.2, 1.05, m_beam);
+  const tip = P(1.0, 0, 0.45);
+  prism(mb, tip.sub(f.mul(1.35)), tip.add(f.mul(0.22)), sec_box(2.60, 2.05),
+        { up: u, mat: m_dark, smooth: false });
+  for (const sw of [-0.8, 0.8])
+    prism(mb, new Vec(TW.HW + 0.3, sw * wid * 0.5, z - 4.2), P(0.92, sw, 0.05), sec_box(0.40, 0.44),
+          { up: s, mat: m_col, smooth: false });
+}
+
+function towerBuild(){
+  const T_MAIN = 0, T_DARK = 1, T_GRATE = 2, T_DKM = 3, T_CONC = 4, T_BLK = 5;
+  const slots = ['tower', 'tower_dark', 'grate', 'dark_metal', 'concrete', 'black'];
+  const objs = [];
+  let mb;
+
+  mb = new MB();
+  build_truss(mb, T_MAIN, T_MAIN, T_DARK, T_GRATE);
+  build_rails(mb, T_MAIN, T_MAIN, T_DARK);
+  build_crown(mb, T_MAIN, T_MAIN, T_DARK, T_GRATE, T_DKM);
+  prism(mb, [0, 0, 1.28], [0, 0, TW.BASE_Z], sec_box(TW.W + 0.6, TW.W + 0.6),
+        { up: [0, 1, 0], mat: T_DKM, smooth: false });
+  objs.push({ name: 'Tower_Struct', mb, smooth: 30, slots, pos: [TW.TOWER_X, 0, 0] });
+
+  mb = new MB();
+  carriage(mb, TW.ARM_Z, T_MAIN, T_MAIN, T_DARK, T_GRATE);
+  for (const sgn of [1, -1])
+    chopstick(mb, [TW.HW + 1.1, sgn * TW.ARM_PIVOT_Y, TW.ARM_Z], sgn * TW.ARM_SPLAY,
+              TW.ARM_LEN, T_MAIN, T_MAIN, T_DARK, T_GRATE, T_DKM);
+  objs.push({ name: 'Tower_Chopsticks', mb, smooth: 30, slots, pos: [TW.TOWER_X, 0, 0] });
+
+  mb = new MB();
+  const reach = (TW.VEHICLE_X - 4.62) - (TW.TOWER_X + TW.HW + 0.5) - 1.13;
+  qd_arm(mb, TW.QD_Z, Math.max(reach, 2.0), T_MAIN, T_MAIN, T_DARK, T_GRATE, T_DKM, 2.4, 3.9);
+  objs.push({ name: 'Tower_QDArm', mb, smooth: 30, slots, pos: [TW.TOWER_X, 0, 0] });
+
+  return objs;
+}
+/* ==========================================================================
+   7.  olm.py
+   ========================================================================== */
+const OLM = { DECK_Z: 20.60, TABLE_BOT: 17.90, LEG_N: 6, R_DECK: 10.30, R_HOLE: 4.86, PLAT_Z: 1.30 };
+
+function olmBuild(){
+  const T_MAIN = 0, T_DARK = 1, T_GRATE = 2, T_DKM = 3, T_CONC = 4, T_CONCD = 5,
+        T_BLK = 6, T_SOOT = 7, T_ORG = 8, T_WHT = 9;
+  const slots = ['tower', 'tower_dark', 'grate', 'dark_metal', 'concrete', 'concrete_dk',
+                 'black', 'steel_dirty', 'orange', 'white'];
+  const { DECK_Z, TABLE_BOT, LEG_N, R_DECK, R_HOLE, PLAT_Z } = OLM;
+  const objs = [];
+  let mb;
+
+  /* -------- launch table -------- */
+  mb = new MB();
+  lathe(mb, [[R_DECK - 0.55, TABLE_BOT - 1.55], [R_DECK, TABLE_BOT - 0.85],
+             [R_DECK, DECK_Z - 0.28], [R_DECK + 0.22, DECK_Z - 0.10],
+             [R_DECK + 0.22, DECK_Z]], 72, { mat: T_DARK, smooth: true });
+  lathe(mb, [[R_DECK + 0.22, DECK_Z], [R_HOLE + 0.35, DECK_Z]], 72, { mat: T_GRATE, smooth: false });
+  lathe(mb, [[R_HOLE + 0.35, DECK_Z], [R_HOLE, DECK_Z - 0.45], [R_HOLE, TABLE_BOT - 2.6]], 72,
+        { mat: T_SOOT, smooth: true });
+  lathe(mb, [[R_HOLE, TABLE_BOT - 2.6], [R_DECK - 0.55, TABLE_BOT - 1.55]], 72,
+        { mat: T_DKM, smooth: false });
+  for (let k = 0; k < 20; k++){
+    const a = TAU * k / 20;
+    const x = (R_HOLE + 0.62) * cos(a), y = (R_HOLE + 0.62) * sin(a);
+    prism(mb, [x, y, DECK_Z - 0.05], [x, y, DECK_Z + 1.05], sec_box(0.62, 0.50),
+          { up: [cos(a), sin(a), 0], mat: T_DKM, smooth: false });
+  }
+  for (let k = 0; k < 12; k++){
+    const a = TAU * k / 12 + 0.26;
+    const r = R_DECK - 1.5;
+    const x = r * cos(a), y = r * sin(a);
+    const h = 1.1 + 0.65 * ((k * 7) % 5) / 5.0;
+    prism(mb, [x, y, DECK_Z], [x, y, DECK_Z + h], sec_box(1.5, 1.1),
+          { up: [cos(a), sin(a), 0], mat: (k % 3) ? T_DKM : T_MAIN, smooth: false });
+  }
+  const pts = [];
+  for (let k = 0; k < 40; k++)
+    pts.push([(R_DECK + 0.05) * cos(TAU * k / 40), (R_DECK + 0.05) * sin(TAU * k / 40)]);
+  railing(mb, pts, DECK_Z + 0.05, 1.15, T_MAIN, 1.7);
+
+  for (let k = 0; k < LEG_N; k++){
+    const a = TAU * k / LEG_N + radians(30);
+    const rt = 7.85, rb = 9.95;
+    const top = [rt * cos(a), rt * sin(a), TABLE_BOT - 0.5];
+    const bot = [rb * cos(a), rb * sin(a), PLAT_Z];
+    prism(mb, bot, top, sec_tube(1.28, 26), { up: [0, 0, 1], mat: T_DARK, smooth: true, scale1: 1.10 });
+    prism(mb, [bot[0], bot[1], PLAT_Z], [bot[0], bot[1], PLAT_Z + 0.68], sec_box(3.5, 3.5),
+          { up: [cos(a), sin(a), 0], mat: T_DKM, smooth: false });
+    const a2 = TAU * ((k + 1) % LEG_N) / LEG_N + radians(30);
+    const span = TABLE_BOT - 0.5 - PLAT_Z;
+    for (const [h0, h1] of [[0.28, 0.60]]){
+      const p0 = [(rb + (rt - rb) * h0) * cos(a), (rb + (rt - rb) * h0) * sin(a), PLAT_Z + span * h0];
+      const p1 = [(rb + (rt - rb) * h1) * cos(a2), (rb + (rt - rb) * h1) * sin(a2), PLAT_Z + span * h1];
+      prism(mb, p0, p1, sec_tube(0.26, 10), { up: [0, 0, 1], mat: T_DARK, smooth: true });
+      const p0b = [(rb + (rt - rb) * h1) * cos(a), (rb + (rt - rb) * h1) * sin(a), PLAT_Z + span * h1];
+      const p1b = [(rb + (rt - rb) * h0) * cos(a2), (rb + (rt - rb) * h0) * sin(a2), PLAT_Z + span * h0];
+      prism(mb, p0b, p1b, sec_tube(0.26, 10), { up: [0, 0, 1], mat: T_DARK, smooth: true });
+    }
+  }
+  objs.push({ name: 'OLM_Table', mb, smooth: 32, slots });
+
+  /* -------- booster quick disconnect -------- */
+  mb = new MB();
+  {
+    const a = radians(200);
+    const bx = 8.6 * cos(a), by = 8.6 * sin(a);
+    prism(mb, [bx, by, PLAT_Z], [bx, by, DECK_Z - 1.2], sec_box(4.2, 3.4),
+          { up: [cos(a), sin(a), 0], mat: T_DARK, smooth: false });
+    prism(mb, [bx * 0.72, by * 0.72, DECK_Z - 2.4], [bx * 1.02, by * 1.02, DECK_Z - 1.6],
+          sec_box(2.4, 2.0), { up: [0, 0, 1], mat: T_DKM, smooth: false });
+  }
+  objs.push({ name: 'OLM_BQD', mb, smooth: null, slots });
+
+  /* -------- square launch platform -------- */
+  mb = new MB();
+  {
+    const x0 = -38.0, x1 = 30.0, y0 = -31.0, y1 = 31.0, T = PLAT_Z;
+    const i0 = mb.offset();
+    for (const [x, y] of [[x1, y1], [x0, y1], [x0, y0], [x1, y0]]) mb.add_v([x, y, T]);
+    mb.add_f([i0, i0+1, i0+2, i0+3], [[0,0],[9,0],[9,8],[0,8]], false, T_CONC);
+    const j0 = mb.offset();
+    for (const [x, y] of [[x1, y1], [x0, y1], [x0, y0], [x1, y0]]) mb.add_v([x, y, T - 2.4]);
+    mb.add_f([j0+3, j0+2, j0+1, j0], [[0,0],[9,0],[9,8],[0,8]], false, T_CONCD);
+    for (let k = 0; k < 4; k++){
+      const k2 = (k + 1) % 4;
+      mb.add_f([i0+k, i0+k2, j0+k2, j0+k], [[0,1],[6,1],[6,0],[0,0]], false, T_CONCD);
+    }
+    for (const [ax, ay, bx2, by2] of [[x1, y0, x1, y1], [x0, y1, x1, y1],
+                                      [x0, y0, x0, y1], [x0, y0, x1, y0]])
+      prism(mb, [ax, ay, T], [bx2, by2, T], sec_box(0.55, 1.05),
+            { up: [0, 0, 1], mat: T_BLK, smooth: false, ext0: 0.28, ext1: 0.28 });
+  }
+  objs.push({ name: 'Pad_Platform', mb, smooth: null, slots });
+
+  return objs;
+}
+
+/* ==========================================================================
+   8.  assemble.py
+   ========================================================================== */
+function assemble(){
+  const DECK = OLM.DECK_Z;
+  const SHIP_Z = DECK + BST.BOOST_H - 0.06;
+  const SHIP_YAW = -90.0;
+
+  const [pad_x, pad_y, pad_ztop_rel] = pad_geom(TW.PAD_SEAT, 1);
+  const VEH_X = pad_x;
+
+  const flap_underside = y_abs => {
+    const z0 = SHIP.FWD_FLAP.z_bot, chord = SHIP.FWD_FLAP.chord;
+    const hinge = hull_r(z0) + 0.10;
+    const u = Math.min(Math.max((y_abs - hinge) / chord, 0.0), 1.0);
+    return z0 + u * chord * tan(radians(SHIP.FWD_FLAP.bot_sweep_deg));
+  };
+  const ARM_Z = SHIP_Z + flap_underside(Math.abs(pad_y)) - pad_ztop_rel;
+
+  TW.ARM_Z = ARM_Z;
+  TW.VEHICLE_X = VEH_X;
+
+  const objs = [];
+  for (const o of shipBuild()){    o.pos = [VEH_X, 0, SHIP_Z]; o.rotZ = radians(SHIP_YAW); objs.push(o); }
+  for (const o of boosterBuild()){ o.pos = [VEH_X, 0, DECK];  objs.push(o); }
+  for (const o of towerBuild())    objs.push(o);
+  for (const o of olmBuild()){
+    if (o.name === 'OLM_Table' || o.name === 'OLM_BQD') o.pos = [VEH_X, 0, 0];
+    objs.push(o);
+  }
+  return { objs, VEH_X, ARM_Z, SHIP_Z, DECK };
+}
+/* ==========================================================================
+   9.  renderer + standard studio lighting  (NOT ported from Blender)
+   ========================================================================== */
+function studioEnvTexture(){
+  const W = 512, H = 256;
+  const data = new Float32Array(W * H * 4);
+  const boxes = [
+    { d: new THREE.Vector3( 0.62, 0.52,  0.58).normalize(), r: 0.40, i: 4.20, c: [1.00, 0.98, 0.94] },
+    { d: new THREE.Vector3(-0.78, 0.34,  0.40).normalize(), r: 0.60, i: 1.10, c: [0.84, 0.90, 1.00] },
+    { d: new THREE.Vector3(-0.22, 0.42, -0.88).normalize(), r: 0.40, i: 2.30, c: [0.94, 0.97, 1.00] },
+    { d: new THREE.Vector3( 0.00, 1.00,  0.00).normalize(), r: 0.85, i: 0.55, c: [1.00, 1.00, 1.00] }
+  ];
+  const ss = (a, b, x) => { const t = Math.min(Math.max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t); };
+  for (let y = 0; y < H; y++){
+    const theta = (y + 0.5) / H * Math.PI;
+    const dy = Math.cos(theta), s = Math.sin(theta);
+    for (let x = 0; x < W; x++){
+      const phi = (x + 0.5) / W * TAU - Math.PI;
+      const dx = s * Math.sin(phi), dz = -s * Math.cos(phi);
+      const t = ss(-0.55, 0.85, dy);
+      let r = 0.030 + 0.230 * t, g = 0.032 + 0.245 * t, b = 0.038 + 0.280 * t;
+      const grad = ss(-0.02, -0.35, dy) * 0.55;         // soft floor bounce
+      r += grad * 0.11; g += grad * 0.105; b += grad * 0.095;
+      for (const L of boxes){
+        const d = dx * L.d.x + dy * L.d.y + dz * L.d.z;
+        const w = ss(Math.cos(L.r * 1.9), Math.cos(L.r), d) * L.i;
+        if (w > 0){ r += w * L.c[0]; g += w * L.c[1]; b += w * L.c[2]; }
+      }
+      const o = (y * W + x) * 4;
+      data[o] = r; data[o+1] = g; data[o+2] = b; data[o+3] = 1;
+    }
+  }
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.LinearSRGBColorSpace;
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function studioLights(scene){
+  const mk = (hex, inten, pos, shadow) => {
+    const l = new THREE.DirectionalLight(hex, inten);
+    l.position.set(pos[0], pos[1], pos[2]);
+    l.target.position.set(0, 68, 0);
+    scene.add(l, l.target);
+    if (shadow){
+      l.castShadow = true;
+      l.shadow.mapSize.set(4096, 4096);
+      const c = l.shadow.camera;
+      c.left = -110; c.right = 110; c.top = 150; c.bottom = -150;
+      c.near = 1; c.far = 1400;
+      c.updateProjectionMatrix();
+      l.shadow.bias = -0.0006;
+      l.shadow.normalBias = 0.45;
+    }
+    return l;
+  };
+  mk(0xfff4e6, 3.1, [ 320, 300,  300], true);   // key
+  mk(0xd6e4ff, 0.9, [-360, 170,  190], false);  // fill
+  mk(0xf2f6ff, 1.9, [-120, 230, -400], false);  // rim / back
+  return scene;
+}
+
+const wait = () => new Promise(r => setTimeout(r, 0));
+
+async function main(){
+  if (!navigator.gpu) throw new Error(
+    'WebGPU is not available in this browser.\n' +
+    'This build uses three.js TSL with WGSL nodes and needs a WebGPU-capable browser.');
+
+  const canvas = document.getElementById('c');
+  const load = document.getElementById('load');
+  const t0 = performance.now();
+
+  load.textContent = 'building geometry…';
+  await wait();
+
+  const M = buildMaterials();
+  const { objs, VEH_X, ARM_Z } = assemble();
+
+  const scene = new THREE.Scene();
+  const root = new THREE.Group();
+  root.rotation.x = -Math.PI / 2;               // Blender Z-up -> three.js Y-up
+  scene.add(root);
+
+  let tris = 0;
+  for (let i = 0; i < objs.length; i++){
+    const o = objs[i];
+    load.textContent = `building ${o.name}  (${i + 1}/${objs.length})`;
+    await wait();
+    const g = buildGeometry(o.mb, o.smooth);
+    tris += g.userData.tris;
+    const mesh = new THREE.Mesh(g, o.slots.map(k => M[k]));
+    mesh.name = o.name;
+    if (o.pos) mesh.position.set(o.pos[0], o.pos[1], o.pos[2]);
+    if (o.rotZ) mesh.rotation.z = o.rotZ;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    root.add(mesh);
+    o.mb = null;
+  }
+
+  load.textContent = 'compiling shaders…';
+  await wait();
+
+  const renderer = new THREE.WebGPURenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.toneMapping = THREE.AgXToneMapping;
+  renderer.toneMappingExposure = 1.0;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  await renderer.init();
+
+  const envTex = studioEnvTexture();
+  try {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromEquirectangular(envTex).texture;
+    envTex.dispose();
+  } catch (e){
+    console.warn('PMREM failed, using raw equirect env', e);
+    scene.environment = envTex;
+  }
+  scene.environmentIntensity = 1.0;
+  scene.backgroundNode = mix(vec3(0.055, 0.062, 0.072), vec3(0.012, 0.013, 0.016),
+                             screenUV.sub(vec2(0.5, 0.42)).length().mul(1.45).clamp(0, 1));
+  studioLights(scene);
+
+  const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.5, 6000);
+  camera.position.set(196, 104, 176);
+  const controls = new OrbitControls(camera, canvas);
+  controls.target.set(-4, 70, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.minDistance = 4;
+  controls.maxDistance = 2000;
+  controls.update();
+
+  addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  await renderer.compileAsync(scene, camera);
+
+  load.remove();
+  const dt = ((performance.now() - t0) / 1000).toFixed(1);
+  document.getElementById('hud').textContent =
+    `Starship / Super Heavy / OLIT — three.js r${THREE.REVISION} WebGPU + TSL\n` +
+    `${objs.length} objects   ${tris.toLocaleString()} tris   built in ${dt}s\n` +
+    `VEH_X ${VEH_X.toFixed(2)}   ARM_Z ${ARM_Z.toFixed(2)}   drag to orbit / scroll to zoom`;
+
+  renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+  window.__scene = scene; window.__renderer = renderer; window.__camera = camera;
+}
+
+main().catch(fail);
+
+</script>
+</body>
+</html>
