@@ -112,6 +112,8 @@ interface DynamicCasterLevel {
 export interface ShadowClipmapOptions {
   camera: Object3D
   levelMapSizes: readonly number[]
+  /** Per-level PCF radii; omitted entries inherit the source light's radius. */
+  levelFilterRadii?: readonly number[]
   firstRadius?: number
   scaleFactor?: number
   maxDistance?: number
@@ -164,6 +166,7 @@ export interface ShadowClipmapSnapshot {
       mapSize: number
       texelWidth: number
       normalBias: number
+      filterRadius: number
       committed: [number, number, number]
       renderCount: number
     }>
@@ -182,6 +185,7 @@ export interface ShadowClipmapSnapshot {
     age: number
     dirtyReasons: number
     normalBias: number
+    filterRadius: number
     renderCount: number
   }>
 }
@@ -234,6 +238,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   readonly dynamicCasterMapSize: number
 
   private readonly levelMapSizes: readonly number[]
+  private readonly levelFilterRadii: readonly number[]
   private readonly halfWidths: number[] = []
   private readonly levelStates: LevelState[] = []
   private readonly levelData: Vector4[] = []
@@ -265,6 +270,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     this.light = light
     this.camera = options.camera
     this.levelMapSizes = options.levelMapSizes
+    this.levelFilterRadii = options.levelFilterRadii ?? []
     this.levels = Math.max(1, this.levelMapSizes.length)
     const firstRadius = Math.max(1, options.firstRadius ?? 28)
     const scaleFactor = Math.max(1.5, options.scaleFactor ?? 3)
@@ -685,6 +691,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
               mapSize: level.mapSize,
               texelWidth: level.texelWidth,
               normalBias: level.normalBias,
+              filterRadius: level.light.shadow.radius,
               committed: [level.center.x, level.center.y, level.center.z],
               renderCount: level.renderCount,
             })),
@@ -703,6 +710,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         age: state.age,
         dirtyReasons: state.dirtyReasons,
         normalBias: state.normalBias,
+        filterRadius: this.lights[index].shadow.radius,
         renderCount: state.renderCount,
       })),
     }
@@ -740,6 +748,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       const target = new Object3D()
       const shadow = this.light.shadow.clone()
       shadow.mapSize.set(this.levelMapSizes[index], this.levelMapSizes[index])
+      shadow.radius = this.levelFilterRadii[index] ?? this.light.shadow.radius
       shadow.camera.left = -halfWidth
       shadow.camera.right = halfWidth
       shadow.camera.top = halfWidth

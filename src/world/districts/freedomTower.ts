@@ -1,6 +1,6 @@
 import { DoubleSide, Mesh, Vector3 } from 'three'
 import { MeshStandardNodeMaterial } from 'three/webgpu'
-import { float, vec3 } from 'three/tsl'
+import { float, mrt, normalView, vec3, vec4 } from 'three/tsl'
 import {
   BEVEL,
   MeshData,
@@ -288,6 +288,12 @@ function shaftGlass(): MeshStandardNodeMaterial {
   material.opacityNode = float(0.14)
   material.roughness = 0.06
   material.metalness = 0
+  // AO receiver mask 0 — all glazing writes it (see `curtainGlassMaterial`).
+  // A transparent material is worse than an opaque one here: without the
+  // override it stamps its own normal + receiver 1 over the screen's WHOLE
+  // rasterized quad (opacity gates colour only), so the shaft screens both
+  // took AO themselves and erased the G-buffer of the cab behind them.
+  material.mrtNode = mrt({ normal: vec4(normalView, 0) })
   screenGlassMaterial = material
   return material
 }

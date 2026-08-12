@@ -90,6 +90,17 @@ system must be the polite one or captions clobber.
   its world radius spans < ~8 gather texels (`footprint` between
   radius/8 and radius/3.3), a ratio that self-adapts to any resolution.
 - Hand-quad sign faces are DoubleSide (`signFace()`), per the commons rule.
+- Shadow sawtooth on the gallery deck: fixed in the cached sun rig, not in the
+  tower material. This is the park's only broad, untextured bright receiver;
+  its raking wide shadows exposed the rasterized light-space texel staircase
+  that narrow rail shadows hid by overlapping their two filtered edges. Static
+  L0 now owns the full 10.9 m deck at a denser grid while preserving the old
+  world-space PCF width. See `render-pipeline.md` §12.
+- `curtainGlassMaterial` and `shaftGlass` were missing the AO-receiver mask
+  (`mrt({ normal: vec4(normalView, 0) })`) that every other pane in the park
+  carries, so GTAO darkened the GLASS around the leaning rail, the mullions and
+  the head channel on every bay. Fixed at both materials — which also fixes the
+  Commons drum and the hydro tower, since they share the recipe.
 
 ## Contracts and consumers
 
@@ -97,8 +108,9 @@ system must be the polite one or captions clobber.
   automatically), the 'freedom' gate monolith stands off the approach walk,
   the park model carries a 1:210 spire, and the amenity blocker keeps
   furniture off the terrace.
-- `?view=freedom` (approach postcard) and `?view=freedomup` (under-lattice
-  look-up) are the saved cameras.
+- `?view=freedom` (approach postcard), `?view=freedomup` (under-lattice
+  look-up), and `?view=freedomdeck` (bare-plane shadow regression) are the
+  saved cameras.
 - Audio: the cab in flight + the gallery classify as 'interior'
   (`engine.ts`, plan-radius 6 above y 4.5).
 - Gate: `node --experimental-strip-types tools/freedom-audit.mjs` — per-part

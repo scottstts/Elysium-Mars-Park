@@ -1,6 +1,6 @@
 import { CanvasTexture, DoubleSide, Group, InstancedMesh, Matrix4, Mesh, PlaneGeometry, Quaternion, SRGBColorSpace, Vector3 } from 'three'
 import { MeshPhysicalNodeMaterial, MeshStandardNodeMaterial } from 'three/webgpu'
-import { texture } from 'three/tsl'
+import { mrt, normalView, texture, vec4 } from 'three/tsl'
 import { bench } from '../../archkit/kit'
 import type { PartWriter } from '../../archkit/writer'
 import {
@@ -560,6 +560,16 @@ export function curtainGlassMaterial(): MeshPhysicalNodeMaterial {
   // the near pane must occlude the far one. (A single Fresnel only — never
   // stack an authored alpha on a lit material's own, see notes.md W1-dome.)
   material.side = DoubleSide
+  // AO receiver mask 0, the same override every other glass in the park
+  // carries (heroGlass, cabinGlass, milkyPanel, the dome shell). Without it a
+  // pane inherits receiver 1 and GTAO darkens the GLASS wherever something
+  // stands close behind or in front of it — the smudges hugging the leaning
+  // rail, the mullions and the head channel on every Freedom Tower gallery
+  // bay (owner report). Occlusion belongs to what the pane is seen THROUGH,
+  // never to the pane. The pass-level blend makes this attachment's own alpha
+  // the write authority, so alpha 0 leaves the G-buffer behind the glass
+  // exactly as the opaque world wrote it.
+  material.mrtNode = mrt({ normal: vec4(normalView, 0) })
   return material
 }
 

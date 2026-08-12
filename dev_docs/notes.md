@@ -2884,3 +2884,64 @@ Marble hairlines bundle to the bedding or they read as topo contours. MP3
 loops need loopStart/End inside the encoder padding, decoded to a buffer
 (HTMLAudio gaps). The fountain keep-out is sized against the JUMP (3 m/s at
 0.38 g = 1.21 m apex), not the autostep.
+
+## Three distance/precision defects (2026-08-12) — sign, deck shadows, glass AO
+
+All three were reported as "looks wrong from over there, fine up close", and all
+three were the SAME kind of mistake: an epsilon or a filter chosen against how a
+thing looks in the hand rather than against the buffer that has to resolve it.
+
+- **THE DEPTH BUFFER IS NOT REVERSED.** `pipeline.ts`, `gtaoVisibility.ts`,
+  `marsAerialPerspective.ts` and `glassShell.ts` all state that r185 WebGPU is
+  reversed-Z. `WebGPURenderer`'s `reversedDepthBuffer` defaults to false and
+  nothing sets it. Their guards happen to test both ends of the range, so
+  nothing broke and the belief propagated agent to agent — do not treat those
+  comments as a spec. At near 0.08 / far 14000 the quantum is 0.7 mm at 30 m,
+  1.9 mm at 50 m, 4.8 mm at 80 m. **Any two parallel faces under ~5 mm apart
+  z-fight in the far field.** Also note `depth32float` (set for the GTAO barcode
+  fix) buys nothing out there — float precision crowds the NEAR plane; near 1.0
+  it is exactly the 24-bit unorm step.
+- **A printed skin can't buy depth with millimetres — state the ordering.**
+  `stencilSign`'s face sits 3 mm off its plate, which is physically right
+  (widening it opens a slot at the plate border, and the plate must stay a full
+  slab for the outriggers to lap into). `signageMaterial` now carries
+  `polygonOffset` at −2 units: WebGPU depthBias is counted in depth QUANTA (on a
+  float attachment, scaled by the primitive's own exponent), so a fixed −2 wins
+  by the same margin at 10 m and at 300 m. Sign convention is tied to
+  non-reversed depth — flip it if `reversedDepthBuffer` is ever enabled.
+- **DEAD END, do not repeat: forcing `LinearFilter` on the shadow depth texture.**
+  three's `DepthTexture` really does default mag/min to Nearest, so
+  `ShadowNode.setupRenderTarget` looks like it hands the PCF filter a
+  non-filtering comparison sampler — but `setupShadow` **overwrites both to
+  `LinearFilter` on the very next lines** whenever `shadowMap.type` is PCF or
+  PCFSoft (it is, by default). Hardware 2×2 PCF has been on the whole time; an
+  override of `setupRenderTarget` is a no-op. Verified in the r185 bundle
+  (`setupShadow`, just after the `setupRenderTarget` call).
+- **The gallery deck sawtooth was shadow-SILHOUETTE density, not a missing
+  filter.** Coverage-only, `PCFSoftShadowMap`, and radius-only trials left the
+  same teeth; spatial supersampling reduced them proportionally. Thin
+  75–130 mm mullion shadows looked clean because their two filtered edges
+  overlap, while a wide edge exposes the light-space raster grid directly.
+  Static L0 is now 15 m / 8192² at tier 2, keeping the whole 10.9 m deck inside
+  its full-weight region. Its radius and base normal bias are scaled by the
+  actual 1.6× world-density gain; coarse/dynamic maps retain radius 1 and their
+  established physical bias. `?view=freedomdeck&pass=nopost` is the regression
+  gate. Cost: ~192 MiB extra tier-2 depth allocation, but no extra texture,
+  sample, or recurring static shadow draw (L0 is cached after load).
+- **Judge shadow filtering on a bare bright plane.** The defect had
+  shipped park-wide and was invisible until the Freedom Tower deck existed: 5 m
+  of clean near-white plate seen from 2 m, under a 27° sun that stretches every
+  texel 2.2× along its own direction, sitting right beside the analytic lattice
+  net's true penumbra for comparison. Regolith and paving albedo hide it
+  completely. A tall vantage was already a new test category (freedom-tower
+  notes); so is a large untextured floor.
+- **Every glazing material owes `mrt({ normal: vec4(normalView, 0) })`.** It is
+  the AO-receiver mask, and `curtainGlassMaterial` (Commons drum, hydro tower,
+  the whole Freedom Tower gallery) and `shaftGlass` were both missing it while
+  `heroGlass`/`cabinGlass`/`milkyPanel`/the dome shell all carried it. Receiver
+  1 lets GTAO darken the PANE wherever a mullion, a leaning rail or a head
+  channel stands close to it — soft smudges on the glass that read as dirt. On a
+  TRANSPARENT material it is worse than on an opaque one: opacity gates colour
+  only, so the quad stamps its normal + receiver over its whole rasterized
+  rectangle and erases the G-buffer of whatever is seen through it. Checklist
+  for any new pane: side, depthWrite, and the receiver mask.

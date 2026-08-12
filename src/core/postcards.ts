@@ -58,6 +58,10 @@ export const BOOKMARKS: Record<string, Bookmark> = {
   // Bonus: under the tower looking straight up through the hyperboloid at
   // the cab, deck soffit and spire (the hero low-angle).
   freedomup: { position: [27.2, 1.7, 52.6], look: [32.2, 46, 56.4], stage: 'landmark' },
+  // Regression view from the gallery walking surface. This bright, nearly
+  // textureless deck is the park's strictest sun-shadow filtering test: it
+  // reveals clipmap ownership changes that regolith and paving albedo hide.
+  freedomdeck: { position: [36.6, 40.45, 58.4], look: [25, 38.7, 62], stage: 'landmark' },
   // Dev-only wide establishing view (not part of the ten).
   overview: { position: [100, 80, 135], look: [0, 15, 0], stage: 'dev' },
   // Dev-only pipeline calibration gallery.

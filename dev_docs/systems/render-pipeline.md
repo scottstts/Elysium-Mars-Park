@@ -258,6 +258,72 @@ Everything else in the artificial layer is emissive geometry + bloom.
 changes the LightsNode cache key and synchronously rebuilds every lit WGSL
 program in the park.
 
+## 11. The depth buffer is NOT reversed — plan every epsilon against that
+
+Several comments in this pipeline (and in `gtaoVisibility`, `marsAerialPerspective`,
+`glassShell`) assert "r185 WebGPU is reversed-Z". **It is not.** `reversedDepthBuffer`
+defaults to `false` in `WebGPURenderer` and nothing here passes it, so depth runs
+0 = near → 1 = far with `less` compare. The guards those modules carry test BOTH
+ends (`> 1e-7 && < 0.999999`), which is why nothing broke and why the belief
+survived; treat the comments as unverified, not as a spec.
+
+What it costs, with the camera at near 0.08 / far 14000 and `depth32float` (which
+concentrates precision near the NEAR plane, so it buys nothing out here):
+
+| view distance | 10 m | 30 m | 50 m | 80 m | 150 m |
+| depth quantum | 0.07 mm | 0.7 mm | 1.9 mm | 4.8 mm | 17 mm |
+
+So any two parallel surfaces closer than a few millimetres z-fight in the far
+field while reading perfectly at arm's length — the works hall sign's printed
+face over its backing plate was the first one big enough to see it (fixed with a
+quantum-counted `polygonOffset`, not a wider gap; see `signageMaterial`).
+
+Two levers exist if this bites again more broadly, both renderer-wide and both
+needing a real visual pass before adoption: raising the near plane (quantum ∝ 1/near)
+or enabling `reversedDepthBuffer` (~500× at 50 m, and it would make the comments
+above true). Neither is applied.
+
+## 12. Sun-shadow filter — Freedom deck sawtooth resolved
+
+Facts, so nobody re-derives them:
+
+- `renderer.shadowMap.type` is three's default `PCFShadowMap`, so the filter is
+  `PCFShadowFilter`: 5 Vogel taps on a `radius`-texel disk, IGN-rotated per pixel.
+- **Hardware PCF is already on.** `ShadowNode.setupShadow` overwrites the depth
+  texture's filters to `LinearFilter` for PCF/PCFSoft immediately after
+  `setupRenderTarget` returns, so each tap is a bilinear 2×2 compare. Overriding
+  `setupRenderTarget` to set Linear is a **no-op** — it was tried.
+- Static L0 uses a per-level radius of 1.6; every coarse static and moving-caster
+  map remains radius 1. L0 is 1.6× denser in world space, so this preserves the
+  old physical filter width rather than making the sun softer.
+- Level texels at tier 2 / tier 0: L0 3.7 / 7.3 mm, L1 19 / 38 mm, L2 66 / 98 mm,
+  L3 254 / 338 mm. On a horizontal floor under the 27° sun, multiply by 2.2 for
+  the along-sun footprint.
+- Level choice is the fragment's Chebyshev distance from the CAMERA in light-space
+  XY, blended over the last 16 % of each box. L0 is now 15 m half-width: its
+  full-weight region ends at 11.09 m, beyond the deck's 10.9 m diameter.
+
+**Root cause:** the PCF signal was valid, but its input silhouette was too coarse
+for this receiver. The 27° sun stretches a light-space texel 2.2× across the
+horizontal deck, and a single wide shadow edge exposes that stair directly.
+Thin 75–130 mm rail/mullion shadows looked clean because their two PCF ramps
+overlap; they were never evidence of a different shadow source. Three controlled
+tests established this: expanding L0 coverage alone did not change the teeth;
+switching to `PCFSoftShadowMap` or doubling only `radius` merely widened the same
+steps; increasing spatial density reduced the step size in direct proportion.
+
+**Fix:** static L0 is 15 m at 2× its tier map size (8192² on tier 2), while its
+PCF radius and base normal bias are adjusted by the actual 1.6× world-density
+gain. L1–L3 therefore keep their established world-space bias/filter behaviour,
+and dynamic shadows remain at their tier resolutions and radius 1. The map count
+and per-frame static draw count do not increase; L0 is frozen after load. The
+explicit cost is memory: tier-2 L0's depth attachment is roughly 256 MiB instead
+of 64 MiB (implementation-dependent format allocation).
+
+Always **judge shadow filtering on a bare bright plane**, not on
+regolith or paving — the deck is the park's only one, which is why this shipped
+unnoticed.
+
 ## Diagnostics added
 
 `?pass=aoshare` · `?pass=aoapplied` (the AO split, read in that order when
@@ -265,6 +331,10 @@ contact grounding looks wrong) and `?pass=nograde` (tone-mapped, pre-LUT — the
 honest baseline for any palette argument). Raw and filtered AO diagnostics are
 also available as `?pass=aoraw`, `?pass=aodenoised`, and `?pass=aoradius`; all
 are registered in `core/debug.ts`.
+
+`?view=freedomdeck` is the fixed bare-plane shadow contract. Validate `final`
+and `nopost` there after changing the clipmap ladder, map sizes, PCF filter, sun
+direction, or gallery geometry.
 
 ## Verified (2026-08-10, tier 2, 2176×1224, ~4.5 M tris, 766 draws)
 

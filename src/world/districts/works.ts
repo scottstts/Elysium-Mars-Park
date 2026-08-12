@@ -714,6 +714,11 @@ function signHeight(width: number): number {
  * the printed face sits at +0.063. So the REARMOST part of a sign is its
  * bosses at `at − 0.035·f` — that is the surface which has to meet its host.
  *
+ * The printed face clears the plate by 3 mm, which is BELOW the depth quantum
+ * past ~30 m (see `signageMaterial`). Do not widen it to buy depth — that opens
+ * a real slot at the plate border, and the skin's draw order is already held
+ * by the material's depth bias, which is counted in quanta rather than metres.
+ *
  * `legsToY`: plant two posts down to that world Y — REQUIRED for any plate
  * that isn't carried by a wall or a bracket (a floating sign was an
  * owner-reported defect at the maintenance yard).

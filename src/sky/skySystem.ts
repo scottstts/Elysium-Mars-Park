@@ -23,31 +23,45 @@ import { ENVIRONMENT_INTENSITY, SUN_LIGHT_INTENSITY, sunColor, sunDirection } fr
  * overhaul; the old 30/96/560 ladder was cut for a 500 m dome).
  *
  * Three constraints decide these numbers:
- *  1. The finest level must resolve a KERB. At 12 m half-width on a 4096 map
- *     the texel is 5.9 mm, so a 120 mm curb nose casts a shadow with a real
- *     edge instead of a smear. This is the single biggest contributor to the
- *     reference image's "everything is sitting on the ground" read.
+ *  1. The finest level must resolve a KERB and keep the complete 10.9 m
+ *     Freedom Tower gallery inside its full-weight region. A 15 m half-width
+ *     fades only after 15 · 0.88 · 0.84 = 11.09 m, so a guest at either rim
+ *     cannot push the opposite edge into L1. Its static-only 2x map scale
+ *     makes tier 2 an 8192 map (3.7 mm texels), 1.6x denser in world space
+ *     than the old 12 m / 4096 level. Wide raking shadows therefore stop
+ *     exposing the light-space texel staircase on this bare bright receiver.
  *  2. Levels must be a geometric ladder that ENDS at maxDistance, because the
  *     node clamps the last level to `maxDistance` regardless of the factor.
- *     12 · 2.9³ ≈ 293 ≈ 260, so no level makes an outsized jump. The old set
+ *     15 · 2.59³ ≈ 260, so no level makes an outsized jump. The old set
  *     jumped 96 → 560 (5.8×), which forced level-2 normal bias to 0.75 m —
  *     a peter-panning generator at park scale.
  *  3. maxDistance only has to cover the dome: 260 m is the full diameter, and
  *     everything beyond the glass is either analytic (the lattice net) or too
  *     far for a shadow map to matter.
  */
-const CLIPMAP_FIRST_RADIUS = 12
-const CLIPMAP_SCALE_FACTOR = 2.9
+const CLIPMAP_FIRST_RADIUS = 15
+const CLIPMAP_SCALE_FACTOR = 2.59
 const CLIPMAP_MAX_DISTANCE = 260
 const CLIPMAP_LEVELS = 4
 
 /**
- * Base normal offset, in metres, at the FINEST level; the node scales it by
- * each level's texel ratio. 14 mm ≈ 2.4 texels of the 5.9 mm finest texel —
- * enough to kill acne on the 27° sun's grazing incidence, small enough that
- * contact shadows still touch their objects.
+ * Static L0 is rendered once and then cached, so spatial supersampling costs
+ * memory but no recurring shadow draw. Keep the PCF radius and receiver bias
+ * proportional to the actual world-space density gain: that preserves their
+ * footprint while reducing only the rasterized silhouette's step size.
+ * Dynamic maps retain their tier sizes because their narrow/moving shadows
+ * never exposed this defect and they refresh continuously.
  */
-const SHADOW_NORMAL_BIAS = 0.014
+const STATIC_FINE_SHADOW_MAP_SCALE = 2
+const STATIC_FINE_SHADOW_DENSITY_GAIN = 1.6
+
+/**
+ * Base normal offset, in metres, at the denser finest level; the node scales
+ * it by each level's texel ratio. Dividing the proven 14 mm offset by the
+ * actual world-space density gain keeps the outer levels' offsets stable,
+ * while L0 retains the same ~2.4-texel acne margin at its denser grid.
+ */
+const SHADOW_NORMAL_BIAS = 0.014 / STATIC_FINE_SHADOW_DENSITY_GAIN
 
 export class SkySystem implements GameSystem {
   readonly id = 'sky'
@@ -76,6 +90,7 @@ export class SkySystem implements GameSystem {
     sun.shadow.mapSize.set(quality.params.shadowMapSizes[0], quality.params.shadowMapSizes[0])
     sun.shadow.bias = -0.0003
     sun.shadow.normalBias = SHADOW_NORMAL_BIAS
+    sun.shadow.radius = 1
     sun.position.copy(sunDirection).multiplyScalar(700)
     sun.target.position.set(0, 0, 0)
     scene.add(sun)
@@ -87,12 +102,18 @@ export class SkySystem implements GameSystem {
     const tierSizes = quality.params.shadowMapSizes
     const levelMapSizes = Array.from(
       { length: CLIPMAP_LEVELS },
-      (_, index) => tierSizes[Math.min(index, tierSizes.length - 1)],
+      (_, index) => index === 0
+        ? Math.min(8_192, tierSizes[0] * STATIC_FINE_SHADOW_MAP_SCALE)
+        : tierSizes[Math.min(index, tierSizes.length - 1)],
     )
 
     this.clipmaps = new CachedShadowClipmapNode(sun, {
       camera: ctx.camera,
       levelMapSizes,
+      // Same world-space PCF footprint as radius 1 on the authored L0 map;
+      // only the cached silhouette beneath it is denser. Coarse static and
+      // continuously refreshed dynamic maps retain their proven radius 1.
+      levelFilterRadii: [STATIC_FINE_SHADOW_DENSITY_GAIN],
       firstRadius: CLIPMAP_FIRST_RADIUS,
       scaleFactor: CLIPMAP_SCALE_FACTOR,
       maxDistance: CLIPMAP_MAX_DISTANCE,

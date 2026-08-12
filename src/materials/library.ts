@@ -265,6 +265,27 @@ export function signageMaterial(
   material.map = texture
   material.roughness = 0.6
   material.metalness = 0.05
+  // A stencil face is a printed SKIN standing 3 mm off the backing plate it is
+  // printed on (`stencilSign`), and 3 mm stops being a resolvable distance in
+  // the far field. The camera is 0.08 / 14000 on a NON-reversed depth buffer,
+  // so one depth step is ~0.07 mm at 10 m, ~0.7 mm at 30 m, ~1.9 mm at 50 m and
+  // ~4.8 mm at 80 m: the steel plate starts winning pixels off its own type
+  // somewhere past 30 m and owns them outright past 60 m. That is the "reads
+  // clean up close, z-fights from across the district" report on the works hall
+  // sign — the biggest plate in the park (5.2 x 1.456 m), so the first one
+  // where the fight is legible at that range.
+  //
+  // The 3 mm is physically right (widening it opens a visible slot at the plate
+  // border), so state the ORDERING instead of the distance. depthBias is
+  // counted in depth-buffer quanta, not metres — on a float depth attachment it
+  // is scaled by the primitive's own exponent — so a fixed -2 tracks the
+  // quantum at every distance, which no millimetre offset can do.
+  //
+  // NOTE the sign: negative = towards the camera only while depth is
+  // non-reversed. Enabling `reversedDepthBuffer` on the renderer flips it.
+  material.polygonOffset = true
+  material.polygonOffsetFactor = -1
+  material.polygonOffsetUnits = -2
   return material
 }
 
