@@ -8,6 +8,7 @@ import {
   FREEDOM_TOWER,
   HYDRO_TOWER,
   LOOP,
+  OPTIMUS_COURT,
   OVERLOOK_LOUNGE,
   PARK,
   PATHS,
@@ -318,6 +319,9 @@ const RIBBON_RUNOUT: Record<string, [number, number]> = {
   // the service yard's regolith (owner finding: "leads nowhere").
   'farm-lane': [4, 7],
   'amphitheater-spur': [4, 0],
+  // Runs INTO the Meridian Walk's pour so the branch has no open mouth; its
+  // far end already lands inside the court disc, which trims it.
+  'optimus-spur': [3, 0],
 }
 
 function buildRegions(): Region[] {
@@ -412,6 +416,20 @@ function buildRegions(): Region[] {
     curb: true,
   })
 
+  // Optimus court: the paved disc the humanoid plinth stands on — the
+  // 'fountain-court' pattern (paving owns the ground plane, the district
+  // builds its castings ON it). The 'optimus-spur' ribbon ends inside this
+  // disc so the doorstep junction is one watertight clipped seam.
+  list.push({
+    kind: 'disc',
+    id: 'optimus-court',
+    priority: 70,
+    cx: OPTIMUS_COURT.x,
+    cz: OPTIMUS_COURT.z,
+    radius: OPTIMUS_COURT.courtRadius,
+    curb: true,
+  })
+
   // The transit boulevard: the widest paved band in the park.
   list.push({
     kind: 'annulus',
@@ -452,7 +470,7 @@ function buildRegions(): Region[] {
     // Meridian). Every other spoke junction lands on a higher-priority disc,
     // which is why this never surfaced before. Any spoke that BRANCHES OFF
     // another spoke must sit one rung lower so the trunk trims it.
-    const branch = path.id === 'tower-walk'
+    const branch = path.id === 'tower-walk' || path.id === 'optimus-spur'
     list.push({
       kind: 'ribbon',
       id: path.id,

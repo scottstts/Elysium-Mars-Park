@@ -22,7 +22,7 @@ import {
   uniform,
   vec4,
 } from 'three/tsl'
-import { MAIN_DETAIL_LAYER } from './layers'
+import { MAIN_DETAIL_LAYER, STATIC_SHADOW_PROXY_LAYER } from './layers'
 import { latticeSunVisibility } from '../dome/latticeField'
 
 const ORIGIN = new Vector3()
@@ -786,6 +786,11 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       // camera mask during the shadow render. Static maps retain ordinary and
       // main-detail casters while excluding the dedicated moving-caster layer.
       if (this.dynamicCasterLayer !== null) shadow.camera.layers.enable(MAIN_DETAIL_LAYER)
+      // Shadow-only stand-ins (render/layers.ts): geometry the main camera
+      // never sees, so a LOD-switching object can hand the cached maps one
+      // fixed silhouette instead of whatever detail level happened to be up
+      // when the bundle was recorded.
+      shadow.camera.layers.enable(STATIC_SHADOW_PROXY_LAYER)
       shadow.autoUpdate = false
       shadow.needsUpdate = false
       const levelLight = Object.assign(new Object3D(), {

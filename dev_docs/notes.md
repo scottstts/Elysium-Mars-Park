@@ -2953,3 +2953,197 @@ thing looks in the hand rather than against the buffer that has to resolve it.
   only, so the quad stamps its normal + receiver over its whole rasterized
   rectangle and erases the G-buffer of whatever is seen through it. Checklist
   for any new pane: side, depthWrite, and the receiver mask.
+
+## Ports of external Blender/three builds (2026-08-12, Optimus exhibit)
+
+Full write-up: `dev_docs/systems/optimus-exhibit.md`. The transferable lessons:
+
+- **Port mechanically, then PROVE it.** When the brief is "identical to this
+  reference", do not retype the source. Slice the reference by line range with
+  a script, apply a table of explicit find/replace patches for the type
+  annotations, and regenerate. Every unpatched line is then byte-identical by
+  construction. Then verify with a checksum harness that runs BOTH the
+  reference and the port under one driver and compares object names, vertex and
+  face counts, material-slot lists, and weighted sums over all positions AND
+  all split normals. The Optimus port matched to the last digit
+  (176 objects / 891,809 tris / 446,593 verts). **Re-run it after any edit to
+  `procgen/blenderkit/` or `robots/optimus/parts/`** — a plausible refactor of
+  `applyBevel` or `weldVerts` changes the mesh without looking wrong.
+- **Bind a ported library with a FACTORY, not by threading parameters.**
+  Blender's `optlib` writes into module-global collections. Making that generic
+  by adding a `coll` argument would have changed hundreds of ported call sites,
+  and every changed line is one the checksum can no longer defend.
+  `createCollectionApi(names)` + `createLoftKit(api)` return closures that a
+  six-line `xKit.ts` binds once; the ported call sites are untouched.
+- **`lateInit<T>()` (`procgen/blenderkit/mathkit.ts`)** is the idiom for a
+  ported module-scope slot filled by a `*Curves()` entry point. Typing those
+  nullable puts a `!` on ~200 call sites for no safety.
+- **Keep heavy CPU generators three.js-free and run them on a worker.** The
+  Optimus build is 3.4 s of pure CPU (1.1 s generators, 1.9 s bevel/boolean/
+  split normals). Off-thread it overlaps init and the entry screen keeps
+  animating; on the main thread it is a visible three-second freeze. The
+  worker chunk is 70 kB — but only because nothing in its import graph touches
+  `three/`. One stray import of a materials module drags the whole renderer in.
+- **Reference materials can violate the park's emissive ladder.** The demo's
+  visor LED is emissive × 11.0 against a ladder that tops out at 5.0
+  (threshold 1.0). Kept, because the emitting area is ~1.5 mm and the ladder's
+  own rule is "scale the AREA, not the multiplier" — but check any imported
+  material against the ladder before assuming it is fine.
+
+### Shadow-only proxies for LOD-switching objects (new layer)
+
+`STATIC_SHADOW_PROXY_LAYER = 4` (`render/layers.ts`, + `markStaticShadowProxy`).
+The main camera never enables it; the static clipmap cameras always do.
+
+The problem it solves is general: **a cached shadow clipmap records its casters
+into an immutable render bundle**, so anything whose draw changes after
+`sealStaticShadowCasters` — an `InstancedMesh` count that moves, a mesh that
+turns invisible on an LOD switch — either freezes at its seal-time appearance
+or vanishes from the shadow. Give the cached maps a separate, never-switched
+proxy at a mid LOD and the main view is free to swap detail underneath it.
+Verified: `InstancedMesh.clone(false)` preserves count, the layer mask, the
+material array and the instance matrices, into its OWN buffer.
+
+Corollary for instanced statics: **per-instance LOD is not free.** An
+`InstancedMesh` draws one range, so differing detail means differing counts,
+which is what breaks the bundle. For a tight formation (the eight figures span
+7.2 m, ~4° at the switch distance) one group-level switch is both cheaper and
+strictly correct.
+
+### Geometry craft confirmed again
+
+- A round stepped plinth wants **one lathe + one extruded prism per flight**.
+  Stacked tread boxes share their side faces exactly — four coplanar walls per
+  flight. Result: 0 z-fight pairs over 4,232 triangles.
+- **Stop a flight one riser below the deck it serves.** Carrying the top tread
+  to deck level puts a tread face in the deck's plane over the whole overlap;
+  letting the plinth's own fascia be the last rise removes the overlap
+  entirely. Same reasoning sinks the flight's ground line 60 mm under the
+  paving instead of closing it at the slab top.
+- A **branch spoke's runout is taken along its own bearing**, so its start
+  point must sit well inside the trunk's half-width — `optimus-spur` starts
+  1.5 m west of the Meridian centreline because a 3 m runout from its old
+  start threw the tip clear of the walk and hung an untrimmed cap of paving off
+  the flank. The coverage raster does not catch that (extra paving is not a
+  hole and not an overlap); only reading the runout geometry does.
+- `tools/paving-coverage.mjs` **crashes on the current region set** —
+  `regionBox` and the label line predate `kind: 'zone'` (the turnout throat)
+  and hit `r.line is not iterable`. Two lines fix it; left alone here because
+  it is outside this change. Until then the paved-floor proof cannot be run.
+
+### EVERY lathe profile must start AND end on the axis (open ones invert)
+
+**This one shipped a frame with an invisible floor.** `revolve` orients a
+CLOSED shell for you whichever direction the profile is authored — but an
+OPEN profile takes its orientation from the profile's direction, and the
+`axis → outward` direction that reads most naturally comes out **inside-out**:
+winding and shading normals both flipped, so the surface is backface-culled
+and you look straight through the object. Measured on a bare disc at y = 1:
+
+```
+OPEN   axis -> outward                       top faces up=0  down=32   INVERTED
+OPEN   outward -> axis                       top faces up=32 down=0    ok
+CLOSED axis -> top -> edge -> soffit -> axis top faces up=32 down=0    ok
+CLOSED the same profile reversed             top faces up=32 down=0    ok
+```
+
+So: giving part of a revolved solid its own material means a second lathe
+(`PartWriter.lathe` takes one slot), and the tempting move — split the profile
+at the material boundary so the two shells share a rim — produces TWO OPEN
+profiles and inverts both. **Make each half a closed solid and let them
+overlap instead**, one containing the other's boundary (see the containment
+rule below). The Optimus plinth's marble slab and cast drum are the worked
+example: the drum's top disc is buried 20 mm inside the slab.
+
+**The geometry gate does not catch this.** `archkit/audit.ts` reported
+`zfight 0 / defects 0` on the inside-out version — it checks coplanarity, not
+orientation. Cheap standing check for any lathe or hand-wound prism: sum the
+signed volume of its triangles about the object's own centre; a closed solid
+must come out POSITIVE and within a few percent of its analytic volume. The
+plinth slab reads +8.47 m³ against π·6²·0.075 = 8.48.
+
+Two related craft points from the same slab:
+
+- **A finish layer wants real thickness.** A material change on a flush face
+  is a colour change; 75 mm of stone with a visible edge band, oversailing the
+  drum by 22 mm, is a slab. The oversail also gives the joint a shadow line
+  instead of a hairline.
+- **Where an oversail lands over a stair, check it as a nosing.** The plinth's
+  slab overhangs the drum 75 mm above the top tread by 22 mm — which is
+  exactly a stair nosing's overhang, so it reads and behaves as one. Had the
+  reveal been at ankle height on the final riser it would have been a
+  toe-catcher.
+
+`materials/library.ts` gained `darkMarble()` (slot `darkStone`). It uses the
+fountain's vein technique — zero-crossings of a folded field over a
+domain-warped 3-D noise, hairlines bundled to the bedding — on a dark palette,
+duplicated deliberately: the shared kit must not import a feature module.
+
+### A fabricated frame has ONE rule: containment, never butting
+
+Posts, beams and a panel cannot meet without either interpenetrating or
+butting — and butting is what makes coplanar pairs. So: **wherever two members
+meet, one must contain the other's boundary completely.** For the Optimus
+marque that meant posts slimmer than the beams in BOTH plan axes, dying 40 mm
+inside the head beam rather than finishing flush with it; the sign carcass
+running 30 mm into each post; each post running down into its own base plate
+rather than sitting on it.
+
+The first pass had flush-topped posts under a flush beam and the geometry gate
+found **469 cm² over 6 pairs** immediately. After the rule: 0. The `clash`
+crossings that remain are exactly those deliberate containments and are the
+correct outcome, not a defect — the same category `archkit/kitBench.ts`
+whitelists.
+
+Corollary worth remembering: a base plate resting ON a deck puts its underside
+in the deck's plane. Bed it 4 mm in. There is room inside any real slab.
+
+### Backlit signs: the image IS the emitter — but crush a PAINTED halo first
+
+For artwork that is a light source on a dark ground (neon, backlit acrylic),
+feed ONE `texture()` node to both `colorNode` and `emissiveNode.mul(rung)`.
+The dark ground stays dark, only the legend crosses the bloom threshold, and
+you never fight a separate glow mask. Pattern already in `parkAmenities`
+(`signs-lit`); the Optimus marque is the second user.
+
+**Caveat that cost two frames:** artwork that ALREADY has a glow baked into it
+double-counts. Emitting the Tesla marque flat at rung 3.4 put **26 % of the
+panel over the bloom threshold** against a true stroke area of **1.53 %** —
+the scene's bloom spread that again and the letter counters filled in solid.
+
+The obvious fix, a power curve on luminance, is a trap: crushed hard enough to
+keep the counters open up close (`lum^6`, 1.42 % blooming) it **collapses
+under mip averaging and the sign switches OFF at distance** — measured peak
+0.68 at mip4, under the threshold. Use TWO terms instead:
+
+- a **core** term, `smoothstep(lo, hi, luminance) · gain`, that only opens on
+  the real strokes — the only term allowed over the threshold, so the only
+  thing that blooms;
+- a **base** term, `luminance · g` with `g < 1`, capped under the threshold by
+  construction, which carries the painted halo as plain lit panel and keeps
+  the sign readable once mips have thinned the strokes.
+
+Marque ships at core `smoothstep(0.62,0.95)·1.7` + base `·0.5`: 2.63 %
+blooming, peak 2.20, and 6.9× less bloom energy than the first version at
+mip4 while still glowing there.
+
+**Measure this, do not eyeball it.** Decoding a PNG in node is ~40 lines
+(parse IHDR/IDAT, `zlib.inflateSync`, undo the per-scanline filters), and
+box-averaging the band in LINEAR light simulates the mip chain. That is what
+turned "it looks mushy" into the table above.
+
+Rules that came with it:
+
+- the lit quad stands a few mm PROUD of its carcass, never coplanar with it;
+- emissive faces do not cast shadows;
+- map a horizontal BAND of the source at its true pixel aspect rather than
+  stretching the whole image onto a wide panel, and mirror the u handedness
+  per side on a double-sided face or the mark reads reversed.
+
+### Driving an animated material: uniform from `ctx.time.sim`, not TSL `time`
+
+The park pauses. TSL's `time` does not, so a material animated on it keeps
+breathing over the pause menu. Feed a `uniform` from `ctx.time.sim` in a
+system's `update()` instead — and feed it `sim % period`, not raw seconds: a
+float32 uniform loses sub-frame resolution after a few hours of clock and the
+animation visibly quantises. (The Optimus visor pulse, `LED_PERIOD = 2 s`.)

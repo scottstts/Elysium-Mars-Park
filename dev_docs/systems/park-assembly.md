@@ -13,6 +13,10 @@
   the planet, Overlook Lounge with the ONLY true-transmission window wall,
   playground with climbing dome/swings/Ares-VII plaque, First Tree plaza
   with soil fill + ring benches + founding plaque).
+- `districts/optimusPlaza.ts` pours the humanoid exhibit's plinth on the
+  `optimus-court` disc (−28, 70) and publishes the deck datum + the eight
+  stances; the figures themselves are an instanced asset owned by
+  `robots/optimusExhibit.ts`. See `dev_docs/systems/optimus-exhibit.md`.
 - `parkAmenities` marches benches/lamps/waste pairs down the paver paths
   with exclusion zones around set-piece areas. Every bench everywhere is a
   registered seat (seat contract: SURFACE point + facing yaw).

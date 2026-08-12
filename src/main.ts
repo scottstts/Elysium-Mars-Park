@@ -17,6 +17,7 @@ import { PhysicsSystem } from './physics/physicsWorld'
 import { InteractionSystem } from './player/interaction'
 import { PlayerSystem } from './player/playerSystem'
 import { enableMainDetailLayer } from './render/layers'
+import { OptimusExhibitSystem } from './robots/optimusExhibit'
 import { RobotsSystem } from './robots/robotsSystem'
 import { VegetationSystem } from './vegetation/vegetationSystem'
 import { RenderPipelineSystem } from './render/pipeline'
@@ -122,6 +123,7 @@ async function boot(): Promise<void> {
     const tram = registry.add(new TramSystem(physics, null, null))
     registry.add(new FreedomElevatorSystem(physics, null, null))
     const robots = registry.add(new RobotsSystem(null))
+    registry.add(new OptimusExhibitSystem())
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
     registry.add(new FountainSystem(physics))
@@ -136,6 +138,7 @@ async function boot(): Promise<void> {
     // must be the elevator so its seated hint wins while a guest rides it.
     registry.add(new FreedomElevatorSystem(physics, player, interaction))
     const robots = registry.add(new RobotsSystem(player))
+    registry.add(new OptimusExhibitSystem())
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
     // The fountain owns its own stone, water and spray; its four coping

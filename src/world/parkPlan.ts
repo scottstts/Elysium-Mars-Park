@@ -109,6 +109,21 @@ export const FREEDOM_TOWER = { x: 33, z: 57, terraceRadius: 12.76, doorAngle: Ma
  */
 export const FOUNTAIN = { x: -38, z: -40, courtRadius: 12.6 }
 
+/**
+ * THE OPTIMUS COURT — the humanoid exhibit standing on the open regolith
+ * between the Amphitheater bowl and the arrival station, off the Meridian
+ * Walk's west flank. Same law as the Fountain and the Freedom Tower: a
+ * monument fronts onto paving, never onto raw regolith, and it is reached by
+ * a real walk (`optimus-spur`) rather than being a plinth in a dune field.
+ *
+ * `courtRadius` is the paved disc; the plinth itself is 6 m, so the court
+ * leaves a 3.4 m promenade all the way round — enough that the four stair
+ * flights (1.1 m of projection each) still land 2.3 m inside the curb.
+ * Everything above the court's paved top is LOCAL to it, in
+ * `world/districts/optimusPlaza.ts`.
+ */
+export const OPTIMUS_COURT = { x: -28, z: 70, courtRadius: 9.4 }
+
 export const RESIDENTIAL = {
   arcRadius: 88,
   /** Angles (rad, from +X axis, CCW toward −Z i.e. north) for 10 habs. */
@@ -248,6 +263,21 @@ export const PATHS: PathSpec[] = [
     surface: 'paver',
   },
   {
+    id: 'optimus-spur',
+    // Meridian Walk → the Optimus court's EAST stair, so the approach lands
+    // head-on to the formation's front rank (the eight face +X). The last
+    // point sits INSIDE the court disc so the two pours share one clipped
+    // seam — ending at the curb would leave a crescent of bare regolith at
+    // the foot of the steps (the `tower-walk` lesson).
+    // Starts 1.5 m west of the Meridian's centreline, not on its east edge:
+    // the 3 m runout below is taken along this leg's own bearing, so a start
+    // any further east would throw the extended tip clear of the walk's
+    // half-width and hang an untrimmed 3.2 m cap of paving off its flank.
+    points: [v(-2.4, 73.2), v(-9, 71.6), v(-17, 70.5), v(-22, 70)],
+    width: 3.2,
+    surface: 'paver',
+  },
+  {
     id: 'gardens-loop',
     points: [
       v(-22, -26),
@@ -284,6 +314,13 @@ export const PADS: PadSpec[] = [
   // one side. Generous skirt (9 m, eased to 16 m) because this pad lands in
   // the middle of open regolith with no neighbouring pour to hide a seam.
   { id: 'fountain', x: FOUNTAIN.x, z: FOUNTAIN.z, y: 0.5, radius: 13.6, skirt: 9 },
+  // Optimus court: the natural grade here runs −0.15…+0.26 across the site,
+  // and a round plinth with four cardinal flights cannot absorb a 0.4 m
+  // swale — every flight's bottom riser would meet the ground at a
+  // different height. y = 0.05 is a shallow fill over the −0.04 centre
+  // grade, with a wide skirt because this pad lands in open regolith with
+  // no neighbouring pour to hide a seam.
+  { id: 'optimus-court', x: OPTIMUS_COURT.x, z: OPTIMUS_COURT.z, y: 0.05, radius: 10.5, skirt: 7 },
   { id: 'works', x: 50, z: -56, y: 0.5, radius: 34, skirt: 12 },
   { id: 'yard', x: 28, z: -70, y: 0.4, radius: 15, skirt: 8 },
   { id: 'playground', x: -22, z: -70, y: 0.4, radius: 10, skirt: 6 },

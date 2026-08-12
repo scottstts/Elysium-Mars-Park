@@ -1,0 +1,4134 @@
+<meta charset="utf-8">
+<title>Tesla Optimus Gen 2 &mdash; three.js WebGPU / TSL port</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0c0e; overflow: hidden; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; left: 14px; top: 12px; z-index: 10;
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #8d939c; letter-spacing: .02em; pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,.8);
+  }
+  #hud b { color: #d7dbe0; font-weight: 600; letter-spacing: .06em; }
+  #hud span { color: #5d636c; }
+  #load {
+    position: fixed; inset: 0; z-index: 20; display: flex;
+    align-items: center; justify-content: center; flex-direction: column;
+    background: #0b0c0e; color: #9aa0a8; gap: 14px;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    transition: opacity .5s ease; letter-spacing: .04em;
+  }
+  #load.done { opacity: 0; pointer-events: none; }
+  #bar { width: 260px; height: 2px; background: #1c1f24; overflow: hidden; }
+  #bar i { display: block; height: 100%; width: 0%; background: #4d9fd4; transition: width .18s ease; }
+  #err {
+    position: fixed; inset: 0; z-index: 30; display: none; padding: 40px;
+    background: #140b0b; color: #e08a8a; overflow: auto; white-space: pre-wrap;
+    font: 12px/1.6 ui-monospace, Menlo, monospace;
+  }
+</style>
+
+<div id="load"><div id="msg">initialising&hellip;</div><div id="bar"><i></i></div></div>
+<div id="hud"></div>
+<pre id="err"></pre>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+/* ==========================================================================
+   Tesla Optimus (Gen 2) -- procedural hard-surface build.
+
+   Direct port of the Blender/bpy build in build/*.py:
+       optlib.py  spec.py  p_torso.py  p_head.py  p_arm.py
+       p_hand.py  p_hip.py  p_leg.py   p_foot.py
+   Geometry and materials only; cameras/lights are NOT ported (see setup.py) --
+   a standard studio rig is used instead.
+
+   Blender's world axes are kept verbatim (Z up, robot faces -Y, origin on the
+   floor between the ankles) so every coordinate below is the same number that
+   appears in the Python source.
+   ========================================================================== */
+
+import * as THREE from 'three';
+import {
+  Fn, vec3, float, uint, positionLocal, mix, clamp, floor, max, select,
+  bumpMap, dFdx, dFdy, length, smoothstep as tslSmoothstep
+} from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const LOAD = document.getElementById('load');
+const MSG = document.getElementById('msg');
+const BAR = document.querySelector('#bar i');
+const HUD = document.getElementById('hud');
+
+function progress(text, frac) {
+  MSG.textContent = text;
+  BAR.style.width = (frac * 100).toFixed(1) + '%';
+  return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+}
+window.addEventListener('error', e => {
+  const el = document.getElementById('err');
+  el.style.display = 'block';
+  el.textContent = (e.error && e.error.stack) || e.message;
+});
+
+/* ==========================================================================
+   1. maths -- ports of optlib.Curve1D, numpy.polyfit and mathutils.Vector
+   ========================================================================== */
+
+const TAU = Math.PI * 2;
+const R = d => d * Math.PI / 180;
+
+/* python's % (result takes the sign of the divisor) */
+const pmod = (a, b) => ((a % b) + b) % b;
+
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function smoothstep(a, b, x) {
+  if (b === a) return 0.0;
+  const t = Math.max(0.0, Math.min(1.0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+/* ---- minimal mathutils.Vector stand-in ---------------------------------- */
+class V3 {
+  constructor(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; }
+  static of(a) { return new V3(a[0], a[1], a[2]); }
+  clone() { return new V3(this.x, this.y, this.z); }
+  add(o) { return new V3(this.x + o.x, this.y + o.y, this.z + o.z); }
+  sub(o) { return new V3(this.x - o.x, this.y - o.y, this.z - o.z); }
+  mul(s) { return new V3(this.x * s, this.y * s, this.z * s); }
+  dot(o) { return this.x * o.x + this.y * o.y + this.z * o.z; }
+  cross(o) {
+    return new V3(this.y * o.z - this.z * o.y,
+                  this.z * o.x - this.x * o.z,
+                  this.x * o.y - this.y * o.x);
+  }
+  get length() { return Math.hypot(this.x, this.y, this.z); }
+  normalized() {
+    const l = this.length;
+    return l > 0 ? new V3(this.x / l, this.y / l, this.z / l) : new V3(0, 0, 0);
+  }
+  /* mathutils normalises in place and leaves a zero vector alone */
+  normalize() {
+    const l = this.length;
+    if (l > 0) { this.x /= l; this.y /= l; this.z /= l; }
+    return this;
+  }
+  toArray() { return [this.x, this.y, this.z]; }
+}
+const vec = (x, y, z) => new V3(x, y, z);
+
+/* ---- interpolation (optlib._pchip_slopes / _spline_slopes / Curve1D) ---- */
+
+function pchipSlopes(xs, ys) {
+  const n = xs.length;
+  if (n === 2) {
+    const d = (ys[1] - ys[0]) / (xs[1] - xs[0]);
+    return [d, d];
+  }
+  const h = [], d = [];
+  for (let i = 0; i < n - 1; i++) {
+    h.push(xs[i + 1] - xs[i]);
+    d.push((ys[i + 1] - ys[i]) / h[i]);
+  }
+  const m = new Array(n).fill(0.0);
+  for (let i = 1; i < n - 1; i++) {
+    if (d[i - 1] * d[i] <= 0.0) m[i] = 0.0;
+    else {
+      const w1 = 2.0 * h[i] + h[i - 1];
+      const w2 = h[i] + 2.0 * h[i - 1];
+      m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]);
+    }
+  }
+  const endslope = (h0, h1, d0, d1) => {
+    let m0 = ((2 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+    if (m0 * d0 <= 0) m0 = 0.0;
+    else if (d0 * d1 <= 0 && Math.abs(m0) > Math.abs(3 * d0)) m0 = 3 * d0;
+    return m0;
+  };
+  const L = h.length, D = d.length;
+  m[0] = endslope(h[0], h[1], d[0], d[1]);
+  m[n - 1] = endslope(h[L - 1], h[L - 2], d[D - 1], d[D - 2]);
+  return m;
+}
+
+/* natural cubic spline -> C2 continuous first derivatives */
+function splineSlopes(xs, ys) {
+  const n = xs.length;
+  if (n < 3) return pchipSlopes(xs, ys);
+  const h = [];
+  for (let i = 0; i < n - 1; i++) h.push(xs[i + 1] - xs[i]);
+  const a = new Array(n).fill(0.0), b = new Array(n).fill(0.0);
+  const c = new Array(n).fill(0.0), r = new Array(n).fill(0.0);
+  b[0] = 2.0 / h[0]; c[0] = 1.0 / h[0];
+  r[0] = 3.0 * (ys[1] - ys[0]) / (h[0] * h[0]);
+  for (let i = 1; i < n - 1; i++) {
+    a[i] = 1.0 / h[i - 1];
+    b[i] = 2.0 * (1.0 / h[i - 1] + 1.0 / h[i]);
+    c[i] = 1.0 / h[i];
+    r[i] = 3.0 * ((ys[i] - ys[i - 1]) / (h[i - 1] ** 2)
+                + (ys[i + 1] - ys[i]) / (h[i] ** 2));
+  }
+  const hl = h[h.length - 1];
+  a[n - 1] = 1.0 / hl; b[n - 1] = 2.0 / hl;
+  r[n - 1] = 3.0 * (ys[n - 1] - ys[n - 2]) / (hl * hl);
+  for (let i = 1; i < n; i++) {                     /* thomas */
+    const w = a[i] / b[i - 1];
+    b[i] -= w * c[i - 1];
+    r[i] -= w * r[i - 1];
+  }
+  const m = new Array(n).fill(0.0);
+  m[n - 1] = r[n - 1] / b[n - 1];
+  for (let i = n - 2; i >= 0; i--) m[i] = (r[i] - c[i] * m[i + 1]) / b[i];
+  return m;
+}
+
+/* piecewise cubic hermite through (x, y) samples */
+class Curve1D {
+  constructor(xs, ys, mode = 'pchip') {
+    /* python sorted(zip(xs, ys)) -- lexicographic on (x, y) */
+    const pair = xs.map((x, i) => [x, ys[i]]).sort((p, q) => (p[0] - q[0]) || (p[1] - q[1]));
+    this.xs = pair.map(p => p[0]);
+    this.ys = pair.map(p => p[1]);
+    this.m = this.xs.length === 1 ? [0.0]
+      : (mode === 'spline' ? splineSlopes(this.xs, this.ys)
+                           : pchipSlopes(this.xs, this.ys));
+  }
+  at(x) {
+    const { xs, ys, m } = this;
+    const n = xs.length;
+    if (n === 1) return ys[0];
+    if (x <= xs[0]) return ys[0] + m[0] * (x - xs[0]);
+    if (x >= xs[n - 1]) return ys[n - 1] + m[n - 1] * (x - xs[n - 1]);
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (xs[mid] <= x) lo = mid; else hi = mid;
+    }
+    const h = xs[hi] - xs[lo];
+    const t = (x - xs[lo]) / h;
+    const t2 = t * t, t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    return h00 * ys[lo] + h10 * h * m[lo] + h01 * ys[hi] + h11 * h * m[hi];
+  }
+}
+/* callable shorthand so ported code reads like the python */
+const curveFn = c => (x => c.at(x));
+
+/* ---- numpy.polyfit / polyval (needed by p_head._Poly) ------------------- */
+
+/* Householder QR least squares: min ||A x - b|| */
+function lstsqQR(A, b, rows, cols) {
+  /* work on copies */
+  const M = A.map(r => r.slice());
+  const y = b.slice();
+  for (let k = 0; k < cols; k++) {
+    let nrm = 0;
+    for (let i = k; i < rows; i++) nrm += M[i][k] * M[i][k];
+    nrm = Math.sqrt(nrm);
+    if (nrm === 0) continue;
+    if (M[k][k] > 0) nrm = -nrm;
+    const v = new Array(rows).fill(0);
+    for (let i = k; i < rows; i++) v[i] = M[i][k];
+    v[k] -= nrm;
+    let vv = 0;
+    for (let i = k; i < rows; i++) vv += v[i] * v[i];
+    if (vv < 1e-300) continue;
+    for (let j = k; j < cols; j++) {
+      let s = 0;
+      for (let i = k; i < rows; i++) s += v[i] * M[i][j];
+      s = 2 * s / vv;
+      for (let i = k; i < rows; i++) M[i][j] -= s * v[i];
+    }
+    let s = 0;
+    for (let i = k; i < rows; i++) s += v[i] * y[i];
+    s = 2 * s / vv;
+    for (let i = k; i < rows; i++) y[i] -= s * v[i];
+  }
+  const x = new Array(cols).fill(0);
+  for (let i = cols - 1; i >= 0; i--) {
+    let s = y[i];
+    for (let j = i + 1; j < cols; j++) s -= M[i][j] * x[j];
+    x[i] = Math.abs(M[i][i]) < 1e-300 ? 0 : s / M[i][i];
+  }
+  return x;
+}
+
+/* np.polyfit(xs, ys, deg, w=w) -- coefficients highest power first */
+function polyfit(xs, ys, deg, w = null) {
+  const n = xs.length, order = deg + 1;
+  const A = [];
+  for (let i = 0; i < n; i++) {
+    const row = new Array(order);
+    let v = 1.0;
+    for (let j = order - 1; j >= 0; j--) { row[j] = v; v *= xs[i]; }
+    A.push(row);
+  }
+  const b = ys.slice();
+  if (w) {
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < order; j++) A[i][j] *= w[i];
+      b[i] *= w[i];
+    }
+  }
+  /* numpy scales the columns before lstsq for conditioning */
+  const scale = new Array(order).fill(0);
+  for (let j = 0; j < order; j++) {
+    let s = 0;
+    for (let i = 0; i < n; i++) s += A[i][j] * A[i][j];
+    scale[j] = Math.sqrt(s) || 1.0;
+  }
+  for (let i = 0; i < n; i++) for (let j = 0; j < order; j++) A[i][j] /= scale[j];
+  const c = lstsqQR(A, b, n, order);
+  for (let j = 0; j < order; j++) c[j] /= scale[j];
+  return c;
+}
+
+function polyval(c, x) {
+  let v = 0.0;
+  for (let i = 0; i < c.length; i++) v = v * x + c[i];
+  return v;
+}
+
+/* ---- Blender mathutils.Vector.to_track_quat + Euler.to_matrix ----------- */
+
+/* 4x4, row-major, applied as p' = M p */
+function mat4Identity() {
+  return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+}
+function mat4Mul(a, b) {
+  const o = new Array(16).fill(0);
+  for (let i = 0; i < 4; i++)
+    for (let j = 0; j < 4; j++) {
+      let s = 0;
+      for (let k = 0; k < 4; k++) s += a[i * 4 + k] * b[k * 4 + j];
+      o[i * 4 + j] = s;
+    }
+  return o;
+}
+function mat4Apply(m, p) {
+  const [x, y, z] = p;
+  return [m[0] * x + m[1] * y + m[2] * z + m[3],
+          m[4] * x + m[5] * y + m[6] * z + m[7],
+          m[8] * x + m[9] * y + m[10] * z + m[11]];
+}
+function mat4Translation(t) {
+  const m = mat4Identity();
+  m[3] = t[0]; m[7] = t[1]; m[11] = t[2];
+  return m;
+}
+function mat4Scale(s) {
+  const m = mat4Identity();
+  m[0] = s[0]; m[5] = s[1]; m[10] = s[2];
+  return m;
+}
+/* Blender eul_to_mat3 for order XYZ  ->  M = Rz * Ry * Rx */
+function mat4FromEulerXYZ(e) {
+  const ci = Math.cos(e[0]), cj = Math.cos(e[1]), ch = Math.cos(e[2]);
+  const si = Math.sin(e[0]), sj = Math.sin(e[1]), sh = Math.sin(e[2]);
+  const cc = ci * ch, cs = ci * sh, sc = si * ch, ss = si * sh;
+  return [cj * ch, sj * sc - cs, sj * cc + ss, 0,
+          cj * sh, sj * ss + cc, sj * cs - sc, 0,
+          -sj,     cj * si,      cj * ci,      0,
+          0,       0,            0,            1];
+}
+/* Matrix.Rotation(angle, 4, axis) */
+function mat4Rotation(angle, axis) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  if (axis === 'X') return [1, 0, 0, 0, 0, c, -s, 0, 0, s, c, 0, 0, 0, 0, 1];
+  if (axis === 'Y') return [c, 0, s, 0, 0, 1, 0, 0, -s, 0, c, 0, 0, 0, 0, 1];
+  return [c, -s, 0, 0, s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+}
+function quatToMat4(q) {
+  const [w, x, y, z] = q;
+  const q0 = Math.SQRT2 * w, q1 = Math.SQRT2 * x;
+  const q2 = Math.SQRT2 * y, q3 = Math.SQRT2 * z;
+  const qda = q0 * q1, qdb = q0 * q2, qdc = q0 * q3;
+  const qaa = q1 * q1, qab = q1 * q2, qac = q1 * q3;
+  const qbb = q2 * q2, qbc = q2 * q3, qcc = q3 * q3;
+  /* Blender quat_to_mat3 writes m[0], m[1], m[2] as the three COLUMNS */
+  const c0 = [1.0 - qbb - qcc, qdc + qab, qac - qdb];
+  const c1 = [qab - qdc, 1.0 - qaa - qcc, qda + qbc];
+  const c2 = [qac + qdb, qbc - qda, 1.0 - qaa - qbb];
+  return [c0[0], c1[0], c2[0], 0,
+          c0[1], c1[1], c2[1], 0,
+          c0[2], c1[2], c2[2], 0,
+          0, 0, 0, 1];
+}
+function quatMul(q1, q2) {                    /* Blender mul_qt_qtqt */
+  const t0 = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3];
+  const t1 = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2];
+  const t2 = q1[0] * q2[2] + q1[2] * q2[0] + q1[3] * q2[1] - q1[1] * q2[3];
+  const t3 = q1[0] * q2[3] + q1[3] * q2[0] + q1[1] * q2[2] - q1[2] * q2[1];
+  return [t0, t1, t2, t3];
+}
+/* Vector.to_track_quat('Z', 'Y') -- Blender vec_to_quat(axis=2, upflag=1) */
+function toTrackQuatZY(v) {
+  const eps = 1e-4;
+  let q = [1, 0, 0, 0];
+  const len = v.length;
+  if (len === 0) return q;
+  const tvec = [v.x, v.y, v.z];                     /* axis 'Z' is index 5 > 2 */
+  const nor = [-tvec[1], tvec[0], 0.0];
+  if (Math.abs(tvec[0]) + Math.abs(tvec[1]) < eps) nor[0] = 1.0;
+  const co = tvec[2] / len;
+  const nl = Math.hypot(nor[0], nor[1], nor[2]);
+  if (nl > 0) { nor[0] /= nl; nor[1] /= nl; nor[2] /= nl; }
+  const ang = Math.acos(Math.max(-1, Math.min(1, co)));
+  const si = Math.sin(ang / 2);
+  q = [Math.cos(ang / 2), nor[0] * si, nor[1] * si, nor[2] * si];
+  /* axis (2) != upflag (1) -> roll correction */
+  const m = quatToMat4(q);
+  const fp = [m[2], m[6], m[10]];                   /* third column of the 3x3 */
+  const angle = -0.5 * Math.atan2(-fp[0], -fp[1]);
+  const co2 = Math.cos(angle), si2 = Math.sin(angle) / len;
+  const q2 = [co2, tvec[0] * si2, tvec[1] * si2, tvec[2] * si2];
+  return quatMul(q2, q);
+}
+
+/* ==========================================================================
+   2. mesh container + the Blender operations optlib relies on
+        weld()   -> bmesh.ops.remove_doubles + recalc_face_normals
+        shade()  -> polygon use_smooth + edge sharp marking
+        xform()  -> Mesh.transform()
+      Faces stay as n-gons until the very end so polygon normals and the
+      bevel see exactly the topology Blender saw.
+   ========================================================================== */
+
+const FG_ORIG = 0;      /* face came from the generator                       */
+const FG_BEVEL = 1;     /* face produced by the bevel modifier (hard normals) */
+
+class Mesh {
+  constructor(name, verts = [], faces = []) {
+    this.name = name;
+    this.v = verts.map(p => [p[0], p[1], p[2]]);
+    this.f = faces.map(t => Array.from(t));
+    this.fm = this.f.map(() => 0);       /* material slot per face            */
+    this.fg = this.f.map(() => FG_ORIG); /* face group                        */
+    this.mats = [];                      /* material names, indexed by fm     */
+    this.smooth = true;                  /* polygon use_smooth                */
+    this.sharpDeg = null;                /* shade(..., sharp_angle)           */
+    this.bevel = null;                   /* pending BEVEL modifier            */
+  }
+
+  clone(name) {
+    const m = new Mesh(name || this.name, this.v, this.f);
+    m.fm = this.fm.slice(); m.fg = this.fg.slice(); m.mats = this.mats.slice();
+    m.smooth = this.smooth; m.sharpDeg = this.sharpDeg;
+    m.bevel = this.bevel ? { ...this.bevel } : null;
+    return m;
+  }
+
+  transform(m4) { this.v = this.v.map(p => mat4Apply(m4, p)); return this; }
+
+  flipNormals() { this.f = this.f.map(t => t.slice().reverse()); return this; }
+
+  /* polygon normal, Blender/Newell */
+  faceNormal(fi) {
+    const t = this.f[fi], n = t.length;
+    let nx = 0, ny = 0, nz = 0;
+    for (let i = 0; i < n; i++) {
+      const a = this.v[t[i]], b = this.v[t[(i + 1) % n]];
+      nx += (a[1] - b[1]) * (a[2] + b[2]);
+      ny += (a[2] - b[2]) * (a[0] + b[0]);
+      nz += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    const l = Math.hypot(nx, ny, nz);
+    return l > 0 ? [nx / l, ny / l, nz / l] : [0, 0, 1];
+  }
+
+  faceCentre(fi) {
+    const t = this.f[fi];
+    let x = 0, y = 0, z = 0;
+    for (const i of t) { x += this.v[i][0]; y += this.v[i][1]; z += this.v[i][2]; }
+    return [x / t.length, y / t.length, z / t.length];
+  }
+
+  get faceCount() { return this.f.length; }
+}
+
+/* ---- bmesh.ops.remove_doubles ------------------------------------------ */
+/* Blender merges each duplicate into the first vertex it finds within
+   `dist`, keeping that vertex's coordinates; then faces that end up with
+   fewer than three distinct corners are deleted.  This is what collapses the
+   1e-6 "pole" rings of loft() into a single point and what removes the
+   zero-width seam ring of pillow(). */
+const cellHash = (gx, gy, gz) => (Math.imul(gx, 73856093) ^ Math.imul(gy, 19349663) ^ Math.imul(gz, 83492791)) | 0;
+
+function weldVerts(mesh, dist = 2e-5) {
+  const n = mesh.v.length;
+  const cell = Math.max(dist, 1e-9) * 2.0;
+  const grid = new Map();
+  const map = new Int32Array(n).fill(-1);
+  const newV = [];
+  const d2 = dist * dist;
+  for (let i = 0; i < n; i++) {
+    const p = mesh.v[i];
+    const gx = Math.floor(p[0] / cell), gy = Math.floor(p[1] / cell), gz = Math.floor(p[2] / cell);
+    let found = -1;
+    for (let a = -1; a <= 1 && found < 0; a++)
+      for (let b = -1; b <= 1 && found < 0; b++)
+        for (let c = -1; c <= 1 && found < 0; c++) {
+          const bucket = grid.get(cellHash(gx + a, gy + b, gz + c));
+          if (!bucket) continue;
+          for (let bi = 0; bi < bucket.length; bi++) {
+            const q = newV[bucket[bi]];
+            const dx = q[0] - p[0], dy = q[1] - p[1], dz = q[2] - p[2];
+            if (dx * dx + dy * dy + dz * dz <= d2) { found = bucket[bi]; break; }
+          }
+        }
+    if (found >= 0) { map[i] = found; continue; }
+    const idx = newV.length;
+    newV.push([p[0], p[1], p[2]]);
+    map[i] = idx;
+    const k = cellHash(gx, gy, gz);
+    let bucket = grid.get(k);
+    if (!bucket) { bucket = []; grid.set(k, bucket); }
+    bucket.push(idx);
+  }
+
+  const nf = [], nfm = [], nfg = [];
+  const seen = new Set();
+  for (let fi = 0; fi < mesh.f.length; fi++) {
+    const src = mesh.f[fi];
+    const out = [];
+    for (const vi of src) {
+      const m = map[vi];
+      if (out.length === 0 || out[out.length - 1] !== m) out.push(m);
+    }
+    while (out.length > 1 && out[0] === out[out.length - 1]) out.pop();
+    if (out.length < 3) continue;
+    /* drop exact duplicate faces (same corner set) the way bmesh does */
+    const sig = out.slice().sort((a, b) => a - b).join(',');
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    nf.push(out); nfm.push(mesh.fm[fi]); nfg.push(mesh.fg[fi]);
+  }
+  mesh.v = newV; mesh.f = nf; mesh.fm = nfm; mesh.fg = nfg;
+  return mesh;
+}
+
+/* ---- bmesh.ops.recalc_face_normals ------------------------------------- */
+/* make each connected shell consistently wound, then flip whole shells whose
+   enclosed signed volume is negative (i.e. point them outward) */
+function recalcFaceNormals(mesh) {
+  const F = mesh.f;
+  const nf = F.length;
+  if (!nf) return mesh;
+
+  /* edge -> list of (face, dir) */
+  const EK = mesh.v.length + 1;
+  const ekey = (a, b) => (a < b ? a * EK + b : b * EK + a);
+  const edges = new Map();
+  for (let fi = 0; fi < nf; fi++) {
+    const t = F[fi], n = t.length;
+    for (let i = 0; i < n; i++) {
+      const a = t[i], b = t[(i + 1) % n];
+      const k = ekey(a, b);
+      let e = edges.get(k);
+      if (!e) { e = []; edges.set(k, e); }
+      e.push([fi, a < b ? 1 : -1]);
+    }
+  }
+
+  const flip = new Uint8Array(nf);
+  const comp = new Int32Array(nf).fill(-1);
+  let nComp = 0;
+  const adj = new Array(nf); for (let i = 0; i < nf; i++) adj[i] = [];
+  for (const e of edges.values()) {
+    if (e.length !== 2) continue;
+    adj[e[0][0]].push([e[1][0], e[0][1] === e[1][1]]);   /* true -> needs flip */
+    adj[e[1][0]].push([e[0][0], e[0][1] === e[1][1]]);
+  }
+  for (let s = 0; s < nf; s++) {
+    if (comp[s] >= 0) continue;
+    const stack = [s];
+    comp[s] = nComp; flip[s] = 0;
+    const members = [s];
+    while (stack.length) {
+      const fi = stack.pop();
+      for (const [fj, needFlip] of adj[fi]) {
+        if (comp[fj] >= 0) continue;
+        comp[fj] = nComp;
+        flip[fj] = needFlip ? (flip[fi] ^ 1) : flip[fi];
+        members.push(fj);
+        stack.push(fj);
+      }
+    }
+    /* signed volume of this shell with the tentative winding */
+    let vol = 0;
+    for (const fi of members) {
+      const t = F[fi];
+      const ord = flip[fi] ? t.slice().reverse() : t;
+      const p0 = mesh.v[ord[0]];
+      for (let i = 1; i < ord.length - 1; i++) {
+        const p1 = mesh.v[ord[i]], p2 = mesh.v[ord[i + 1]];
+        vol += (p0[0] * (p1[1] * p2[2] - p1[2] * p2[1])
+              - p0[1] * (p1[0] * p2[2] - p1[2] * p2[0])
+              + p0[2] * (p1[0] * p2[1] - p1[1] * p2[0])) / 6.0;
+      }
+    }
+    if (vol < 0) for (const fi of members) flip[fi] ^= 1;
+    nComp++;
+  }
+  for (let fi = 0; fi < nf; fi++) if (flip[fi]) F[fi] = F[fi].slice().reverse();
+  return mesh;
+}
+
+/* optlib.weld */
+function weld(mesh, dist = 2e-5) {
+  weldVerts(mesh, dist);
+  recalcFaceNormals(mesh);
+  return mesh;
+}
+
+/* optlib.shade */
+function shade(mesh, smooth = true, sharpAngle = null) {
+  mesh.smooth = smooth;
+  mesh.sharpDeg = sharpAngle;
+  return mesh;
+}
+
+/* optlib.setmat */
+function setmat(mesh, name, slot = 0) {
+  while (mesh.mats.length <= slot) mesh.mats.push(name);
+  mesh.mats[slot] = name;
+  return mesh;
+}
+
+/* optlib.xform -- bakes T * R * S into the mesh data */
+function xform(mesh, { loc = [0, 0, 0], rot = [0, 0, 0], scale = [1, 1, 1] } = {}) {
+  const m = mat4Mul(mat4Mul(mat4Translation(loc),
+                            mat4FromEulerXYZ(rot.map(R))),
+                    mat4Scale(scale));
+  return mesh.transform(m);
+}
+
+/* optlib.mirror_dup */
+function mirrorDup(mesh, name, axis = 'x') {
+  const s = { x: [-1, 1, 1], y: [1, -1, 1], z: [1, 1, -1] }[axis];
+  const m = mesh.clone(name || (mesh.name + '_R'));
+  m.transform(mat4Scale(s));
+  m.flipNormals();
+  return m;
+}
+
+/* optlib.join -- merge meshes into the first (all transforms already baked) */
+function join(meshes, name = null) {
+  const base = meshes[0];
+  for (let k = 1; k < meshes.length; k++) {
+    const o = meshes[k];
+    const off = base.v.length;
+    for (const p of o.v) base.v.push(p.slice());
+    for (let i = 0; i < o.f.length; i++) {
+      base.f.push(o.f[i].map(x => x + off));
+      base.fm.push(o.fm[i]);
+      base.fg.push(o.fg[i]);
+    }
+  }
+  if (name) base.name = name;
+  return base;
+}
+
+/* ==========================================================================
+   split normals -- Blender's angle-weighted vertex normals with fans bounded
+   by sharp edges.  Faces produced by the bevel are their own flat island, the
+   way "Harden Normals" keeps a beveled edge reading as a crisp corner.
+   ========================================================================== */
+function computeCornerNormals(mesh) {
+  const F = mesh.f, V = mesh.v, nf = F.length;
+  const fn = new Array(nf);
+  for (let i = 0; i < nf; i++) fn[i] = mesh.faceNormal(i);
+
+  const corners = [];                       /* per face, per corner normal */
+  for (let i = 0; i < nf; i++) corners.push(new Array(F[i].length));
+
+  if (!mesh.smooth) {                       /* shade flat */
+    for (let i = 0; i < nf; i++) for (let k = 0; k < F[i].length; k++) corners[i][k] = fn[i];
+    return { fn, corners };
+  }
+
+  /* bevel faces keep their own geometric normal */
+  for (let i = 0; i < nf; i++)
+    if (mesh.fg[i] === FG_BEVEL)
+      for (let k = 0; k < F[i].length; k++) corners[i][k] = fn[i];
+
+  /* sharp-edge marking (optlib.shade with a sharp_angle) */
+  const EK = V.length + 1;
+  const ekey = (a, b) => (a < b ? a * EK + b : b * EK + a);
+  let sharpSet = null;
+  if (mesh.sharpDeg !== null) {
+    sharpSet = new Set();
+    const lim = Math.cos(R(mesh.sharpDeg));
+    const em = new Map();
+    for (let fi = 0; fi < nf; fi++) {
+      const t = F[fi], n = t.length;
+      for (let i = 0; i < n; i++) {
+        const k = ekey(t[i], t[(i + 1) % n]);
+        let e = em.get(k); if (!e) { e = []; em.set(k, e); }
+        e.push(fi);
+      }
+    }
+    for (const [k, fs] of em) {
+      if (fs.length !== 2) continue;
+      const d = fn[fs[0]][0] * fn[fs[1]][0] + fn[fs[0]][1] * fn[fs[1]][1] + fn[fs[0]][2] * fn[fs[1]][2];
+      if (d < lim) sharpSet.add(k);
+    }
+  }
+
+  /* gather the original-face corners at each vertex */
+  const atVert = new Map();
+  for (let fi = 0; fi < nf; fi++) {
+    if (mesh.fg[fi] !== FG_ORIG) continue;
+    const t = F[fi];
+    for (let k = 0; k < t.length; k++) {
+      let l = atVert.get(t[k]); if (!l) { l = []; atVert.set(t[k], l); }
+      l.push([fi, k]);
+    }
+  }
+
+  const cornerAngle = (fi, k) => {
+    const t = F[fi], n = t.length;
+    const p = V[t[k]], a = V[t[(k + n - 1) % n]], b = V[t[(k + 1) % n]];
+    const u = [a[0] - p[0], a[1] - p[1], a[2] - p[2]];
+    const w = [b[0] - p[0], b[1] - p[1], b[2] - p[2]];
+    const lu = Math.hypot(u[0], u[1], u[2]), lw = Math.hypot(w[0], w[1], w[2]);
+    if (lu < 1e-12 || lw < 1e-12) return 0;
+    const c = (u[0] * w[0] + u[1] * w[1] + u[2] * w[2]) / (lu * lw);
+    return Math.acos(Math.max(-1, Math.min(1, c)));
+  };
+
+  for (const [vi, list] of atVert) {
+    let groups;
+    if (!sharpSet) {
+      groups = [list];                                 /* one smooth fan */
+    } else {
+      /* union corners that share a non-sharp edge at this vertex */
+      const parent = list.map((_, i) => i);
+      const find = a => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+      const uni = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[b] = a; };
+      /* edge at this vertex -> corners of the two faces sharing it */
+      const byEdge = new Map();
+      for (let i = 0; i < list.length; i++) {
+        const [fi, k] = list[i];
+        const t = F[fi], n = t.length;
+        for (const other of [t[(k + 1) % n], t[(k + n - 1) % n]]) {
+          const kk = ekey(vi, other);
+          let e = byEdge.get(kk); if (!e) { e = []; byEdge.set(kk, e); }
+          e.push(i);
+        }
+      }
+      for (const [ek, cs] of byEdge) {
+        if (sharpSet.has(ek) || cs.length < 2) continue;
+        for (let i = 1; i < cs.length; i++) uni(cs[0], cs[i]);
+      }
+      const buckets = new Map();
+      for (let i = 0; i < list.length; i++) {
+        const rt = find(i);
+        let g = buckets.get(rt); if (!g) { g = []; buckets.set(rt, g); }
+        g.push(list[i]);
+      }
+      groups = [...buckets.values()];
+    }
+    for (const g of groups) {
+      let nx = 0, ny = 0, nz = 0;
+      for (const [fi, k] of g) {
+        const w = cornerAngle(fi, k);
+        nx += fn[fi][0] * w; ny += fn[fi][1] * w; nz += fn[fi][2] * w;
+      }
+      const l = Math.hypot(nx, ny, nz);
+      const nrm = l > 1e-12 ? [nx / l, ny / l, nz / l] : fn[g[0][0]];
+      for (const [fi, k] of g) corners[fi][k] = nrm;
+    }
+  }
+  /* any corner the loop above missed (isolated face) falls back to flat */
+  for (let i = 0; i < nf; i++)
+    for (let k = 0; k < F[i].length; k++)
+      if (!corners[i][k]) corners[i][k] = fn[i];
+  return { fn, corners };
+}
+
+/* ==========================================================================
+   3. boolean DIFFERENCE  (optlib.boolean, solver="EXACT")
+      BSP solid subtraction.  Only the target faces whose bounds overlap the
+      cutter take part -- every cutter in this build is a small extruded
+      rounded-rectangle, so the rest of the shell passes straight through.
+   ========================================================================== */
+
+const CSG_EPS = 1e-9;
+
+class CPlane {
+  constructor(normal, w) { this.n = normal; this.w = w; }
+  static fromPoints(a, b, c) {
+    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz);
+    if (l < 1e-18) return null;
+    nx /= l; ny /= l; nz /= l;
+    return new CPlane([nx, ny, nz], nx * a[0] + ny * a[1] + nz * a[2]);
+  }
+  flip() { this.n = [-this.n[0], -this.n[1], -this.n[2]]; this.w = -this.w; }
+  /* split `poly` into the four buckets (csg.js) */
+  splitPolygon(poly, cf, cb, f, b) {
+    const COPLANAR = 0, FRONT = 1, BACK = 2, SPANNING = 3;
+    let type = 0;
+    const types = [];
+    for (let i = 0; i < poly.verts.length; i++) {
+      const v = poly.verts[i];
+      const t = this.n[0] * v[0] + this.n[1] * v[1] + this.n[2] * v[2] - this.w;
+      const ty = t < -CSG_EPS ? BACK : (t > CSG_EPS ? FRONT : COPLANAR);
+      type |= ty;
+      types.push(ty);
+    }
+    switch (type) {
+      case COPLANAR: {
+        const d = this.n[0] * poly.plane.n[0] + this.n[1] * poly.plane.n[1] + this.n[2] * poly.plane.n[2];
+        (d > 0 ? cf : cb).push(poly);
+        break;
+      }
+      case FRONT: f.push(poly); break;
+      case BACK: b.push(poly); break;
+      case SPANNING: {
+        const fv = [], bv = [];
+        const n = poly.verts.length;
+        for (let i = 0; i < n; i++) {
+          const j = (i + 1) % n;
+          const ti = types[i], tj = types[j];
+          const vi = poly.verts[i], vj = poly.verts[j];
+          if (ti !== BACK) fv.push(vi);
+          if (ti !== FRONT) bv.push(vi);
+          if ((ti | tj) === SPANNING) {
+            const di = this.n[0] * vi[0] + this.n[1] * vi[1] + this.n[2] * vi[2] - this.w;
+            const dj = this.n[0] * vj[0] + this.n[1] * vj[1] + this.n[2] * vj[2] - this.w;
+            const t = di / (di - dj);
+            const p = [vi[0] + (vj[0] - vi[0]) * t,
+                       vi[1] + (vj[1] - vi[1]) * t,
+                       vi[2] + (vj[2] - vi[2]) * t];
+            fv.push(p); bv.push(p);
+          }
+        }
+        if (fv.length >= 3) f.push({ verts: fv, plane: poly.plane, mat: poly.mat });
+        if (bv.length >= 3) b.push({ verts: bv, plane: poly.plane, mat: poly.mat });
+        break;
+      }
+    }
+  }
+}
+
+function cpolyFlip(p) {
+  const pl = new CPlane(p.plane.n.slice(), p.plane.w);
+  pl.flip();
+  return { verts: p.verts.slice().reverse(), plane: pl, mat: p.mat };
+}
+
+class CNode {
+  constructor(polys) {
+    this.plane = null; this.front = null; this.back = null; this.polygons = [];
+    if (polys && polys.length) this.build(polys);
+  }
+  invert() {
+    this.polygons = this.polygons.map(cpolyFlip);
+    if (this.plane) this.plane.flip();
+    if (this.front) this.front.invert();
+    if (this.back) this.back.invert();
+    const t = this.front; this.front = this.back; this.back = t;
+  }
+  clipPolygons(polys) {
+    if (!this.plane) return polys.slice();
+    let f = [], b = [];
+    for (const p of polys) this.plane.splitPolygon(p, f, b, f, b);
+    if (this.front) f = this.front.clipPolygons(f);
+    b = this.back ? this.back.clipPolygons(b) : [];
+    return f.concat(b);
+  }
+  clipTo(node) {
+    this.polygons = node.clipPolygons(this.polygons);
+    if (this.front) this.front.clipTo(node);
+    if (this.back) this.back.clipTo(node);
+  }
+  allPolygons() {
+    let r = this.polygons.slice();
+    if (this.front) r = r.concat(this.front.allPolygons());
+    if (this.back) r = r.concat(this.back.allPolygons());
+    return r;
+  }
+  /* pick a splitting plane that balances instead of always taking polys[0]:
+     the shells here are curved, and a first-polygon split degenerates into a
+     linear tree that turns the build quadratic. */
+  pickPlane(polys) {
+    const tries = Math.min(polys.length, 12);
+    let best = null, bestScore = Infinity;
+    const step = Math.max(1, Math.floor(polys.length / tries));
+    for (let s = 0; s < polys.length; s += step) {
+      const pl = polys[s].plane;
+      let f = 0, b = 0, sp = 0;
+      const stride = Math.max(1, Math.floor(polys.length / 60));
+      let cnt = 0;
+      for (let i = 0; i < polys.length; i += stride) {
+        cnt++;
+        let hasF = false, hasB = false;
+        for (const v of polys[i].verts) {
+          const t = pl.n[0] * v[0] + pl.n[1] * v[1] + pl.n[2] * v[2] - pl.w;
+          if (t > CSG_EPS) hasF = true; else if (t < -CSG_EPS) hasB = true;
+        }
+        if (hasF && hasB) sp++; else if (hasF) f++; else b++;
+      }
+      const score = sp * 3 + Math.abs(f - b);
+      if (score < bestScore) { bestScore = score; best = s; }
+      void cnt;
+    }
+    return best === null ? 0 : best;
+  }
+  build(polys) {
+    if (!polys.length) return;
+    if (!this.plane) {
+      const pi = this.pickPlane(polys);
+      this.plane = new CPlane(polys[pi].plane.n.slice(), polys[pi].plane.w);
+    }
+    const f = [], b = [];
+    for (const p of polys) this.plane.splitPolygon(p, this.polygons, this.polygons, f, b);
+    if (f.length) { if (!this.front) this.front = new CNode(null); this.front.build(f); }
+    if (b.length) { if (!this.back) this.back = new CNode(null); this.back.build(b); }
+  }
+}
+
+function meshToPolys(mesh, indices = null) {
+  const out = [];
+  const list = indices || mesh.f.map((_, i) => i);
+  for (const fi of list) {
+    const t = mesh.f[fi];
+    const p0 = mesh.v[t[0]];
+    for (let i = 1; i < t.length - 1; i++) {
+      const a = p0, b = mesh.v[t[i]], c = mesh.v[t[i + 1]];
+      const pl = CPlane.fromPoints(a, b, c);
+      if (!pl) continue;
+      out.push({ verts: [a.slice(), b.slice(), c.slice()], plane: pl, mat: mesh.fm[fi] });
+    }
+  }
+  return out;
+}
+
+function meshBounds(mesh, indices = null) {
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  const list = indices || mesh.f.map((_, i) => i);
+  for (const fi of list)
+    for (const vi of mesh.f[fi])
+      for (let k = 0; k < 3; k++) {
+        mn[k] = Math.min(mn[k], mesh.v[vi][k]);
+        mx[k] = Math.max(mx[k], mesh.v[vi][k]);
+      }
+  return [mn, mx];
+}
+
+/* optlib.boolean(a, b, "DIFFERENCE") -- a := a - b, in place */
+function booleanDifference(A, B) {
+  const [bmn, bmx] = meshBounds(B);
+  const pad = 1e-4;
+  const near = [], far = [];
+  for (let fi = 0; fi < A.f.length; fi++) {
+    let hit = true;
+    const t = A.f[fi];
+    const fmn = [Infinity, Infinity, Infinity], fmx = [-Infinity, -Infinity, -Infinity];
+    for (const vi of t) for (let k = 0; k < 3; k++) {
+      fmn[k] = Math.min(fmn[k], A.v[vi][k]);
+      fmx[k] = Math.max(fmx[k], A.v[vi][k]);
+    }
+    for (let k = 0; k < 3; k++)
+      if (fmx[k] < bmn[k] - pad || fmn[k] > bmx[k] + pad) { hit = false; break; }
+    (hit ? near : far).push(fi);
+  }
+
+  const a = new CNode(meshToPolys(A, near));
+  const b = new CNode(meshToPolys(B));
+  a.invert(); a.clipTo(b); b.clipTo(a); b.invert(); b.clipTo(a); b.invert();
+  a.build(b.allPolygons()); a.invert();
+  const result = a.allPolygons();
+
+  /* rebuild the mesh: untouched faces + the CSG fragments */
+  const nv = [], nf = [], nfm = [], nfg = [];
+  const remap = new Map();
+  const push = p => {
+    const k = `${Math.round(p[0] * 1e9)},${Math.round(p[1] * 1e9)},${Math.round(p[2] * 1e9)}`;
+    let i = remap.get(k);
+    if (i === undefined) { i = nv.length; nv.push(p.slice()); remap.set(k, i); }
+    return i;
+  };
+  for (const fi of far) {
+    nf.push(A.f[fi].map(vi => push(A.v[vi])));
+    nfm.push(A.fm[fi]); nfg.push(A.fg[fi]);
+  }
+  for (const p of result) {
+    if (p.verts.length < 3) continue;
+    const idx = p.verts.map(push);
+    const uniq = [];
+    for (const i of idx) if (!uniq.length || uniq[uniq.length - 1] !== i) uniq.push(i);
+    while (uniq.length > 1 && uniq[0] === uniq[uniq.length - 1]) uniq.pop();
+    if (uniq.length < 3) continue;
+    nf.push(uniq); nfm.push(p.mat | 0); nfg.push(FG_ORIG);
+  }
+  A.v = nv; A.f = nf; A.fm = nfm; A.fg = nfg;
+
+  /* stitch the fragments back into a connected shell and drop slivers */
+  weldVerts(A, 1e-7);
+  const keep = [], keepM = [], keepG = [];
+  for (let fi = 0; fi < A.f.length; fi++) {
+    const t = A.f[fi];
+    let area = 0;
+    const p0 = A.v[t[0]];
+    for (let i = 1; i < t.length - 1; i++) {
+      const p1 = A.v[t[i]], p2 = A.v[t[i + 1]];
+      const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+      const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+      area += 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    }
+    if (area < 1e-13) continue;
+    keep.push(t); keepM.push(A.fm[fi]); keepG.push(A.fg[fi]);
+  }
+  A.f = keep; A.fm = keepM; A.fg = keepG;
+  /* the BSP already emits outward-facing polygons and the untouched faces
+     kept their original winding, so orientation must NOT be re-derived here:
+     a CSG result has T-junctions, and a volume test over the fragments they
+     disconnect would flip patches at random. */
+  return A;
+}
+
+/* ==========================================================================
+   4. BEVEL modifier  (optlib.add_bevel: limit=ANGLE, clamp_overlap,
+      harden_normals, profile 0.62)
+
+      Every mesh in this build is shaded fully smooth (optlib.finish always
+      passes sharp=None), so on the lofted shells the angle limit rejects
+      every edge and this is a no-op.  Where it bites is the genuinely hard
+      geometry: the extruded rounded-rectangle plates, the n-gon end caps and
+      the rims of the boolean recesses.  There "Harden Normals" is what keeps
+      those edges reading as crisp corners with a thin highlight instead of
+      smearing into a rounded blob, so the new faces are emitted as their own
+      flat-shaded island (FG_BEVEL).
+   ========================================================================== */
+
+function applyBevel(mesh, width, segments, angleDeg, profile = 0.62) {
+  if (!width || width <= 0) return mesh;
+  const V = mesh.v, F = mesh.f, nf = F.length;
+  if (!nf) return mesh;
+
+  const fn = new Array(nf);
+  for (let i = 0; i < nf; i++) fn[i] = mesh.faceNormal(i);
+
+  const EK = V.length + 1;
+  const ekey = (a, b) => (a < b ? a * EK + b : b * EK + a);
+
+  /* edge -> the faces on it */
+  const em = new Map();
+  for (let fi = 0; fi < nf; fi++) {
+    const t = F[fi], n = t.length;
+    for (let i = 0; i < n; i++) {
+      const k = ekey(t[i], t[(i + 1) % n]);
+      let e = em.get(k);
+      if (!e) { e = { a: Math.min(t[i], t[(i + 1) % n]), b: Math.max(t[i], t[(i + 1) % n]), faces: [] }; em.set(k, e); }
+      e.faces.push(fi);
+    }
+  }
+
+  /* which edges the angle limit selects */
+  const lim = Math.cos(R(angleDeg));
+  const bev = new Set();
+  for (const [k, e] of em) {
+    if (e.faces.length !== 2) continue;
+    const n0 = fn[e.faces[0]], n1 = fn[e.faces[1]];
+    const d = n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2];
+    if (d < lim) bev.add(k);
+  }
+  if (bev.size === 0) return mesh;
+
+  /* corners at each vertex, and the count of beveled edges there */
+  const atVert = new Map();
+  for (let fi = 0; fi < nf; fi++) {
+    const t = F[fi];
+    for (let k = 0; k < t.length; k++) {
+      let l = atVert.get(t[k]); if (!l) { l = []; atVert.set(t[k], l); }
+      l.push([fi, k]);
+    }
+  }
+  const bevAtVert = new Map();
+  for (const [k, e] of em) {
+    if (!bev.has(k)) continue;
+    for (const v of [e.a, e.b]) {
+      let l = bevAtVert.get(v); if (!l) { l = []; bevAtVert.set(v, l); }
+      l.push(k);
+    }
+  }
+
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const len3 = a => Math.hypot(a[0], a[1], a[2]);
+  const nrm3 = a => { const l = len3(a); return l > 0 ? [a[0] / l, a[1] / l, a[2] / l] : [0, 0, 0]; };
+
+  /* offset of one corner inside its own face */
+  function cornerPos(fi, k) {
+    const t = F[fi], n = t.length;
+    const vi = t[k], pv = t[(k + n - 1) % n], nx = t[(k + 1) % n];
+    const p = V[vi];
+    const ep = sub(V[pv], p), en = sub(V[nx], p);
+    const lp = len3(ep), ln = len3(en);
+    if (lp < 1e-12 || ln < 1e-12) return p.slice();
+    const dP = [ep[0] / lp, ep[1] / lp, ep[2] / lp];
+    const dN = [en[0] / ln, en[1] / ln, en[2] / ln];
+    const bp = bev.has(ekey(vi, pv)), bn = bev.has(ekey(vi, nx));
+    if (!bp && !bn) return p.slice();
+    const cx = dP[1] * dN[2] - dP[2] * dN[1];
+    const cy = dP[2] * dN[0] - dP[0] * dN[2];
+    const cz = dP[0] * dN[1] - dP[1] * dN[0];
+    const sinT = Math.hypot(cx, cy, cz);
+    if (sinT < 1e-6) return p.slice();
+    let a = 0, b = 0;
+    if (bp && bn) { a = width / sinT; b = width / sinT; }
+    else if (bn) { a = width / sinT; }
+    else { b = width / sinT; }
+    a = Math.min(a, 0.45 * lp);                 /* clamp_overlap */
+    b = Math.min(b, 0.45 * ln);
+    return [p[0] + dP[0] * a + dN[0] * b,
+            p[1] + dP[1] * a + dN[1] * b,
+            p[2] + dP[2] * a + dN[2] * b];
+  }
+
+  /* sectors: faces around a vertex joined through NON-beveled edges */
+  const sectorOf = new Map();      /* `${fi}:${k}` -> sector id (per vertex)  */
+  const sectorPos = new Map();     /* `${vi}:${sid}` -> position              */
+  const sectorList = new Map();    /* vi -> [sid...]                          */
+
+  for (const [vi, list] of atVert) {
+    const nb = bevAtVert.get(vi);
+    if (!nb || nb.length < 2) {                 /* untouched, or a bevel end */
+      for (const [fi, k] of list) sectorOf.set(fi + ':' + k, 0);
+      sectorPos.set(vi + ':0', V[vi].slice());
+      sectorList.set(vi, [0]);
+      continue;
+    }
+    const parent = list.map((_, i) => i);
+    const find = a => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    const uni = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[b] = a; };
+    const byEdge = new Map();
+    for (let i = 0; i < list.length; i++) {
+      const [fi, k] = list[i];
+      const t = F[fi], n = t.length;
+      for (const other of [t[(k + 1) % n], t[(k + n - 1) % n]]) {
+        const kk = ekey(vi, other);
+        let e = byEdge.get(kk); if (!e) { e = []; byEdge.set(kk, e); }
+        e.push(i);
+      }
+    }
+    for (const [ek2, cs] of byEdge) {
+      if (bev.has(ek2)) continue;
+      for (let i = 1; i < cs.length; i++) uni(cs[0], cs[i]);
+    }
+    const groups = new Map();
+    for (let i = 0; i < list.length; i++) {
+      const rt = find(i);
+      let g = groups.get(rt); if (!g) { g = []; groups.set(rt, g); }
+      g.push(i);
+    }
+    let sid = 0;
+    const ids = [];
+    for (const g of groups.values()) {
+      let px = 0, py = 0, pz = 0;
+      for (const i of g) {
+        const c = cornerPos(list[i][0], list[i][1]);
+        px += c[0]; py += c[1]; pz += c[2];
+      }
+      const pos = [px / g.length, py / g.length, pz / g.length];
+      for (const i of g) sectorOf.set(list[i][0] + ':' + list[i][1], sid);
+      sectorPos.set(vi + ':' + sid, pos);
+      ids.push(sid);
+      sid++;
+    }
+    sectorList.set(vi, ids);
+  }
+
+  /* ---- emit ------------------------------------------------------------ */
+  const nv = [];
+  const push = p => { nv.push([p[0], p[1], p[2]]); return nv.length - 1; };
+  const svIdx = new Map();
+  const sectorVert = (vi, sid) => {
+    const k = vi + ':' + sid;
+    let i = svIdx.get(k);
+    if (i === undefined) { i = push(sectorPos.get(k)); svIdx.set(k, i); }
+    return i;
+  };
+
+  /* superellipse profile: x^r + y^r = 1, r = 2 is a circular bevel */
+  const pr = Math.min(24, Math.max(0.2, 2.0 * profile / (1.0 - profile)));
+  const pexp = 2.0 / pr;
+  const arcCache = new Map();
+  function arcAt(vi, sA, sB) {
+    const flip = sA > sB;
+    const lo = flip ? sB : sA, hi = flip ? sA : sB;
+    const key = vi + ':' + lo + ':' + hi;
+    let arc = arcCache.get(key);
+    if (!arc) {
+      const P = V[vi];
+      const a = sectorPos.get(vi + ':' + lo), b = sectorPos.get(vi + ':' + hi);
+      const va = sub(a, P), vb = sub(b, P);
+      arc = [];
+      for (let i = 0; i <= segments; i++) {
+        if (i === 0) { arc.push(sectorVert(vi, lo)); continue; }
+        if (i === segments) { arc.push(sectorVert(vi, hi)); continue; }
+        const t = i / segments;
+        const u = Math.pow(Math.cos(t * Math.PI / 2), pexp);
+        const w = Math.pow(Math.sin(t * Math.PI / 2), pexp);
+        arc.push(push([P[0] + va[0] * u + vb[0] * w,
+                       P[1] + va[1] * u + vb[1] * w,
+                       P[2] + va[2] * u + vb[2] * w]));
+      }
+      arcCache.set(key, arc);
+    }
+    return flip ? arc.slice().reverse() : arc;
+  }
+
+  const nfaces = [], nfm = [], nfg = [];
+
+  /* original faces, pulled in to their sector corners */
+  for (let fi = 0; fi < nf; fi++) {
+    const t = F[fi];
+    const out = [];
+    for (let k = 0; k < t.length; k++) {
+      const sid = sectorOf.get(fi + ':' + k) ?? 0;
+      const idx = sectorVert(t[k], sid);
+      if (!out.length || out[out.length - 1] !== idx) out.push(idx);
+    }
+    while (out.length > 1 && out[0] === out[out.length - 1]) out.pop();
+    if (out.length < 3) continue;
+    nfaces.push(out); nfm.push(mesh.fm[fi]); nfg.push(mesh.fg[fi]);
+  }
+
+  /* the strip along every beveled edge.  The winding is derived from the way
+     f0 traverses the edge, so the strip is consistent with the shell it
+     replaces and no global normal recalculation is needed. */
+  const cornerIdx = (fi, vi) => {
+    const t = F[fi];
+    for (let i = 0; i < t.length; i++) if (t[i] === vi) return i;
+    return -1;
+  };
+  for (const [k, e] of em) {
+    if (!bev.has(k)) continue;
+    const [f0, f1] = e.faces;
+    const t0 = F[f0];
+    const k0 = cornerIdx(f0, e.a);
+    /* v0 -> v1 is the direction f0 walks this edge */
+    const forward = k0 >= 0 && t0[(k0 + 1) % t0.length] === e.b;
+    const v0 = forward ? e.a : e.b, v1 = forward ? e.b : e.a;
+    const sec = (fi, vi) => sectorOf.get(fi + ':' + cornerIdx(fi, vi)) ?? 0;
+    const s0f = sec(f0, v0), s0b = sec(f1, v0);
+    const s1f = sec(f0, v1), s1b = sec(f1, v1);
+    if (s0f === s0b && s1f === s1b) continue;       /* nothing opened up */
+    const arc0 = arcAt(v0, s0f, s0b);
+    const arc1 = arcAt(v1, s1f, s1b);
+    for (let i = 0; i < segments; i++) {
+      const q = [arc1[i], arc0[i], arc0[i + 1], arc1[i + 1]];
+      const u = [];
+      for (const x of q) if (!u.length || u[u.length - 1] !== x) u.push(x);
+      while (u.length > 1 && u[0] === u[u.length - 1]) u.pop();
+      if (u.length < 3) continue;
+      nfaces.push(u); nfm.push(mesh.fm[f0]); nfg.push(FG_BEVEL);
+    }
+  }
+
+  /* patch where three or more beveled edges meet */
+  for (const [vi, elist] of bevAtVert) {
+    if (elist.length < 3) continue;
+    const arcs = [];
+    for (const k of elist) {
+      const e = em.get(k);
+      if (e.faces.length !== 2) continue;
+      const corner = (fi) => { const t = F[fi]; for (let i = 0; i < t.length; i++) if (t[i] === vi) return i; return -1; };
+      const s0 = sectorOf.get(e.faces[0] + ':' + corner(e.faces[0])) ?? 0;
+      const s1 = sectorOf.get(e.faces[1] + ':' + corner(e.faces[1])) ?? 0;
+      if (s0 === s1) continue;
+      arcs.push(arcAt(vi, s0, s1));
+    }
+    if (arcs.length < 3) continue;
+    /* chain the arcs into a closed boundary loop */
+    const loop = [];
+    const used = new Array(arcs.length).fill(false);
+    let cur = arcs[0].slice(); used[0] = true;
+    loop.push(...cur);
+    let guard = 0;
+    while (guard++ < arcs.length * 2) {
+      const tail = loop[loop.length - 1];
+      let nextI = -1, rev = false;
+      for (let i = 0; i < arcs.length; i++) {
+        if (used[i]) continue;
+        if (arcs[i][0] === tail) { nextI = i; rev = false; break; }
+        if (arcs[i][arcs[i].length - 1] === tail) { nextI = i; rev = true; break; }
+      }
+      if (nextI < 0) break;
+      used[nextI] = true;
+      const seg = rev ? arcs[nextI].slice().reverse() : arcs[nextI];
+      for (let i = 1; i < seg.length; i++) loop.push(seg[i]);
+    }
+    if (loop.length > 2 && loop[0] === loop[loop.length - 1]) loop.pop();
+    if (loop.length < 3) continue;
+    let cx = 0, cy = 0, cz = 0;
+    for (const i of loop) { cx += nv[i][0]; cy += nv[i][1]; cz += nv[i][2]; }
+    const c = push([cx / loop.length, cy / loop.length, cz / loop.length]);
+    /* orient the patch against the average of the original faces here */
+    let ax = 0, ay = 0, az = 0;
+    for (const [fi] of (atVert.get(vi) || [])) { ax += fn[fi][0]; ay += fn[fi][1]; az += fn[fi][2]; }
+    let area = 0;
+    for (let i = 0; i < loop.length; i++) {
+      const p = nv[loop[i]], q = nv[loop[(i + 1) % loop.length]];
+      area += (p[1] - q[1]) * (p[2] + q[2]) * ax
+            + (p[2] - q[2]) * (p[0] + q[0]) * ay
+            + (p[0] - q[0]) * (p[1] + q[1]) * az;
+    }
+    const ord = area >= 0 ? loop : loop.slice().reverse();
+    for (let i = 0; i < ord.length; i++) {
+      const j = (i + 1) % ord.length;
+      if (ord[i] === ord[j]) continue;
+      nfaces.push([c, ord[i], ord[j]]);
+      nfm.push(mesh.fm[em.get(elist[0]).faces[0]]);
+      nfg.push(FG_BEVEL);
+    }
+  }
+
+  mesh.v = nv; mesh.f = nfaces; mesh.fm = nfm; mesh.fg = nfg;
+  weldVerts(mesh, 1e-9);
+  return mesh;
+}
+
+/* optlib.finish -- weld, shade, then queue the bevel modifier */
+function finish(mesh, { bevel = 0.0012, bseg = 2, bangle = 32.0, sharp = null,
+                        weld_d = 2e-5, smooth = true } = {}) {
+  weld(mesh, weld_d);
+  shade(mesh, smooth, sharp);
+  mesh.bevel = bevel ? { width: bevel, segments: bseg, angle: bangle } : null;
+  return mesh;
+}
+/* optlib.add_bevel called directly (after a boolean) */
+function addBevel(mesh, width, segments, angle) {
+  mesh.bevel = { width, segments, angle };
+  return mesh;
+}
+/* optlib.apply_mods -- evaluate the pending modifier stack into the mesh */
+function applyMods(mesh) {
+  if (mesh.bevel) {
+    applyBevel(mesh, mesh.bevel.width, mesh.bevel.segments, mesh.bevel.angle);
+    mesh.bevel = null;
+  }
+  return mesh;
+}
+/* optlib.boolean */
+function boolean(a, b) {
+  applyMods(a);
+  booleanDifference(a, b);
+  return a;
+}
+
+/* ==========================================================================
+   5. optlib.py -- lofting / panelling primitives
+   ========================================================================== */
+
+const COLL = { TORSO: [], HEAD: [], ARM: [], HAND: [], HIP: [], LEG: [], FOOT: [] };
+
+function collClear(name) { COLL[name].length = 0; }
+function collRemove(name, mesh) {
+  const i = COLL[name].indexOf(mesh);
+  if (i >= 0) COLL[name].splice(i, 1);
+}
+function meshObj(name, verts, faces, cname) {
+  const m = new Mesh(name, verts, faces);
+  m.coll = cname;
+  COLL[cname].push(m);
+  return m;
+}
+
+/* ---- cross-section profiles -------------------------------------------- */
+
+const copysignPow = (base, p, s) => {
+  const v = Math.pow(Math.abs(base), p);
+  return s < 0 ? -v : v;
+};
+
+/* super-ellipse point with independent quadrant extents */
+function sePoint(theta, ax, ax2, by, by2, eUp, eDn) {
+  const c = Math.cos(theta), s = Math.sin(theta);
+  const w = 0.5 + 0.5 * s;
+  let e = eDn + (eUp - eDn) * w;
+  e = Math.max(2.02, e);
+  const p = 2.0 / e;
+  const a = c >= 0.0 ? ax : ax2;
+  const b = s >= 0.0 ? by : by2;
+  return [a * copysignPow(c, p, c), b * copysignPow(s, p, s)];
+}
+
+/* closed 2-D section, `n` points CCW starting near +X */
+function profile(n, ax, by, ax2, by2, e, e_dn, even = 0.72, dense = 512, phase = 0.0) {
+  if (by === undefined || by === null) by = ax;
+  if (ax2 === undefined || ax2 === null) ax2 = ax;
+  if (by2 === undefined || by2 === null) by2 = by;
+  if (e === undefined || e === null) e = 2.0;
+  if (e_dn === undefined || e_dn === null) e_dn = e;
+
+  const pts = new Array(dense);
+  for (let i = 0; i < dense; i++) pts[i] = sePoint(TAU * i / dense, ax, ax2, by, by2, e, e_dn);
+  const cum = new Float64Array(dense + 1);
+  for (let i = 0; i < dense; i++) {
+    const p0 = pts[i], p1 = pts[(i + 1) % dense];
+    cum[i + 1] = cum[i] + Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  }
+  const total = cum[dense];
+  const out = new Array(n);
+  for (let k = 0; k < n; k++) {
+    const u = pmod(k / n + phase, 1.0);
+    const target = u * total;
+    let lo = 0, hi = dense;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] <= target) lo = mid; else hi = mid;
+    }
+    const f = cum[hi] === cum[lo] ? 0.0 : (target - cum[lo]) / (cum[hi] - cum[lo]);
+    const thArc = TAU * (lo + f) / dense;
+    const thUni = TAU * u;
+    const d = pmod(thArc - thUni + Math.PI, TAU) - Math.PI;
+    out[k] = sePoint(thUni + d * even, ax, ax2, by, by2, e, e_dn);
+  }
+  return out;
+}
+
+/* ---- lofting ------------------------------------------------------------ */
+
+const STATION_KEYS = ['ax', 'ax2', 'by', 'by2', 'e', 'e_dn', 'ox', 'oy', 'rot', 'scale'];
+
+function normStation(s) {
+  const d = { ax: 0.05, ax2: null, by: null, by2: null, e: 2.0, e_dn: null,
+              ox: 0.0, oy: 0.0, rot: 0.0, scale: 1.0, ...s };
+  if (d.ax2 === null || d.ax2 === undefined) d.ax2 = d.ax;
+  if (d.by === null || d.by === undefined) d.by = d.ax;
+  if (d.by2 === null || d.by2 === undefined) d.by2 = d.by;
+  if (d.e_dn === null || d.e_dn === undefined) d.e_dn = d.e;
+  return d;
+}
+
+function loft(stations, opts = {}) {
+  const { n = 64, name = 'loft', cname = 'OPTIMUS', cap0 = true, cap1 = true,
+          mode = 'pchip', even = 0.72, axis = 'z', phase = 0.0,
+          tip0 = null, tip1 = null, ring_t = null } = opts;
+  let rings = opts.rings ?? null;
+
+  let st = stations.map(normStation);
+  st = st.map((s, i) => [s, i]).sort((a, b) => (a[0].t - b[0].t) || (a[1] - b[1])).map(p => p[0]);
+  const ts = st.map(s => s.t);
+
+  const curves = {};
+  for (const k of STATION_KEYS) curves[k] = new Curve1D(ts, st.map(s => s[k]), mode);
+
+  if (rings === null) rings = Math.max(24, st.length * 6);
+
+  const t0 = ts[0], t1 = ts[ts.length - 1];
+  let ringTs;
+  if (ring_t !== null) {
+    const set = new Set(ring_t.map(t => Math.min(t1, Math.max(t0, t))));
+    ringTs = [...set].sort((a, b) => a - b);
+  } else {
+    ringTs = [];
+    for (let i = 0; i < rings; i++) ringTs.push(t0 + (t1 - t0) * (i / (rings - 1)));
+  }
+
+  const ringAt = (t, floorV, scaleMul = 1.0) => {
+    const sc = curves.scale.at(t) * scaleMul;
+    const pr = profile(n,
+      Math.max(floorV, curves.ax.at(t) * sc),
+      Math.max(floorV, curves.by.at(t) * sc),
+      Math.max(floorV, curves.ax2.at(t) * sc),
+      Math.max(floorV, curves.by2.at(t) * sc),
+      Math.max(2.02, curves.e.at(t)),
+      Math.max(2.02, curves.e_dn.at(t)),
+      even, 512, phase);
+    const ox = curves.ox.at(t), oy = curves.oy.at(t), rot = curves.rot.at(t);
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const ring = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = pr[i][0], y = pr[i][1];
+      ring[i] = [x * cr - y * sr + ox, x * sr + y * cr + oy, t];
+    }
+    return ring;
+  };
+
+  const ringsets = ringTs.map(t => ringAt(t, 1e-5));
+
+  /* rounded caps: shrinking rings then a pole */
+  function capRings(baseT, direction, depth) {
+    const out = [];
+    const steps = 5;
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      const rs = Math.pow(Math.cos(f * Math.PI / 2), 0.85);
+      const dz = Math.sin(f * Math.PI / 2) * depth * direction;
+      const ring = ringAt(baseT, 1e-6, rs);
+      for (const p of ring) p[2] = baseT + dz;
+      out.push(ring);
+    }
+    return out;
+  }
+
+  let pre = [], post = [];
+  if (cap0) {
+    const d = tip0 !== null ? tip0 : (curves.ax.at(t0) + curves.by.at(t0)) * 0.5;
+    pre = capRings(t0, -1.0, d).reverse();
+  }
+  if (cap1) {
+    const d = tip1 !== null ? tip1 : (curves.ax.at(t1) + curves.by.at(t1)) * 0.5;
+    post = capRings(t1, +1.0, d);
+  }
+
+  const allrings = pre.concat(ringsets, post);
+  const verts = [];
+  for (const r of allrings) for (const p of r) verts.push(p);
+
+  const faces = [];
+  const nr = allrings.length;
+  for (let i = 0; i < nr - 1; i++) {
+    const a = i * n, b = (i + 1) * n;
+    for (let j = 0; j < n; j++) {
+      const j2 = (j + 1) % n;
+      faces.push([a + j, a + j2, b + j2, b + j]);
+    }
+  }
+  if (!cap0) { const t = []; for (let i = n - 1; i >= 0; i--) t.push(i); faces.push(t); }
+  if (!cap1) { const base = (nr - 1) * n, t = []; for (let i = 0; i < n; i++) t.push(base + i); faces.push(t); }
+
+  const ob = meshObj(name, verts, faces, cname);
+  if (axis !== 'z') ob.transform(axis === 'x' ? mat4Rotation(R(90), 'Y') : mat4Rotation(R(-90), 'X'));
+  return ob;
+}
+
+/* loft along a polyline spine with parallel-transport frames */
+function loftSpine(spinePts, stations, opts = {}) {
+  const { n = 48, name = 'loft', cname = 'OPTIMUS', up = vec(0, 0, 1),
+          cap0 = true, cap1 = true, mode = 'pchip', even = 0.72,
+          tip0 = null, tip1 = null } = opts;
+  let rings = opts.rings ?? null;
+
+  const P = spinePts.map(p => (p instanceof V3 ? p.clone() : V3.of(p)));
+  if (rings === null) rings = Math.max(24, P.length);
+  const tsIn = P.map((_, i) => i / (P.length - 1));
+  const cx = new Curve1D(tsIn, P.map(p => p.x), 'spline');
+  const cy = new Curve1D(tsIn, P.map(p => p.y), 'spline');
+  const cz = new Curve1D(tsIn, P.map(p => p.z), 'spline');
+  const S = [];
+  for (let i = 0; i < rings; i++) {
+    const u = i / (rings - 1);
+    S.push(vec(cx.at(u), cy.at(u), cz.at(u)));
+  }
+
+  const T = [];
+  for (let i = 0; i < rings; i++) {
+    let t;
+    if (i === 0) t = S[1].sub(S[0]);
+    else if (i === rings - 1) t = S[rings - 1].sub(S[rings - 2]);
+    else t = S[i + 1].sub(S[i - 1]);
+    T.push(t.normalized());
+  }
+
+  let ref = up.normalized();
+  if (Math.abs(ref.dot(T[0])) > 0.98) ref = vec(1, 0, 0);
+  const N = [ref.sub(T[0].mul(ref.dot(T[0]))).normalized()];
+  for (let i = 1; i < rings; i++) {
+    let v = N[N.length - 1].sub(T[i].mul(N[N.length - 1].dot(T[i])));
+    if (v.length < 1e-9) v = vec(1, 0, 0).sub(T[i].mul(T[i].x));
+    N.push(v.normalized());
+  }
+  const B = [];
+  for (let i = 0; i < rings; i++) B.push(T[i].cross(N[i]).normalized());
+
+  let st = stations.map(normStation);
+  st = st.map((s, i) => [s, i]).sort((a, b) => (a[0].t - b[0].t) || (a[1] - b[1])).map(p => p[0]);
+  const ts = st.map(s => s.t);
+  const curves = {};
+  for (const k of STATION_KEYS) curves[k] = new Curve1D(ts, st.map(s => s[k]), mode);
+
+  let allrings = [];
+  for (let i = 0; i < rings; i++) {
+    const t = i / (rings - 1);
+    const sc = curves.scale.at(t);
+    const pr = profile(n,
+      Math.max(1e-6, curves.ax.at(t) * sc),
+      Math.max(1e-6, curves.by.at(t) * sc),
+      Math.max(1e-6, curves.ax2.at(t) * sc),
+      Math.max(1e-6, curves.by2.at(t) * sc),
+      Math.max(2.02, curves.e.at(t)),
+      Math.max(2.02, curves.e_dn.at(t)), even);
+    const ox = curves.ox.at(t), oy = curves.oy.at(t), rot = curves.rot.at(t);
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const ring = [];
+    for (const [x, y] of pr) {
+      const xr = x * cr - y * sr, yr = x * sr + y * cr;
+      ring.push(S[i].add(N[i].mul(xr + ox)).add(B[i].mul(yr + oy)));
+    }
+    allrings.push(ring);
+  }
+
+  function cap(idx, direction, depth) {
+    const out = [];
+    const steps = 5;
+    const base = allrings[idx];
+    let c = vec(0, 0, 0);
+    for (const v of base) c = c.add(v);
+    c = c.mul(1.0 / base.length);
+    for (let i = 1; i <= steps; i++) {
+      const f = i / steps;
+      const rs = Math.pow(Math.cos(f * Math.PI / 2), 0.85);
+      const dz = Math.sin(f * Math.PI / 2) * depth;
+      out.push(base.map(v => c.add(v.sub(c).mul(rs)).add(T[idx].mul(dz * direction))));
+    }
+    return out;
+  }
+
+  let pre = [], post = [];
+  if (cap0) {
+    const d = tip0 !== null ? tip0 : (curves.ax.at(0) + curves.by.at(0)) * 0.5;
+    pre = cap(0, -1.0, d).reverse();
+  }
+  if (cap1) {
+    const d = tip1 !== null ? tip1 : (curves.ax.at(1) + curves.by.at(1)) * 0.5;
+    post = cap(rings - 1, +1.0, d);
+  }
+  allrings = pre.concat(allrings, post);
+
+  const verts = [];
+  for (const r of allrings) for (const v of r) verts.push(v.toArray());
+  const faces = [];
+  const nr = allrings.length;
+  for (let i = 0; i < nr - 1; i++) {
+    const a = i * n, b = (i + 1) * n;
+    for (let j = 0; j < n; j++) {
+      const j2 = (j + 1) % n;
+      faces.push([a + j, a + j2, b + j2, b + j]);
+    }
+  }
+  if (!cap0) { const t = []; for (let i = n - 1; i >= 0; i--) t.push(i); faces.push(t); }
+  if (!cap1) { const base = (nr - 1) * n, t = []; for (let i = 0; i < n; i++) t.push(base + i); faces.push(t); }
+  return meshObj(name, verts, faces, cname);
+}
+
+/* ---- shell / panel construction ---------------------------------------- */
+
+/* 0 at the rim, 1 at the centre, with a soft rolled edge */
+function pillowBulge(s, rim) {
+  if (s >= rim) return 1.0;
+  return Math.pow(Math.sin(Math.min(1.0, s / Math.max(1e-6, rim)) * Math.PI / 2), 0.85);
+}
+
+/* f(u,v) -> the pillow's ring parameter s (0 at the rim, 1 at the pole) */
+function pillowS(outline, centre = null) {
+  const n = outline.length;
+  let cu, cv;
+  if (centre === null) {
+    cu = outline.reduce((s, p) => s + p[0], 0) / n;
+    cv = outline.reduce((s, p) => s + p[1], 0) / n;
+  } else { cu = centre[0]; cv = centre[1]; }
+
+  return (u, v) => {
+    const dx = u - cu, dy = v - cv;
+    const r2 = dx * dx + dy * dy;
+    if (r2 < 1e-18) return 1.0;
+    let best = null;
+    for (let i = 0; i < n; i++) {
+      const ax = outline[i][0] - cu, ay = outline[i][1] - cv;
+      const bx = outline[(i + 1) % n][0] - cu, by = outline[(i + 1) % n][1] - cv;
+      const ex = bx - ax, ey = by - ay;
+      const den = ex * dy - ey * dx;
+      if (Math.abs(den) < 1e-15) continue;
+      const t = (dx * ay - dy * ax) / den;
+      if (t < -1e-9 || t > 1.0 + 1e-9) continue;
+      const k = ((ax + t * ex) * dx + (ay + t * ey) * dy) / r2;
+      if (k > 1e-9 && (best === null || k < best)) best = k;
+    }
+    if (best === null || best <= 1.0) return 0.0;
+    return Math.max(0.0, Math.min(1.0, 1.0 - 1.0 / best));
+  };
+}
+
+/* f(u,v) -> (point, normal) on the OUTER face of the pillow that pillow()
+   would build from the same arguments */
+function pillowEval(outline, surf, { t_front = 0.008, rim = 0.55, centre = null, disp = null } = {}) {
+  const sOf = pillowS(outline, centre);
+  return (u, v) => {
+    const [p, nrm] = surf(u, v);
+    const b = pillowBulge(sOf(u, v), rim);
+    const d = disp === null ? 0.0 : disp(u, v) * b;
+    return [p.add(nrm.mul(t_front * b + d)), nrm];
+  };
+}
+
+/* closed rounded 'pillow' panel: concentric quad rings + one pole per side */
+function pillow(outline, surf, opts = {}) {
+  const { t_front = 0.008, t_back = 0.004, layers = 9, name = 'panel',
+          cname = 'OPTIMUS', rim = 0.55, centre = null, disp = null,
+          layer_s = null } = opts;
+  const n = outline.length;
+  let cu, cv;
+  if (centre === null) {
+    cu = outline.reduce((s, p) => s + p[0], 0) / n;
+    cv = outline.reduce((s, p) => s + p[1], 0) / n;
+  } else { cu = centre[0]; cv = centre[1]; }
+
+  const shrink = s => outline.map(p => [lerp(p[0], cu, s), lerp(p[1], cv, s)]);
+  const bulge = s => pillowBulge(s, rim);
+
+  let ss;
+  if (layer_s !== null) {
+    /* explicit ring parameters, so a caller can crowd layers across a
+       surface feature instead of raising the density of the whole panel */
+    ss = [...new Set([0.0, ...layer_s.map(s => Math.min(1.0, Math.max(0.0, s)))])]
+      .sort((a, b) => a - b);
+    if (ss[ss.length - 1] < 1.0) ss.push(1.0);
+  } else {
+    ss = [];
+    for (let i = 0; i < layers; i++) ss.push(Math.pow(i / (layers - 1), 0.85));
+  }
+
+  const ringsF = [], ringsB = [];
+  for (let i = 0; i < ss.length - 1; i++) {
+    const s = ss[i];
+    const rf = [], rb = [];
+    for (const [u, v] of shrink(s)) {
+      const [p, nrm] = surf(u, v);
+      const b = bulge(s);
+      const d = disp === null ? 0.0 : disp(u, v) * b;
+      rf.push(p.add(nrm.mul(t_front * b + d)));
+      rb.push(p.sub(nrm.mul(t_back * b)));
+    }
+    ringsF.push(rf); ringsB.push(rb);
+  }
+
+  /* The pole must carry the same displacement as the ring beside it.  Left
+     out, it sat t_front below a ring that had been pushed out by disp, and the
+     fan pinched into a spike -- the "hole" in the middle of the panel. */
+  const [pc, pn] = surf(cu, cv);
+  const dpole = disp === null ? 0.0 : disp(cu, cv);
+  const poleF = pc.add(pn.mul(t_front + dpole));
+  const poleB = pc.sub(pn.mul(t_back));
+
+  const verts = [], faces = [];
+  for (const r of ringsF) for (const v of r) verts.push(v.toArray());
+  const idxPoleF = verts.length; verts.push(poleF.toArray());
+  const offB = verts.length;
+  for (const r of ringsB) for (const v of r) verts.push(v.toArray());
+  const idxPoleB = verts.length; verts.push(poleB.toArray());
+
+  const L = ringsF.length;
+  for (let i = 0; i < L - 1; i++) {
+    const a = i * n, b = (i + 1) * n;
+    for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([a + j, b + j, b + j2, a + j2]); }
+  }
+  let a = (L - 1) * n;
+  for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([a + j, idxPoleF, a + j2]); }
+  for (let i = 0; i < L - 1; i++) {
+    const aa = offB + i * n, bb = offB + (i + 1) * n;
+    for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([aa + j, aa + j2, bb + j2, bb + j]); }
+  }
+  a = offB + (L - 1) * n;
+  for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([a + j2, idxPoleB, a + j]); }
+  for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([j, j2, offB + j2, offB + j]); }
+
+  return meshObj(name, verts, faces, cname);
+}
+
+function resampleClosed(pts, n, phase = 0.0) {
+  const m = pts.length;
+  const cum = [0.0];
+  for (let i = 0; i < m; i++) {
+    const a = pts[i], b = pts[(i + 1) % m];
+    cum.push(cum[cum.length - 1] + Math.hypot(a[0] - b[0], a[1] - b[1]));
+  }
+  const total = cum[m];
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const target = pmod(k / n + phase, 1.0) * total;
+    let lo = 0, hi = m;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= target) lo = mid; else hi = mid; }
+    const f = cum[hi] === cum[lo] ? 0.0 : (target - cum[lo]) / (cum[hi] - cum[lo]);
+    const a = pts[lo % m], b = pts[hi % m];
+    out.push([lerp(a[0], b[0], f), lerp(a[1], b[1], f)]);
+  }
+  return out;
+}
+
+/* rounded rectangle outline, resampled evenly, CCW */
+function rrectOutline(w, h, r, n = 96, cx = 0.0, cy = 0.0, seg = 20) {
+  const hw = w * 0.5, hh = h * 0.5;
+  let rr = (typeof r === 'number') ? [r, r, r, r] : r.slice();
+  rr = rr.map(ri => Math.max(1e-5, Math.min(ri, hw - 1e-5, hh - 1e-5)));
+  const cs = [[hw - rr[0], hh - rr[0]], [-hw + rr[1], hh - rr[1]],
+              [-hw + rr[2], -hh + rr[2]], [hw - rr[3], -hh + rr[3]]];
+  const pts = [];
+  for (let i = 0; i < 4; i++) {
+    const [px, py] = cs[i];
+    const a0 = i * Math.PI / 2;
+    for (let k = 0; k <= seg; k++) {
+      const a = a0 + (k / seg) * (Math.PI / 2);
+      pts.push([px + rr[i] * Math.cos(a), py + rr[i] * Math.sin(a)]);
+    }
+  }
+  return resampleClosed(pts, n).map(p => [p[0] + cx, p[1] + cy]);
+}
+
+/* resample an arbitrary closed polygon, optional corner smoothing passes */
+function polyOutline(pts, n = 96, smooth = 0) {
+  let p = pts.map(q => [q[0], q[1]]);
+  for (let s = 0; s < smooth; s++) {
+    const q = [];
+    const m = p.length;
+    for (let i = 0; i < m; i++) {
+      const a = p[i], b = p[(i + 1) % m];
+      q.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]]);
+      q.push([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+    }
+    p = q;
+  }
+  return resampleClosed(p, n);
+}
+
+/* simple prism from a closed 2-D outline (caps as n-gons) */
+function extrudeOutline(outline, z0, z1, opts = {}) {
+  const { name = 'ext', cname = 'OPTIMUS', taper1 = 1.0, taper0 = 1.0, cx = 0.0, cy = 0.0 } = opts;
+  const n = outline.length;
+  const verts = [];
+  for (const [u, v] of outline) verts.push([(u - cx) * taper0 + cx, (v - cy) * taper0 + cy, z0]);
+  for (const [u, v] of outline) verts.push([(u - cx) * taper1 + cx, (v - cy) * taper1 + cy, z1]);
+  const faces = [];
+  for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([j, j2, n + j2, n + j]); }
+  const b = []; for (let i = n - 1; i >= 0; i--) b.push(i); faces.push(b);
+  const t = []; for (let i = n; i < 2 * n; i++) t.push(i); faces.push(t);
+  return meshObj(name, verts, faces, cname);
+}
+
+/* round tube along a spine; radii = scalar or per-point list */
+function tube(spine, radii, opts = {}) {
+  const { n = 24, name = 'tube', cname = 'OPTIMUS', cap = true, up = vec(0, 0, 1) } = opts;
+  const rs = (typeof radii === 'number') ? new Array(spine.length).fill(radii) : radii;
+  const st = spine.map((_, i) => ({ t: i / (spine.length - 1), ax: rs[i] }));
+  return loftSpine(spine, st, {
+    n, name, cname, up, cap0: cap, cap1: cap,
+    tip0: rs[0] * 0.6, tip1: rs[rs.length - 1] * 0.6,
+    rings: Math.max(spine.length * 4, 16)
+  });
+}
+
+/* optlib.join, keeping the collection in step */
+function joinMeshes(meshes, name, cname) {
+  for (let i = 1; i < meshes.length; i++) collRemove(cname, meshes[i]);
+  return join(meshes, name);
+}
+
+/* ==========================================================================
+   6. p_torso.py -- black torso core (pelvis -> chest -> trapezius -> neck),
+      white chest plate, back plate, moulded back piece, shoulder straps,
+      TESLA wordmark.
+   ========================================================================== */
+
+/* (z, half-width, back Y, front depth, e_back, e_front) */
+const CORE = [
+  [0.9520, 0.0620, 0.0730, 0.0290, 2.6, 2.8],
+  [0.9640, 0.0648, 0.0768, 0.0316, 2.6, 2.8],
+  [0.9760, 0.0670, 0.0800, 0.0336, 2.6, 2.8],
+  [0.9880, 0.0688, 0.0828, 0.0350, 2.6, 2.8],
+  [1.0000, 0.0706, 0.0870, 0.0374, 2.6, 2.8],
+  [1.0090, 0.0776, 0.0960, 0.0420, 2.7, 2.9],
+  [1.0135, 0.0930, 0.1090, 0.0500, 2.8, 2.9],
+  [1.0180, 0.1098, 0.1212, 0.0598, 2.9, 2.9],
+  [1.0330, 0.1160, 0.1246, 0.0640, 2.8, 3.0],
+  [1.0480, 0.1210, 0.1276, 0.0656, 2.8, 3.0],
+  [1.0640, 0.1252, 0.1306, 0.0648, 2.9, 2.85],
+  [1.0800, 0.1288, 0.1338, 0.0638, 3.0, 2.82],
+  [1.0960, 0.1312, 0.1372, 0.0628, 3.1, 2.80],
+  [1.1150, 0.1330, 0.1408, 0.0622, 3.3, 2.74],
+  [1.1400, 0.1345, 0.1450, 0.0622, 3.5, 2.66],
+  [1.1700, 0.1362, 0.1500, 0.0630, 3.6, 2.58],
+  [1.2000, 0.1390, 0.1552, 0.0642, 3.7, 2.52],
+  [1.2300, 0.1428, 0.1614, 0.0662, 3.8, 2.48],
+  [1.2600, 0.1472, 0.1672, 0.0682, 3.8, 2.46],
+  [1.2900, 0.1516, 0.1722, 0.0694, 3.8, 2.45],
+  [1.3200, 0.1552, 0.1762, 0.0698, 3.8, 2.45],
+  [1.3500, 0.1580, 0.1776, 0.0640, 3.7, 2.47],
+  [1.3750, 0.1596, 0.1758, 0.0570, 3.6, 2.52],
+  [1.3950, 0.1618, 0.1718, 0.0500, 3.5, 2.60],
+  [1.4100, 0.1672, 0.1672, 0.0420, 3.5, 2.72],
+  [1.4210, 0.1762, 0.1610, 0.0384, 3.7, 2.86],
+  [1.4310, 0.1842, 0.1540, 0.0348, 3.3, 2.90],
+  [1.4400, 0.1876, 0.1452, 0.0316, 3.3, 2.95],
+  [1.4480, 0.1830, 0.1360, 0.0300, 3.3, 2.92],
+  [1.4560, 0.1690, 0.1276, 0.0292, 3.2, 2.86],
+  [1.4640, 0.1432, 0.1190, 0.0286, 3.4, 2.85],
+  [1.4720, 0.0982, 0.1120, 0.0284, 3.0, 3.0],
+  [1.4800, 0.0776, 0.1056, 0.0284, 2.7, 2.8],
+  [1.4900, 0.0580, 0.1075, 0.0316, 2.5, 2.7],
+  [1.5000, 0.0466, 0.0975, 0.0296, 2.4, 2.6],
+  [1.5120, 0.0424, 0.0820, 0.0296, 2.4, 2.6],
+  [1.5280, 0.0410, 0.0780, 0.0326, 2.4, 2.6],
+  [1.5450, 0.0412, 0.0772, 0.0366, 2.4, 2.6],
+  [1.5620, 0.0420, 0.0768, 0.0396, 2.4, 2.6],
+];
+
+const _ZS = CORE.map(c => c[0]);
+let C_AX = null, C_BY = null, C_BY2 = null, C_EB = null, C_EF = null;
+
+function coreCurves() {
+  C_AX = new Curve1D(_ZS, CORE.map(c => c[1]), 'spline');
+  C_BY = new Curve1D(_ZS, CORE.map(c => c[2]), 'spline');
+  C_BY2 = new Curve1D(_ZS, CORE.map(c => c[3]), 'spline');
+  C_EB = new Curve1D(_ZS, CORE.map(c => c[4]), 'spline');
+  C_EF = new Curve1D(_ZS, CORE.map(c => c[5]), 'spline');
+}
+
+/* A panel edge that reaches the body's own silhouette lands where this
+   section has infinite slope, and anything past it used to collapse to y=0 --
+   which is what tore the back panel apart along the flank.  Clamping the
+   normalised radius keeps the surface, and its normal, finite everywhere. */
+const _TMAX = 0.960;
+
+/* Y of the core's front surface at (x, z); negative = toward the viewer */
+function coreFrontY(x, z) {
+  const ax = Math.max(1e-6, C_AX.at(z));
+  const by2 = C_BY2.at(z);
+  const e = Math.max(2.02, C_EF.at(z));
+  const t = Math.min(_TMAX, Math.abs(x) / ax);
+  return -by2 * Math.pow(Math.max(0.0, 1.0 - Math.pow(t, e)), 1.0 / e);
+}
+function coreBackY(x, z) {
+  const ax = Math.max(1e-6, C_AX.at(z));
+  const by = C_BY.at(z);
+  const e = Math.max(2.02, C_EB.at(z));
+  const t = Math.min(_TMAX, Math.abs(x) / ax);
+  return by * Math.pow(Math.max(0.0, 1.0 - Math.pow(t, e)), 1.0 / e);
+}
+
+function coreBackSurf(offset = 0.0) {
+  const d = 3e-4;
+  const nrm = (u, v) => {
+    let fx = (coreBackY(u + d, v) - coreBackY(u - d, v)) / (2 * d);
+    let fz = (coreBackY(u, v + d) - coreBackY(u, v - d)) / (2 * d);
+    fx = Math.max(-3.2, Math.min(3.2, fx));
+    fz = Math.max(-3.2, Math.min(3.2, fz));
+    return vec(-fx, 1.0, -fz).normalize();
+  };
+  return (u, v) => {
+    const p = vec(u, coreBackY(u, v), v);
+    const n = nrm(u, v);
+    return [p.add(n.mul(offset)), n];
+  };
+}
+
+function coreFrontSurf(offset = 0.0) {
+  const d = 3e-4;
+  const nrm = (u, v) => {
+    let fx = (coreFrontY(u + d, v) - coreFrontY(u - d, v)) / (2 * d);
+    let fz = (coreFrontY(u, v + d) - coreFrontY(u, v - d)) / (2 * d);
+    fx = Math.max(-3.2, Math.min(3.2, fx));
+    fz = Math.max(-3.2, Math.min(3.2, fz));
+    return vec(fx, -1.0, fz).normalize();
+  };
+  return (u, v) => {
+    const n = nrm(u, v);
+    return [vec(u, coreFrontY(u, v), v).add(n.mul(offset)), n];
+  };
+}
+
+const BACK_EDGE = [
+  [1.4460, 0.0980], [1.4400, 0.1190], [1.4320, 0.1330], [1.4200, 0.1430],
+  [1.4020, 0.1492], [1.3800, 0.1524], [1.3600, 0.1540], [1.3450, 0.1546],
+  [1.3200, 0.1512], [1.2900, 0.1476], [1.2600, 0.1432], [1.2300, 0.1388],
+  [1.2000, 0.1350], [1.1800, 0.1334], [1.1680, 0.1308], [1.1620, 0.1240],
+];
+const BACK_Z0 = 1.1620, BACK_Z1 = 1.4460;
+
+const BACKPIECE = [
+  [0.0000, 1.3630], [0.0230, 1.3624], [0.0330, 1.3596], [0.0378, 1.3520],
+  [0.0424, 1.3318], [0.0474, 1.2993], [0.0532, 1.2633], [0.0618, 1.2272],
+  [0.0719, 1.2019], [0.0835, 1.1876], [0.1022, 1.1731], [0.1195, 1.1587],
+  [0.1268, 1.1470], [0.1292, 1.1320], [0.1288, 1.0500], [0.1268, 1.0300],
+  [0.1180, 1.0225], [0.0880, 1.0200], [0.0400, 1.0192], [0.0000, 1.0190],
+];
+const BOX_Z1 = 1.1560, BOX_Z0 = 1.0300;
+
+const backEdgeCurve = () => new Curve1D(BACK_EDGE.map(p => p[0]), BACK_EDGE.map(p => p[1]), 'spline');
+
+function backPlateSurf(extra = 0.0) {
+  const base = coreBackSurf(0.0);
+  const xe = backEdgeCurve();
+  return (u, v) => {
+    const [p, n] = base(u, v);
+    const r = Math.min(1.0, Math.abs(u) / Math.max(1e-5, xe.at(v)));
+    const lift = 0.0060 * (0.34 + 0.66 * (1.0 - Math.pow(r, 2.6)));
+    return [p.add(n.mul(lift + extra)), n];
+  };
+}
+
+function buildBackPanel() {
+  const xe = backEdgeCurve();
+  const surf = backPlateSurf();
+  const z1 = BACK_Z1, z0 = BACK_Z0;
+  const pts = [];
+  const N = 58;
+  for (let i = 0; i <= N; i++) { const v = z1 - (z1 - z0) * (i / N); pts.push([xe.at(v), v]); }
+  const b = xe.at(z0);
+  for (let i = 1; i < 13; i++) {
+    const f = i / 13.0;
+    pts.push([b * Math.cos(Math.PI * f), z0 - 0.0020 * Math.sin(Math.PI * f)]);
+  }
+  for (let i = 0; i <= N; i++) { const v = z0 + (z1 - z0) * (i / N); pts.push([-xe.at(v), v]); }
+  const t = xe.at(z1);
+  for (let i = 1; i < 11; i++) {
+    const f = i / 11.0;
+    pts.push([-t * Math.cos(Math.PI * f), z1 + 0.0014 * Math.sin(Math.PI * f)]);
+  }
+  const outline = polyOutline(pts, 200, 1);
+  const ob = pillow(outline, surf, {
+    t_front: 0.0038, t_back: 0.0220, layers: 16,
+    name: 'back_plate', cname: 'TORSO', rim: 0.16, centre: [0.0, 1.300]
+  });
+  finish(ob, { bevel: 0.0008, bseg: 2, bangle: 32 });
+  setmat(ob, 'M_SHELL');
+  return ob;
+}
+
+/* service recess in the housing face: half-width, half-height, corner radius,
+   centre z, depth, chamfer width.  The rectangle is modelled into the panel's
+   own displacement rather than cut with a boolean -- the cutter was a flat
+   prism meeting a curved, swelling face, so the rim depth varied and the
+   corners came out ragged. */
+const RECESS = [0.0775, 0.0375, 0.0140, 1.0940, 0.0086, 0.0155];
+
+/* signed depth of the framed recess: 0 on the frame, -depth on the floor,
+   chamfered between */
+function recessD(u, v) {
+  const [hw, hh, r, cz, dep, ch] = RECESS;
+  const dx = Math.max(0.0, Math.abs(u) - (hw - r));
+  const dz = Math.max(0.0, Math.abs(v - cz) - (hh - r));
+  const d = Math.hypot(dx, dz) - r;
+  return -dep * smoothstep(0.0, -ch, d);
+}
+
+const housing = v => smoothstep(BOX_Z1 + 0.0180, BOX_Z1 - 0.0140, v)
+                   * (1.0 - smoothstep(BOX_Z0 + 0.0120, BOX_Z0 - 0.0110, v));
+
+function backpieceDisp(u, v) {
+  const box = housing(v);
+  const shoulder = smoothstep(1.3630, 1.3250, v);
+  let d = 0.0034 * shoulder + 0.0112 * box;
+  /* reference width kept above the panel's own half-width so this never
+     reaches the clamp -- min() here would crease the flank */
+  d -= 0.0030 * box * Math.min(1.0, Math.pow(Math.abs(u) / 0.1560, 3.0));
+  d += box * recessD(u, v);
+  return d;
+}
+
+/* --- the back piece as a grid shell ---------------------------------------
+   It was built with pillow(), whose rings are scaled copies of the outline
+   collapsing onto a pole.  For a tall shield flaring into a wide housing that
+   is the wrong topology: the rings pile up unevenly, they carry the outline's
+   own corners across the middle of the panel, and a rectangular recess cut
+   into them stair-steps along every ring.  A (z, x) grid over the body's back
+   surface has none of those problems -- uniform cells, and the recess edges
+   land square on the grid. */
+
+const BP_Z0 = 1.0215, BP_Z1 = 1.3610;
+let _BPW = null;
+
+function bpCurves() {
+  const side = [[1.3596, 0.0330], [1.3520, 0.0378], [1.3318, 0.0424],
+                [1.2993, 0.0474], [1.2633, 0.0532], [1.2272, 0.0618],
+                [1.2019, 0.0719], [1.1876, 0.0835], [1.1731, 0.1022],
+                [1.1587, 0.1195], [1.1470, 0.1268], [1.1320, 0.1292],
+                [1.0500, 0.1288], [1.0300, 0.1268], [1.0225, 0.1180]];
+  _BPW = new Curve1D(side.map(p => p[0]), side.map(p => p[1]), 'spline');
+}
+
+/* C1 smooth minimum -- a hard min() puts a crease along the curve where the
+   two arguments swap over, and on this panel that crease was visible running
+   down the flank */
+function smin(a, b, k = 0.008) {
+  const h = Math.max(0.0, Math.min(1.0, 0.5 + 0.5 * (b - a) / k));
+  return b * (1.0 - h) + a * h - k * h * (1.0 - h);
+}
+
+/* half-width of the back piece at z, never wider than the torso itself */
+function bpWidth(z) {
+  let w = _BPW.at(Math.max(BP_Z0, Math.min(BP_Z1, z)));
+  const r = 0.0110;
+  const k = smoothstep(BP_Z1, BP_Z1 - r, z) * smoothstep(BP_Z0, BP_Z0 + r, z);
+  w *= 0.72 + 0.28 * k;
+  return Math.max(0.004, smin(w, C_AX.at(z) - 0.0055, 0.010));
+}
+
+/* 0 on the panel's rim, 1 once clear of it -- the edge tucks onto the body */
+function bpRoll(a, z) {
+  const w = bpWidth(z);
+  const d = smin(smin(z - BP_Z0, BP_Z1 - z, 0.005), w * (1.0 - Math.abs(a)), 0.005);
+  return smoothstep(0.0, 0.0140, d);
+}
+
+const BP_SEAT = 0.0011, BP_LIFT = 0.0062, BP_SKIN = 0.0028, BP_BACK = 0.0135;
+
+const bpBase = () => coreBackSurf(0.0);
+
+/* outer face of the back piece.  a in [-1,1] across the panel. */
+function backPieceSurf(a, z, extra = 0.0) {
+  const x = a * bpWidth(z);
+  const [p, n] = bpBase()(x, z);
+  const b = bpRoll(a, z);
+  const off = BP_SEAT + (BP_LIFT + BP_SKIN) * b + backpieceDisp(x, z) * b;
+  return [p.add(n.mul(off + extra)), n];
+}
+
+function buildBackPiece() {
+  bpCurves();
+  const objs = [];
+  const base = bpBase();
+  const NZ = 236, NX = 168;
+  const zs = [], ax = [];
+  for (let i = 0; i <= NZ; i++) zs.push(BP_Z0 + (BP_Z1 - BP_Z0) * (i / NZ));
+  for (let j = 0; j <= NX; j++) ax.push(-1.0 + 2.0 * (j / NX));
+  const N = NX + 1;
+  const vf = [], vb = [];
+  for (const z of zs) {
+    const w = bpWidth(z);
+    for (const a of ax) {
+      const x = a * w;
+      const [p, n] = base(x, z);
+      const b = bpRoll(a, z);
+      const d = backpieceDisp(x, z);
+      vf.push(p.add(n.mul(BP_SEAT + (BP_LIFT + BP_SKIN) * b + d * b)).toArray());
+      vb.push(p.add(n.mul(BP_SEAT - BP_BACK * b)).toArray());
+    }
+  }
+
+  /* The two sheets meet exactly on the rim (the roll-off is 0 there).  They
+     SHARE those vertices by index rather than being welded together after the
+     fact -- relying on a weld left stray non-manifold edges up at the narrow
+     top of the panel, where neighbouring columns sit a fraction of a
+     millimetre apart. */
+  const verts = vf.slice();
+  const mapb = new Array(vb.length).fill(0);
+  for (let i = 0; i <= NZ; i++) {
+    for (let j = 0; j < N; j++) {
+      const k = i * N + j;
+      if (i === 0 || i === NZ || j === 0 || j === NX) mapb[k] = k;
+      else { mapb[k] = verts.length; verts.push(vb[k]); }
+    }
+  }
+  const faces = [];
+  for (let i = 0; i < NZ; i++) {
+    for (let j = 0; j < NX; j++) {
+      const a0 = i * N + j, b0 = (i + 1) * N + j;
+      faces.push([a0, a0 + 1, b0 + 1, b0]);
+      faces.push([mapb[a0], mapb[b0], mapb[b0 + 1], mapb[a0 + 1]]);
+    }
+  }
+  const ob = meshObj('back_piece', verts, faces, 'TORSO');
+  /* deliberately NOT welded: the rim is already shared by index, and at the
+     corners the two sheets close to within float32 precision, so even a
+     zero-distance merge collapsed those quads and holed the shell.
+     The grid is wound with the outer sheet facing -Y; Blender's shading
+     flips a back-facing normal for the viewer, three.js culls it instead, so
+     the winding (not the geometry) is made outward-facing here. */
+  recalcFaceNormals(ob);
+  shade(ob, true, 34);
+  addBevel(ob, 0.0007, 2, 34);
+  setmat(ob, 'M_DARKMECH');
+  markRecessFloor(ob);
+  objs.push(ob);
+
+  const psurf = (x, z) => backPieceSurf(x / Math.max(1e-6, bpWidth(z)), z);
+
+  const fast = [];
+  const seats = [[0.0930, 1.1310], [0.0930, 1.0570],                 /* recess frame */
+                 [0.0330, 1.3430], [0.0424, 1.2960], [0.0500, 1.2560],
+                 [0.0630, 1.2060], [0.0900, 1.1730], [0.1160, 1.1180],
+                 [0.1150, 1.0430]];                                  /* shield flanks */
+  seats.forEach(([x, z], k) => {
+    for (const s of [-1, 1]) {
+      const [p, n] = psurf(s * x, z);
+      const st = [{ t: 0.0, ax: 0.0025, by: 0.0025, e: 2.2 },
+                  { t: 0.0020, ax: 0.0020, by: 0.0020, e: 2.2 }];
+      const bo = loft(st, { n: 14, rings: 4, name: `bpf${k}${s > 0 ? 'p' : 'm'}`,
+                            cname: 'TORSO', cap0: false, cap1: true, tip1: 0.0008 });
+      const m = quatToMat4(toTrackQuatZY(n));
+      const tr = p.sub(n.mul(0.0006));            /* seated into the surface */
+      m[3] = tr.x; m[7] = tr.y; m[11] = tr.z;
+      bo.transform(m);
+      fast.push(bo);
+    }
+  });
+  for (const bo of fast) {
+    finish(bo, { bevel: 0.0003, bseg: 1, bangle: 40 });
+    setmat(bo, 'M_ALU');
+  }
+  return objs.concat(fast);
+}
+
+/* the floor of the recess reads as a lighter inset panel -- done with a
+   material slot rather than a separate plate, so the back stays one piece */
+function markRecessFloor(ob) {
+  const [hw, hh, r, cz, , ch] = RECESS;
+  const idx = ob.mats.length;
+  ob.mats.push('M_DARKGREY');
+  for (let fi = 0; fi < ob.f.length; fi++) {
+    const c = ob.faceCentre(fi);
+    if (c[1] < 0.10 || Math.abs(c[2] - cz) > hh || Math.abs(c[0]) > hw) continue;
+    const dx = Math.max(0.0, Math.abs(c[0]) - (hw - r));
+    const dz = Math.max(0.0, Math.abs(c[2] - cz) - (hh - r));
+    if (Math.hypot(dx, dz) - r < -ch * 0.92) ob.fm[fi] = idx;
+  }
+  return ob;
+}
+
+function buildTorsoCore() {
+  coreCurves();
+  const st = CORE.map(c => ({ t: c[0], ax: c[1], by: c[2], by2: c[3], e: c[4], e_dn: c[5] }));
+  const ob = loft(st, { n: 96, rings: 220, name: 'torso_core', cname: 'TORSO',
+                        cap0: true, cap1: false, tip0: 0.0135, mode: 'spline', even: 0.62 });
+  finish(ob, { bevel: 0.0010, bseg: 2, bangle: 40 });
+  setmat(ob, 'M_BLACK');
+  return ob;
+}
+
+const CHEST_EDGE = [
+  [1.4415, 0.0975], [1.4370, 0.1120], [1.4310, 0.1240], [1.4230, 0.1292],
+  [1.4120, 0.1318], [1.3980, 0.1344], [1.3800, 0.1378], [1.3600, 0.1424],
+  [1.3400, 0.1490], [1.3150, 0.1514], [1.2900, 0.1478], [1.2650, 0.1436],
+  [1.2400, 0.1404], [1.2150, 0.1374], [1.1900, 0.1348], [1.1650, 0.1326],
+  [1.1400, 0.1306], [1.1180, 0.1288], [1.1060, 0.1262], [1.1005, 0.1222],
+  [1.0975, 0.1156],
+];
+const CHEST_Z0 = 1.0975, CHEST_Z1 = 1.4415, PLATE_LIFT = 0.0068;
+
+const chestEdgeCurve = () => new Curve1D(CHEST_EDGE.map(p => p[0]), CHEST_EDGE.map(p => p[1]), 'spline');
+
+function plateDisp(u, v) {
+  let d = 0.0;
+  for (const s of [-1.0, 1.0])
+    d += 0.0058 * Math.exp(-Math.pow((u - s * 0.0730) / 0.0620, 2)
+                           - Math.pow((v - 1.3320) / 0.0760, 2));
+  d -= 0.0026 * Math.exp(-Math.pow(u / 0.0330, 2) - Math.pow((v - 1.3480) / 0.0700, 2));
+  d += 0.0014 * Math.exp(-Math.pow(u / 0.0300, 2)) * smoothstep(1.330, 1.180, v);
+  d -= 0.0026 * smoothstep(1.235, 1.120, v);
+  d -= 0.0014 * smoothstep(1.360, 1.430, v);
+  return d;
+}
+
+function plateSurf(extra = 0.0) {
+  const base = coreFrontSurf(0.0);
+  const xe = chestEdgeCurve();
+  return (u, v) => {
+    const [p, n] = base(u, v);
+    const r = Math.min(1.0, Math.abs(u) / Math.max(1e-5, xe.at(v)));
+    const lift = PLATE_LIFT * (0.34 + 0.66 * (1.0 - Math.pow(r, 2.6)));
+    const d = Math.max(0.0024, lift + plateDisp(u, v));
+    return [p.add(n.mul(d + extra)), n];
+  };
+}
+
+function buildChestPlate() {
+  const xe = chestEdgeCurve();
+  const surf = plateSurf();
+  const z0 = CHEST_Z0, z1 = CHEST_Z1;
+  const pts = [];
+  const N = 66;
+  for (let i = 0; i <= N; i++) { const v = z1 - (z1 - z0) * (i / N); pts.push([xe.at(v), v]); }
+  const b = xe.at(z0);
+  for (let i = 1; i < 15; i++) {
+    const f = i / 15.0;
+    pts.push([b * Math.cos(Math.PI * f), z0 - 0.0022 * Math.pow(Math.sin(Math.PI * f), 0.7)]);
+  }
+  for (let i = 0; i <= N; i++) { const v = z0 + (z1 - z0) * (i / N); pts.push([-xe.at(v), v]); }
+  const t = xe.at(z1);
+  for (let i = 1; i < 13; i++) {
+    const f = i / 13.0;
+    pts.push([-t * Math.cos(Math.PI * f), z1 + 0.0016 * Math.pow(Math.sin(Math.PI * f), 0.7)]);
+  }
+  const outline = polyOutline(pts, 240, 1);
+  const ob = pillow(outline, surf, {
+    t_front: 0.0040, t_back: 0.0250, layers: 20, name: 'chest_plate',
+    cname: 'TORSO', rim: 0.145, centre: [0.0, 1.278]
+  });
+  finish(ob, { bevel: 0.0008, bseg: 2, bangle: 32 });
+  setmat(ob, 'M_SHELL');
+  return ob;
+}
+
+function buildStrap(side = 1) {
+  const xe = chestEdgeCurve();
+  const z1 = 1.4510, z0 = 1.3380;
+  const d = 3e-4;
+  const st = [];
+  const NR = 52;
+  for (let i = 0; i <= NR; i++) {
+    const z = z1 - (z1 - z0) * (i / NR);
+    const t = (z - z0) / (z1 - z0);
+    let w = 0.0180 * Math.pow(t, 0.38);
+    w *= 1.0 - 0.52 * smoothstep(0.88, 1.0, t);
+    const thick = 0.0052 * (0.32 + 0.68 * Math.pow(t, 0.32));
+    const xin = xe.at(z) + 0.0016;
+    const xout = Math.min(C_AX.at(z) - 0.0024, xin + 2 * w);
+    const xc = 0.5 * (xin + xout);
+    w = Math.max(0.0008, 0.5 * (xout - xin));
+    const fx = (coreFrontY(xc + d, z) - coreFrontY(xc - d, z)) / (2 * d);
+    const L = Math.hypot(1.0, fx);
+    const nx = fx / L, ny = -1.0 / L;
+    const yc = coreFrontY(xc, z);
+    const lift = 0.0034;
+    st.push({ t: z, ax: w * L, by: thick,
+              ox: side * (xc + nx * lift), oy: yc + ny * lift,
+              rot: side * Math.atan(fx), e: 2.6 });
+  }
+  const ob = loft(st, { n: 30, rings: 110, name: `strap_${side > 0 ? 'L' : 'R'}`,
+                        cname: 'TORSO', cap0: true, cap1: true,
+                        tip0: 0.0028, tip1: 0.0045, mode: 'spline', even: 0.75 });
+  finish(ob, { bevel: 0.0005, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_BLACK');
+  return ob;
+}
+
+/* ---- TESLA wordmark ----------------------------------------------------- */
+
+function letterQuads(ch, w, h, b) {
+  const cx = w * 0.5;
+  if (ch === 'T') return [
+    [[0, h], [w, h], [w, h - b], [0, h - b]],
+    [[cx - b / 2, h - b], [cx + b / 2, h - b], [cx + b / 2, 0], [cx - b / 2, 0]]];
+  if (ch === 'E') return [
+    [[0, h], [w, h], [w, h - b], [0, h - b]],
+    [[0, h / 2 + b / 2], [w * 0.86, h / 2 + b / 2], [w * 0.86, h / 2 - b / 2], [0, h / 2 - b / 2]],
+    [[0, b], [w, b], [w, 0], [0, 0]]];
+  if (ch === 'S') return [
+    [[0, h], [w, h], [w, h - b], [0, h - b]],
+    [[0, h - b], [b, h - b], [b, h / 2 + b / 2], [0, h / 2 + b / 2]],
+    [[0, h / 2 + b / 2], [w, h / 2 + b / 2], [w, h / 2 - b / 2], [0, h / 2 - b / 2]],
+    [[w - b, h / 2 - b / 2], [w, h / 2 - b / 2], [w, b], [w - b, b]],
+    [[0, b], [w, b], [w, 0], [0, 0]]];
+  if (ch === 'L') return [
+    [[0, h], [b, h], [b, 0], [0, 0]],
+    [[b, b], [w, b], [w, 0], [b, 0]]];
+  if (ch === 'A') {
+    const f = w * 0.30;
+    return [
+      [[0, 0], [b, 0], [cx - f / 2 + b, h], [cx - f / 2, h]],
+      [[w - b, 0], [w, 0], [cx + f / 2, h], [cx + f / 2 - b, h]],
+      [[cx - f / 2, h], [cx + f / 2, h], [cx + f / 2 - b * 0.55, h - b], [cx - f / 2 + b * 0.55, h - b]]];
+  }
+  return [];
+}
+
+function buildWordmark(z = 1.3555, height = 0.0150, track = 0.0180, depth = 0.0011) {
+  const surf = plateSurf(0.0040);
+  const text = 'TESLA';
+  const lw = { T: 0.0132, E: 0.0113, S: 0.0115, L: 0.0104, A: 0.0136 };
+  const b = 0.00235;
+  const total = [...text].reduce((s, c) => s + lw[c], 0) + track * (text.length - 1);
+  let x0 = -total / 2.0;
+  const parts = [];
+  for (let ci = 0; ci < text.length; ci++) {
+    const ch = text[ci];
+    const w = lw[ch];
+    const polys = letterQuads(ch, w, height, b);
+    for (let pi = 0; pi < polys.length; pi++) {
+      const poly = polys[pi];
+      const n = poly.length;
+      const verts = [];
+      for (const lift of [0.0, depth]) {
+        for (const [px, pz] of poly) {
+          const ux = x0 + px;
+          const uz = z + pz - height / 2.0;
+          const [p, nn] = surf(ux, uz);
+          verts.push(p.add(nn.mul(lift + 0.0003)).toArray());
+        }
+      }
+      const faces = [];
+      for (let j = 0; j < n; j++) { const j2 = (j + 1) % n; faces.push([j, j2, n + j2, n + j]); }
+      const top = []; for (let i = n; i < 2 * n; i++) top.push(i); faces.push(top);
+      const bot = []; for (let i = n - 1; i >= 0; i--) bot.push(i); faces.push(bot);
+      parts.push(meshObj(`wm_${ci}_${pi}`, verts, faces, 'TORSO'));
+    }
+    x0 += w + track;
+  }
+  const ob = joinMeshes(parts, 'wordmark', 'TORSO');
+  weld(ob, 1e-5);
+  shade(ob, false);
+  setmat(ob, 'M_LOGO');
+  return ob;
+}
+
+function buildTorso() {
+  collClear('TORSO');
+  coreCurves();
+  buildTorsoCore();
+  buildChestPlate();
+  buildBackPanel();
+  buildBackPiece();
+  buildStrap(1);
+  buildStrap(-1);
+  buildWordmark();
+}
+
+/* ==========================================================================
+   7. p_head.py -- head shell: glossy face plate + matte rear hood,
+      cyan edge LED.
+   ========================================================================== */
+
+/* (z, half-width, back Y, front depth, e_back, e_front) */
+const HEAD = [
+  [1.4880, 0.0560, 0.0920, 0.0300, 2.70, 2.90],
+  [1.4950, 0.0546, 0.0930, 0.0470, 2.64, 2.84],
+  [1.5020, 0.0530, 0.0942, 0.0628, 2.58, 2.76],
+  [1.5090, 0.0520, 0.0946, 0.0748, 2.52, 2.68],
+  [1.5160, 0.0516, 0.0902, 0.0842, 2.47, 2.60],
+  [1.5230, 0.0522, 0.0866, 0.0884, 2.43, 2.54],
+  [1.5300, 0.0536, 0.0842, 0.0908, 2.40, 2.49],
+  [1.5395, 0.0580, 0.0830, 0.0942, 2.37, 2.45],
+  [1.5475, 0.0614, 0.0834, 0.0968, 2.36, 2.43],
+  [1.5555, 0.0638, 0.0846, 0.0990, 2.35, 2.42],
+  [1.5635, 0.0658, 0.0868, 0.1008, 2.34, 2.41],
+  [1.5715, 0.0680, 0.0886, 0.1024, 2.34, 2.40],
+  [1.5795, 0.0702, 0.0908, 0.1038, 2.33, 2.39],
+  [1.5875, 0.0722, 0.0930, 0.1050, 2.33, 2.38],
+  [1.5955, 0.0738, 0.0964, 0.1056, 2.33, 2.38],
+  [1.6030, 0.0750, 0.1002, 0.1058, 2.33, 2.38],
+  [1.6110, 0.0766, 0.1030, 0.1058, 2.33, 2.38],
+  [1.6190, 0.0776, 0.1048, 0.1053, 2.34, 2.39],
+  [1.6270, 0.0784, 0.1064, 0.1042, 2.35, 2.40],
+  [1.6350, 0.0792, 0.1071, 0.1020, 2.36, 2.41],
+  [1.6430, 0.0796, 0.1071, 0.1004, 2.37, 2.42],
+  [1.6510, 0.0796, 0.1068, 0.0982, 2.38, 2.44],
+  [1.6590, 0.0792, 0.1060, 0.0964, 2.40, 2.46],
+  [1.6665, 0.0783, 0.1042, 0.0932, 2.42, 2.48],
+  [1.6745, 0.0772, 0.1016, 0.0896, 2.44, 2.50],
+  [1.6825, 0.0748, 0.0974, 0.0850, 2.46, 2.52],
+  [1.6905, 0.0702, 0.0920, 0.0798, 2.48, 2.55],
+  [1.6985, 0.0643, 0.0870, 0.0720, 2.51, 2.58],
+  [1.7065, 0.0572, 0.0798, 0.0645, 2.54, 2.62],
+  [1.7145, 0.0480, 0.0692, 0.0512, 2.58, 2.67],
+  [1.7215, 0.0374, 0.0578, 0.0384, 2.63, 2.73],
+  [1.7265, 0.0250, 0.0450, 0.0250, 2.70, 2.82],
+  [1.7295, 0.0110, 0.0290, 0.0110, 2.80, 2.95],
+];
+
+const _HZ = HEAD.map(h => h[0]);
+let H_AX = null, H_BY = null, H_BY2 = null, H_EB = null, H_EF = null;
+
+/* least-squares polynomial in normalised z, evaluated as sqrt(P(z)) */
+class HPoly {
+  constructor(xs, ys, deg = 9, w = null) {
+    this.a = xs[0]; this.b = xs[xs.length - 1];
+    const t = xs.map(x => this._t(x));
+    const d = ys.map(y => y * y);
+    this.c = polyfit(t, d, deg, w);
+  }
+  _t(x) { return (2.0 * (x - this.a) / (this.b - this.a)) - 1.0; }
+  at(x) {
+    const v = polyval(this.c, this._t(x));
+    return v > 0.0 ? Math.sqrt(v) : 0.0;
+  }
+}
+
+function fairPoly(xs, ys, deg = 9) {
+  const w = new Array(xs.length).fill(1.0);
+  for (let i = 0; i < 3; i++) w[i] = 3.0;                       /* hold the jaw roll-under */
+  for (let i = xs.length - 6; i < xs.length; i++) w[i] = 3.0;   /* and the crown           */
+  return new HPoly(xs, ys, deg, w);
+}
+function fairLin(xs, ys, deg = 5) {
+  const p = polyfit(xs, ys, deg, null);
+  return { at: x => polyval(p, x) };
+}
+
+function headCurves() {
+  H_AX = fairPoly(_HZ, HEAD.map(h => h[1]));
+  H_BY = fairPoly(_HZ, HEAD.map(h => h[2]));
+  H_BY2 = fairPoly(_HZ, HEAD.map(h => h[3]));
+  H_EB = fairLin(_HZ, HEAD.map(h => h[4]));
+  H_EF = fairLin(_HZ, HEAD.map(h => h[5]));
+}
+
+const CROWN_Z0 = 1.6960, CROWN_Z1 = 1.7160;
+
+function headOy(z) {
+  const k = smoothstep(CROWN_Z0, CROWN_Z1, z);
+  return k * 0.5 * (H_BY.at(z) - H_BY2.at(z));
+}
+function headSection(z) {
+  const oy = headOy(z);
+  return [H_AX.at(z), H_BY.at(z) - oy, H_BY2.at(z) + oy, oy];
+}
+
+/* u in [-2,2] : 0 = front meridian, +/-1 = widest point, +/-2 = back */
+function headPt(u, z) {
+  const th = -Math.PI / 2 + u * Math.PI / 2;
+  const [axv, byv, by2v, oy] = headSection(z);
+  const ax = Math.max(1e-6, axv);
+  const e = Math.max(2.02, Math.sin(th) < 0 ? H_EF.at(z) : H_EB.at(z));
+  const p = 2.0 / e;
+  const c = Math.cos(th), s = Math.sin(th);
+  const x = ax * copysignPow(c, p, c);
+  const b = s >= 0 ? byv : by2v;
+  const y = oy + b * copysignPow(s, p, s);
+  return vec(x, y, z);
+}
+
+function headSurf(offset = 0.0, uscale = 0.085) {
+  const du = 4e-4, dv = 4e-4;
+  const raw = (a, v) => headPt(a / uscale, v);
+  return (a, v) => {
+    const pu = raw(a + du, v).sub(raw(a - du, v));
+    const pv = raw(a, v + dv).sub(raw(a, v - dv));
+    let n = pu.cross(pv);
+    if (n.length < 1e-12) n = vec(0, -1, 0);
+    n = n.normalized();
+    return [raw(a, v).add(n.mul(offset)), n];
+  };
+}
+
+/* exact inverse of headPt for a point lying on the shell */
+function uOfPoint(p) {
+  const z = p[2];
+  const [axv, byv, by2v, oy] = headSection(z);
+  const ax = Math.max(1e-6, axv);
+  const dy = p[1] - oy;
+  const back = dy >= 0.0;
+  const b = Math.max(1e-6, back ? byv : by2v);
+  const e = Math.max(2.02, back ? H_EB.at(z) : H_EF.at(z));
+  const cx = Math.pow(Math.min(1.0, Math.abs(p[0]) / ax), e / 2.0);
+  const cy = Math.pow(Math.min(1.0, Math.abs(dy) / b), e / 2.0);
+  const th = Math.atan2((back ? 1.0 : -1.0) * cy, cx);
+  return 2.0 * th / Math.PI + 1.0;
+}
+
+const SEAM_UZ = [
+  [0.000, 1.5090], [0.100, 1.5098], [0.200, 1.5120], [0.300, 1.5158],
+  [0.400, 1.5208], [0.500, 1.5264], [0.600, 1.5324], [0.700, 1.5390],
+  [0.750, 1.5427], [0.800, 1.5480], [0.830, 1.5536], [0.860, 1.5620],
+  [0.880, 1.5714], [0.900, 1.5806], [0.920, 1.5920], [0.940, 1.6046],
+  [0.955, 1.6162], [0.970, 1.6318], [0.985, 1.6486], [1.000, 1.6630],
+  [1.020, 1.6702], [1.045, 1.6762], [1.075, 1.6822], [1.115, 1.6880],
+  [1.170, 1.6944], [1.240, 1.7013], [1.330, 1.7072], [1.450, 1.7124],
+  [1.600, 1.7166], [1.760, 1.7196], [1.900, 1.7212], [2.000, 1.7218],
+];
+const SEAM_UMAX = 2.000;
+const seamCurve = () => new Curve1D(SEAM_UZ.map(p => p[0]), SEAM_UZ.map(p => p[1]), 'pchip');
+
+const Z_APEX = 1.7320;
+const CROWN_START = 1.7180;
+
+function buildHeadShell() {
+  headCurves();
+  const z0 = HEAD[0][0];
+  const st = [];
+  const N = 96;
+  for (let i = 0; i <= N; i++) {
+    const z = z0 + (CROWN_START - z0) * (i / N);
+    const [ax, by, by2, oy] = headSection(z);
+    st.push({ t: z, ax, by, by2, oy, e: H_EB.at(z), e_dn: H_EF.at(z) });
+  }
+  const [axc, byc, by2c, oyc] = headSection(CROWN_START);
+  const halfc = 0.5 * (byc + by2c);
+  const h = Z_APEX - CROWN_START;
+  const eb = H_EB.at(CROWN_START), ef = H_EF.at(CROWN_START);
+  const M = 26;
+  for (let j = 1; j <= M; j++) {
+    const s = 1.0 - j / M;
+    const z = CROWN_START + h * (1.0 - s * s);
+    st.push({ t: z, ax: Math.max(2e-5, axc * s), by: Math.max(2e-5, halfc * s),
+              by2: Math.max(2e-5, halfc * s), oy: oyc, e: eb, e_dn: ef });
+  }
+  const NB = 250;
+  const ringT = [];
+  for (let i = 0; i <= NB; i++) ringT.push(z0 + (CROWN_START - z0) * (i / NB));
+  for (let j = 1; j <= M * 2; j++) {
+    const s = 1.0 - j / (M * 2.0);
+    ringT.push(CROWN_START + h * (1.0 - s * s));
+  }
+  const ob = loft(st, { n: 112, ring_t: ringT, name: 'head_shell', cname: 'HEAD',
+                        cap0: true, cap1: true, tip0: 0.0060, tip1: 0.00012,
+                        mode: 'spline', even: 0.58 });
+  finish(ob, { bevel: 0.0007, bseg: 2, bangle: 44 });
+  setmat(ob, 'M_HELMET');
+  return ob;
+}
+
+/* paint the glossy face plate onto the shell -- everything ABOVE the seam */
+function assignVisorFaces(ob) {
+  const cz = seamCurve();
+  const idx = ob.mats.length;
+  ob.mats.push('M_VISOR');
+  for (let fi = 0; fi < ob.f.length; fi++) {
+    const c = ob.faceCentre(fi);
+    const u = Math.min(SEAM_UMAX, Math.max(0.0, uOfPoint(c)));
+    if (c[2] > cz.at(u)) ob.fm[fi] = idx;
+  }
+  return ob;
+}
+
+function buildVisorLed() {
+  const cz = seamCurve();
+  const surf = headSurf(0.0007);
+  const uscale = 0.085;
+  const N = 420;
+  const UM = SEAM_UMAX - 0.004;
+  const pts = [];
+  for (let i = 0; i <= N; i++) {
+    const u = -UM + 2.0 * UM * (i / N);
+    const z = cz.at(Math.abs(u));
+    pts.push(surf(u * uscale, z)[0]);
+  }
+  const st = [];
+  for (let i = 0; i <= N; i++) st.push({ t: i / N, ax: 0.00145, by: 0.00105, e: 2.6 });
+  const ob = loftSpine(pts, st, { n: 14, name: 'visor_led', cname: 'HEAD',
+                                  up: vec(0, 0, 1), cap0: true, cap1: true,
+                                  tip0: 0.0006, tip1: 0.0006, rings: N + 1 });
+  finish(ob, { bevel: 0 });
+  setmat(ob, 'M_LED');
+  return ob;
+}
+
+function buildHead() {
+  collClear('HEAD');
+  headCurves();
+  const sh = buildHeadShell();
+  assignVisorFaces(sh);
+  buildVisorLed();
+}
+
+/* ==========================================================================
+   8. p_arm.py -- shoulder cap, upper arm, elbow housing + ribbed pad,
+      open-frame forearm with exposed actuator, wrist block.
+   ========================================================================== */
+
+const ARM_C = [
+  [1.4400, 0.1755, 0.0470], [1.4000, 0.1900, 0.0510], [1.3600, 0.2055, 0.0555],
+  [1.3200, 0.2140, 0.0600], [1.2700, 0.2195, 0.0655], [1.2200, 0.2240, 0.0705],
+  [1.1700, 0.2278, 0.0748], [1.1300, 0.2302, 0.0770], [1.0800, 0.2332, 0.0742],
+  [1.0300, 0.2372, 0.0662], [0.9800, 0.2420, 0.0546], [0.9300, 0.2470, 0.0404],
+  [0.8900, 0.2496, 0.0288], [0.8500, 0.2466, 0.0140],
+];
+let AX_C = null, AY_C = null;
+
+function armCurves() {
+  const zs = ARM_C.map(a => a[0]);
+  AX_C = new Curve1D(zs, ARM_C.map(a => a[1]), 'spline');
+  AY_C = new Curve1D(zs, ARM_C.map(a => a[2]), 'spline');
+}
+
+const _st = (z, ax, by, by2 = null, e = 2.6, e_dn = null, sx = 1) => ({
+  t: z, ax, by, by2: (by2 === null ? by : by2),
+  e, e_dn: (e_dn === null ? e : e_dn),
+  ox: sx * AX_C.at(z), oy: AY_C.at(z)
+});
+
+function buildShoulderCap(sx = 1) {
+  const rows = [
+    [1.4425, 0.0098, 0.0195, 0.0150], [1.4380, 0.0180, 0.0320, 0.0245],
+    [1.4310, 0.0310, 0.0470, 0.0370], [1.4220, 0.0432, 0.0600, 0.0482],
+    [1.4110, 0.0510, 0.0668, 0.0552], [1.3980, 0.0572, 0.0712, 0.0604],
+    [1.3800, 0.0590, 0.0726, 0.0626], [1.3600, 0.0588, 0.0718, 0.0624],
+    [1.3400, 0.0568, 0.0692, 0.0606], [1.3200, 0.0548, 0.0656, 0.0576],
+    [1.3020, 0.0524, 0.0616, 0.0544], [1.2870, 0.0500, 0.0578, 0.0512],
+    [1.2760, 0.0478, 0.0546, 0.0486],
+  ];
+  const st = rows.map(([z, ax, by, by2]) => {
+    const t = smoothstep(1.2760, 1.3600, z);
+    return { t: z, ax, by, by2, e: 2.55, e_dn: 2.75,
+             ox: sx * (AX_C.at(z) + 0.0026 * t), oy: AY_C.at(z) };
+  });
+  const ob = loft(st, { n: 64, rings: 96, name: `shoulder_cap${sx}`, cname: 'ARM',
+                        cap0: false, cap1: true, tip1: 0.0090, mode: 'spline', even: 0.66 });
+  finish(ob, { bevel: 0.0011, bseg: 3, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+  return ob;
+}
+
+function buildUpperarm(sx = 1) {
+  const rows = [
+    [1.4180, 0.0480, 0.0620, 0.0505], [1.4000, 0.0518, 0.0662, 0.0556],
+    [1.3700, 0.0538, 0.0682, 0.0588], [1.3400, 0.0532, 0.0664, 0.0578],
+    [1.3100, 0.0516, 0.0630, 0.0552], [1.2800, 0.0500, 0.0596, 0.0524],
+    [1.2500, 0.0486, 0.0566, 0.0500], [1.2200, 0.0472, 0.0540, 0.0478],
+    [1.1990, 0.0464, 0.0524, 0.0464], [1.1930, 0.0458, 0.0516, 0.0456],
+  ];
+  const st = rows.map(([z, ax, by, by2]) => _st(z, ax, by, by2, 2.55, 2.75, sx));
+  const ob = loft(st, { n: 64, rings: 92, name: `upperarm${sx}`, cname: 'ARM',
+                        cap0: false, cap1: false, mode: 'spline', even: 0.66 });
+  finish(ob, { bevel: 0.0010, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+  return ob;
+}
+
+function buildArmRing(sx = 1, z = 1.1930, h = 0.0042, out = 0.0012) {
+  const rows = [[z + h, 0.0455, 0.0512, 0.0452], [z, 0.0452, 0.0508, 0.0449],
+                [z - h, 0.0455, 0.0512, 0.0452]];
+  const st = rows.map(([zz, ax, by, by2]) => _st(zz, ax - out, by - out, by2 - out, 2.55, 2.75, sx));
+  const ob = loft(st, { n: 64, rings: 14, name: `armring${sx}`, cname: 'ARM',
+                        cap0: false, cap1: false, mode: 'pchip', even: 0.66 });
+  finish(ob, { bevel: 0.0004, bseg: 1, bangle: 40 });
+  setmat(ob, 'M_DARKGREY');
+  return ob;
+}
+
+const ELBOW_ROWS = [
+  [1.1900, 0.0455, 0.0512, 0.0452], [1.1700, 0.0452, 0.0508, 0.0446],
+  [1.1400, 0.0446, 0.0500, 0.0434], [1.1100, 0.0438, 0.0486, 0.0418],
+  [1.0800, 0.0426, 0.0466, 0.0400], [1.0500, 0.0410, 0.0442, 0.0378],
+  [1.0250, 0.0392, 0.0418, 0.0356], [1.0050, 0.0374, 0.0396, 0.0336],
+  [0.9930, 0.0360, 0.0380, 0.0322],
+];
+const EZ = ELBOW_ROWS.map(r => r[0]);
+let E_AX = null, E_BY = null, E_BY2 = null;
+
+function elbowCurves() {
+  E_AX = new Curve1D(EZ, ELBOW_ROWS.map(r => r[1]), 'spline');
+  E_BY = new Curve1D(EZ, ELBOW_ROWS.map(r => r[2]), 'spline');
+  E_BY2 = new Curve1D(EZ, ELBOW_ROWS.map(r => r[3]), 'spline');
+}
+
+function buildElbowHousing(sx = 1) {
+  const st = ELBOW_ROWS.map(([z, ax, by, by2]) => _st(z, ax, by, by2, 2.5, 2.7, sx));
+  const ob = loft(st, { n: 64, rings: 92, name: `elbow${sx}`, cname: 'ARM',
+                        cap0: false, cap1: false, mode: 'spline', even: 0.66 });
+  finish(ob, { bevel: 0.0009, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+  return ob;
+}
+
+/* (a,v) on the elbow housing.  u=0 -> outboard (+X side), u=+/-1 -> +/-Y */
+function elbowSurf(sx = 1, offset = 0.0, uscale = 0.048) {
+  const du = 4e-4, dv = 4e-4;
+  const raw = (a, v) => {
+    const u = a / uscale;
+    const th = u * Math.PI / 2.0;
+    const ax = Math.max(1e-6, E_AX.at(v));
+    const s = Math.sin(th);
+    const by = s >= 0 ? E_BY.at(v) : E_BY2.at(v);
+    const e = s >= 0 ? 2.5 : 2.7;
+    const p = 2.0 / e;
+    const c = Math.cos(th);
+    const x = ax * copysignPow(c, p, c);
+    const y = by * copysignPow(s, p, s);
+    return vec(sx * (AX_C.at(v) + x), AY_C.at(v) + y, v);
+  };
+  return (a, v) => {
+    const pu = raw(a + du, v).sub(raw(a - du, v));
+    const pv = raw(a, v + dv).sub(raw(a, v - dv));
+    let n = sx > 0 ? pu.cross(pv) : pv.cross(pu);
+    if (n.length < 1e-12) n = vec(sx, 0, 0);
+    n = n.normalized();
+    return [raw(a, v).add(n.mul(offset)), n];
+  };
+}
+
+/* (z, half-extent in u) 1.0 = 90 deg of the section */
+const PAD = [
+  [1.1745, 0.00], [1.1715, 0.230], [1.1670, 0.400], [1.1595, 0.545],
+  [1.1480, 0.650], [1.1320, 0.722], [1.1100, 0.768], [1.0850, 0.784],
+  [1.0580, 0.778], [1.0340, 0.744], [1.0170, 0.676], [1.0065, 0.568],
+  [1.0000, 0.412], [0.9975, 0.212], [0.9968, 0.00],
+];
+
+function buildElbowPad(sx = 1) {
+  const zs = PAD.map(p => p[0]);
+  const cu = new Curve1D(zs, PAD.map(p => p[1]), 'spline');
+  const uscale = 0.048;
+  const ctr = -1.00;
+  const pts = [];
+  const N = 60;
+  const z1 = PAD[0][0], z0 = PAD[PAD.length - 1][0];
+  for (let i = 0; i <= N; i++) { const v = z1 - (z1 - z0) * (i / N); pts.push([(ctr + cu.at(v)) * uscale, v]); }
+  for (let i = 0; i <= N; i++) { const v = z0 + (z1 - z0) * (i / N); pts.push([(ctr - cu.at(v)) * uscale, v]); }
+  const outline = polyOutline(pts, 150, 1);
+
+  const disp = (u, v) => {
+    const f = Math.cos(2 * Math.PI * (v - 1.0870) / 0.0208);
+    const env = smoothstep(0.9990, 1.0140, v) * smoothstep(1.1760, 1.1580, v);
+    return 0.00135 * f * env;
+  };
+
+  const surf = elbowSurf(sx, 0.0011, uscale);
+  const ob = pillow(outline, surf, {
+    t_front: 0.0030, t_back: 0.0120, layers: 42, name: `elbowpad${sx}`,
+    cname: 'ARM', rim: 0.24, centre: [ctr * uscale, 1.0860], disp
+  });
+  finish(ob, { bevel: 0.0005, bseg: 2, bangle: 44 });
+  setmat(ob, 'M_RUBBER');
+  return ob;
+}
+
+function buildArmSeam(sx = 1, z = 1.3060, depth = 0.0016) {
+  const rows = [[z + 0.0030, 0.0524, 0.0620, 0.0548],
+                [z, 0.0512, 0.0606, 0.0536],
+                [z - 0.0030, 0.0524, 0.0620, 0.0548]];
+  const st = rows.map(([zz, ax, by, by2]) => ({
+    t: zz, ax: ax - depth, by: by - depth, by2: by2 - depth,
+    e: 2.55, e_dn: 2.75, ox: sx * (AX_C.at(zz) + 0.0010), oy: AY_C.at(zz)
+  }));
+  const ob = loft(st, { n: 56, rings: 12, name: `armseam${sx}`, cname: 'ARM',
+                        cap0: false, cap1: false, mode: 'pchip', even: 0.66 });
+  finish(ob, { bevel: 0.0004, bseg: 1, bangle: 44 });
+  setmat(ob, 'M_DARKGREY');
+  return ob;
+}
+
+const FA_ROWS = [
+  [0.9960, 0.0362, 0.0382, 0.0324], [0.9800, 0.0356, 0.0372, 0.0314],
+  [0.9600, 0.0348, 0.0358, 0.0300], [0.9400, 0.0340, 0.0342, 0.0286],
+  [0.9200, 0.0332, 0.0326, 0.0272], [0.9000, 0.0324, 0.0310, 0.0258],
+  [0.8850, 0.0318, 0.0298, 0.0248],
+];
+
+function buildForearmFrame(sx = 1) {
+  const zs = FA_ROWS.map(r => r[0]);
+  const fax = new Curve1D(zs, FA_ROWS.map(r => r[1]), 'spline');
+  const fby = new Curve1D(zs, FA_ROWS.map(r => r[2]), 'spline');
+  const fby2 = new Curve1D(zs, FA_ROWS.map(r => r[3]), 'spline');
+  for (const [rail, sgn] of [['out', 1], ['in', -1]]) {
+    const st = [];
+    for (const z of [0.9975, 0.9880, 0.9700, 0.9500, 0.9300, 0.9100, 0.8940, 0.8860]) {
+      const a = fax.at(z);
+      st.push({ t: z, ax: 0.0090, by: (fby.at(z) + fby2.at(z)) * 0.50,
+                by2: (fby.at(z) + fby2.at(z)) * 0.50, e: 2.7, e_dn: 2.7,
+                ox: sx * (AX_C.at(z) + sgn * (a - 0.0086)),
+                oy: AY_C.at(z) + (fby.at(z) - fby2.at(z)) * 0.5 });
+    }
+    const ob = loft(st, { n: 40, rings: 54, name: `fa_rail_${rail}${sx}`, cname: 'ARM',
+                          cap0: true, cap1: true, tip0: 0.006, tip1: 0.006,
+                          mode: 'spline', even: 0.7 });
+    finish(ob, { bevel: 0.0008, bseg: 2, bangle: 34 });
+    setmat(ob, 'M_SHELL');
+  }
+  const st = [];
+  for (const z of [0.9975, 0.9850, 0.9650, 0.9450, 0.9250, 0.9060, 0.8930, 0.8865]) {
+    const a = fax.at(z);
+    st.push({ t: z, ax: a - 0.0022, by: 0.0058, by2: 0.0058, e: 4.0,
+              ox: sx * AX_C.at(z), oy: AY_C.at(z) + fby.at(z) - 0.0050 });
+  }
+  const ob = loft(st, { n: 44, rings: 48, name: `fa_web${sx}`, cname: 'ARM',
+                        cap0: true, cap1: true, tip0: 0.004, tip1: 0.004, mode: 'spline' });
+  finish(ob, { bevel: 0.0007, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+}
+
+function buildForearmActuator(sx = 1) {
+  const st = [];
+  for (const [z, r] of [[0.9930, 0.0138], [0.9880, 0.0176], [0.9750, 0.0192],
+                        [0.9450, 0.0195], [0.9150, 0.0192], [0.9000, 0.0180],
+                        [0.8940, 0.0150]]) {
+    st.push({ t: z, ax: r, by: r * 1.02, e: 2.3,
+              ox: sx * (AX_C.at(z) + 0.0016), oy: AY_C.at(z) + 0.0038 });
+  }
+  const ob = loft(st, { n: 44, rings: 44, name: `fa_act${sx}`, cname: 'ARM',
+                        cap0: true, cap1: true, tip0: 0.004, tip1: 0.004, mode: 'spline' });
+  finish(ob, { bevel: 0.0007, bseg: 2, bangle: 36 });
+  setmat(ob, 'M_DARKMECH');
+  return ob;
+}
+
+function buildWrist(sx = 1) {
+  const st = [];
+  for (const [z, ax, by, by2] of [[0.8900, 0.0300, 0.0288, 0.0244],
+                                  [0.8850, 0.0292, 0.0281, 0.0238],
+                                  [0.8820, 0.0284, 0.0274, 0.0232],
+                                  [0.8790, 0.0268, 0.0260, 0.0222]]) {
+    st.push(_st(z, ax, by, by2, 3.0, 3.2, sx));
+  }
+  const ob = loft(st, { n: 48, rings: 30, name: `wrist${sx}`, cname: 'ARM',
+                        cap0: false, cap1: true, tip1: 0.0062, mode: 'spline' });
+  finish(ob, { bevel: 0.0008, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+  return ob;
+}
+
+function buildArm(sx = 1) {
+  armCurves();
+  elbowCurves();
+  buildShoulderCap(sx);
+  buildUpperarm(sx);
+  buildArmSeam(sx);
+  buildArmRing(sx);
+  buildElbowHousing(sx);
+  buildElbowPad(sx);
+  buildForearmFrame(sx);
+  buildForearmActuator(sx);
+  buildWrist(sx);
+}
+
+function buildArms() {
+  collClear('ARM');
+  buildArm(1);
+  buildArm(-1);
+}
+
+/* ==========================================================================
+   9. p_hand.py -- five-finger hand: white structural frame, black back plate,
+      white phalanges with dark joint bands.
+   ========================================================================== */
+
+const HAND_YAW = 58.0;
+const WRIST = [0.2474, 0.0161, 0.8600];
+
+/* the forearm leans forward ~17 deg by the wrist; derived from ARM_C itself */
+function wristTilt() {
+  const z0 = 0.9500, z1 = 0.8600;
+  if (AX_C === null) armCurves();
+  const dy = AY_C.at(z1) - AY_C.at(z0);
+  const dz = z1 - z0;
+  return Math.atan2(dy, -dz) * 180 / Math.PI;
+}
+
+function place(ob, sx) {
+  xform(ob, { rot: [0, 0, sx * HAND_YAW] });
+  xform(ob, { rot: [wristTilt(), 0, 0] });
+  xform(ob, { loc: [sx * WRIST[0], WRIST[1], WRIST[2]] });
+  return ob;
+}
+
+function buildWristCuff(sx = 1, cname = 'HAND') {
+  const out = [];
+  let st = [{ t: -0.0010, ax: 0.0296, by: 0.0220, e: 3.2 },
+            { t: -0.0075, ax: 0.0300, by: 0.0224, e: 3.2 },
+            { t: -0.0155, ax: 0.0296, by: 0.0218, e: 3.2 },
+            { t: -0.0205, ax: 0.0286, by: 0.0208, e: 3.2 }];
+  const ob = loft(st, { n: 48, rings: 20, name: `wrist_cuff${sx}`, cname,
+                        cap0: true, cap1: false, tip0: 0.0050, mode: 'spline' });
+  finish(ob, { bevel: 0.0006, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+  out.push(ob);
+
+  st = [{ t: 0.0175, ax: 0.0132, by: 0.0146, e: 2.8 },
+        { t: 0.0120, ax: 0.0150, by: 0.0165, e: 2.8 },
+        { t: 0.0040, ax: 0.0154, by: 0.0168, e: 2.8 },
+        { t: -0.0020, ax: 0.0146, by: 0.0160, e: 2.8 }];
+  const cv = loft(st, { n: 36, rings: 18, name: `wrist_clevis${sx}`, cname,
+                        cap0: true, cap1: false, tip0: 0.0040, mode: 'spline' });
+  finish(cv, { bevel: 0.0007, bseg: 2, bangle: 32 });
+  setmat(cv, 'M_DARKMECH');
+  out.push(cv);
+
+  st = [{ t: -0.0250, ax: 0.0070, by: 0.0070, e: 2.1 },
+        { t: 0.0250, ax: 0.0070, by: 0.0070, e: 2.1 }];
+  const pin = loft(st, { n: 28, rings: 8, name: `wristpin${sx}`, cname,
+                         cap0: true, cap1: true, tip0: 0.0018, tip1: 0.0018, axis: 'x' });
+  xform(pin, { loc: [0.0, 0.0, 0.0090] });
+  finish(pin, { bevel: 0.0004, bseg: 2, bangle: 40 });
+  setmat(pin, 'M_ALU');
+  out.push(pin);
+
+  const bx = extrudeOutline(rrectOutline(0.0090, 0.0086, 0.0022, 44),
+                            -0.0245, -0.0210, { name: `cuff_boss${sx}`, cname });
+  xform(bx, { rot: [90, 0, 0] });
+  xform(bx, { loc: [0.0, 0.0, -0.0112] });
+  finish(bx, { bevel: 0.0006, bseg: 2, bangle: 34 });
+  setmat(bx, 'M_SHELL');
+  out.push(bx);
+  return out.map(o => place(o, sx));
+}
+
+function buildPalm(sx = 1, cname = 'HAND') {
+  const rows = [
+    [-0.0210, 0.0300, 0.0196, 0.0186], [-0.0300, 0.0336, 0.0206, 0.0196],
+    [-0.0420, 0.0356, 0.0208, 0.0198], [-0.0560, 0.0368, 0.0202, 0.0192],
+    [-0.0700, 0.0372, 0.0192, 0.0180], [-0.0810, 0.0368, 0.0180, 0.0168],
+    [-0.0880, 0.0358, 0.0168, 0.0156],
+  ];
+  const st = rows.map(([z, ax, by, by2]) => ({ t: z, ax, by, by2, e: 3.0, e_dn: 3.2 }));
+  const ob = loft(st, { n: 56, rings: 54, name: `palm${sx}`, cname,
+                        cap0: false, cap1: true, tip1: 0.0075, mode: 'spline', even: 0.7 });
+  finish(ob, { bevel: 0.0009, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL');
+  return place(ob, sx);
+}
+
+function buildHandBack(sx = 1, cname = 'HAND') {
+  const zs = [-0.0210, -0.0300, -0.0420, -0.0560, -0.0700, -0.0810, -0.0880];
+  const axs = [0.0292, 0.0316, 0.0334, 0.0340, 0.0338, 0.0332, 0.0322];
+  const bys = [0.0186, 0.0196, 0.0198, 0.0192, 0.0180, 0.0168, 0.0156];
+  const cax = new Curve1D(zs, axs, 'spline');
+  const cby = new Curve1D(zs, bys, 'spline');
+  const uscale = 0.030;
+
+  const raw = (a, v) => {
+    const u = a / uscale;
+    const th = -Math.PI / 2 + u * Math.PI / 2;
+    const ax = Math.max(1e-6, cax.at(v));
+    const by = cby.at(v);
+    const p = 2.0 / 3.2;
+    const c = Math.cos(th), s = Math.sin(th);
+    return vec(ax * copysignPow(c, p, c), by * copysignPow(s, p, s), v);
+  };
+  const surf = (a, v) => {
+    const pu = raw(a + 3e-4, v).sub(raw(a - 3e-4, v));
+    const pv = raw(a, v + 3e-4).sub(raw(a, v - 3e-4));
+    let n = pu.cross(pv);
+    if (n.length < 1e-12) n = vec(0, -1, 0);
+    n = n.normalized();
+    return [raw(a, v).add(n.mul(0.0009)), n];
+  };
+
+  const ol = [[-0.0225, 0.62], [-0.0270, 0.80], [-0.0340, 0.90], [-0.0450, 0.95],
+              [-0.0580, 0.95], [-0.0700, 0.92], [-0.0800, 0.86], [-0.0862, 0.74],
+              [-0.0892, 0.52], [-0.0902, 0.00]];
+  const cu = new Curve1D(ol.map(o => o[0]), ol.map(o => o[1]), 'spline');
+  const pts = [];
+  const N = 42;
+  const z1 = -0.0225, z0 = -0.0902;
+  for (let i = 0; i <= N; i++) { const v = z1 + (z0 - z1) * (i / N); pts.push([cu.at(v) * uscale, v]); }
+  for (let i = 0; i <= N; i++) { const v = z0 + (z1 - z0) * (i / N); pts.push([-cu.at(v) * uscale, v]); }
+  const outline = polyOutline(pts, 124, 1);
+  const ob = pillow(outline, surf, {
+    t_front: 0.0022, t_back: 0.0090, layers: 11, name: `handback${sx}`,
+    cname, rim: 0.30, centre: [0.0, -0.0540]
+  });
+  finish(ob, { bevel: 0.0006, bseg: 2, bangle: 30 });
+  setmat(ob, 'M_BLACK');
+  return place(ob, sx);
+}
+
+/* (x, y, z_knuckle, length, radius, splay, curl) */
+const FINGERS = [
+  [-0.0330, -0.0010, -0.0830, 0.1020, 0.0086, 13.0, 5.0],
+  [-0.0110, -0.0014, -0.0890, 0.1120, 0.0088, 4.0, 6.0],
+  [0.0110, -0.0014, -0.0872, 0.1045, 0.0085, -4.5, 6.5],
+  [0.0330, -0.0010, -0.0798, 0.0880, 0.0078, -14.0, 7.0],
+];
+
+function buildFinger(sx, idx, cname = 'HAND') {
+  const [x, y, z, L, r, splay, curl] = FINGERS[idx];
+  const segs = [[0.44, 1.00, 0.94], [0.33, 0.94, 0.88], [0.23, 0.88, 0.74]];
+  const objs = [];
+  let pos = vec(0, 0, 0);
+  let ang = 0.0;
+  const stack = [pos.clone()];
+  for (const [f] of segs) {
+    ang += R(curl);
+    pos = pos.add(vec(0, Math.sin(ang), -Math.cos(ang)).mul(L * f));
+    stack.push(pos.clone());
+  }
+
+  for (let si = 0; si < segs.length; si++) {
+    const [, r0, r1] = segs[si];
+    const a = stack[si], b = stack[si + 1];
+    const n = b.sub(a).normalized();
+    const rr0 = r * r0, rr1 = r * r1;
+    const sp = [a.add(n.mul(0.0006)), a.mul(0.75).add(b.mul(0.25)),
+                a.mul(0.4).add(b.mul(0.6)), b.sub(n.mul(0.0010))];
+    const st = [{ t: 0.0, ax: rr0 * 0.94, by: rr0 * 0.78, e: 3.4 },
+                { t: 0.34, ax: rr0, by: rr0 * 0.82, e: 3.4 },
+                { t: 0.72, ax: (rr0 + rr1) * 0.5, by: (rr0 + rr1) * 0.41, e: 3.4 },
+                { t: 1.0, ax: rr1 * 0.96, by: rr1 * 0.80, e: 3.4 }];
+    const ob = loftSpine(sp, st, { n: 26, name: `fseg${idx}_${si}_${sx}`, cname,
+                                   up: vec(1, 0, 0), cap0: true, cap1: true,
+                                   tip0: rr0 * 0.55, tip1: rr1 * (si === 2 ? 0.90 : 0.55),
+                                   rings: 18 });
+    finish(ob, { bevel: 0.0005, bseg: 2, bangle: 34 });
+    setmat(ob, si < 2 ? 'M_SHELL' : 'M_BLACK');
+    objs.push(ob);
+    if (si < 2) {
+      const c = b;
+      const nn = stack[si + 2].sub(a).normalized();
+      const jb = loftSpine([c.sub(nn.mul(0.0050)), c.add(nn.mul(0.0050))],
+                           [{ t: 0.0, ax: rr1 * 0.90, by: rr1 * 0.78, e: 3.0 },
+                            { t: 1.0, ax: rr1 * 0.90, by: rr1 * 0.78, e: 3.0 }],
+                           { n: 24, name: `fjnt${idx}_${si}_${sx}`, cname,
+                             up: vec(1, 0, 0), cap0: true, cap1: true,
+                             tip0: 0.0012, tip1: 0.0012, rings: 8 });
+      finish(jb, { bevel: 0.0004, bseg: 1, bangle: 40 });
+      setmat(jb, 'M_DARKGREY');
+      objs.push(jb);
+    }
+  }
+
+  for (const ob of objs) {
+    xform(ob, { rot: [0, splay, 0] });
+    xform(ob, { loc: [x, y, z] });
+    place(ob, sx);
+  }
+  return objs;
+}
+
+function buildThumb(sx = 1, cname = 'HAND') {
+  const objs = [];
+  const L = 0.0700, r = 0.0094;
+  const segs = [[0.52, 1.00, 0.92], [0.48, 0.92, 0.76]];
+  let pos = vec(0, 0, 0);
+  let ang = 0.0;
+  const stack = [pos.clone()];
+  for (const [f] of segs) {
+    ang += R(20.0);
+    pos = pos.add(vec(0, Math.sin(ang), -Math.cos(ang)).mul(L * f));
+    stack.push(pos.clone());
+  }
+  for (let si = 0; si < segs.length; si++) {
+    const [, r0, r1] = segs[si];
+    const a = stack[si], b = stack[si + 1];
+    const rr0 = r * r0, rr1 = r * r1;
+    const st = [{ t: 0.0, ax: rr0 * 0.92, by: rr0 * 0.82, e: 3.0 },
+                { t: 0.5, ax: (rr0 + rr1) * 0.5, by: (rr0 + rr1) * 0.45, e: 3.0 },
+                { t: 1.0, ax: rr1 * 0.95, by: rr1 * 0.84, e: 3.0 }];
+    const ob = loftSpine([a, a.mul(0.5).add(b.mul(0.5)), b], st,
+                         { n: 26, name: `thumb${si}_${sx}`, cname,
+                           up: vec(1, 0, 0), cap0: true, cap1: true,
+                           tip0: rr0 * 0.55, tip1: rr1 * (si ? 0.95 : 0.55), rings: 16 });
+    finish(ob, { bevel: 0.0005, bseg: 2, bangle: 34 });
+    setmat(ob, si === 0 ? 'M_SHELL' : 'M_BLACK');
+    objs.push(ob);
+  }
+  for (const ob of objs) {
+    xform(ob, { rot: [0, 34, 0] });
+    xform(ob, { rot: [-26, 0, 0] });
+    xform(ob, { loc: [-0.0372, 0.0086, -0.0410] });
+    place(ob, sx);
+  }
+  return objs;
+}
+
+function buildHand(sx = 1) {
+  buildWristCuff(sx);
+  buildPalm(sx);
+  buildHandBack(sx);
+  for (let i = 0; i < 4; i++) buildFinger(sx, i);
+  buildThumb(sx);
+}
+
+function buildHands() {
+  collClear('HAND');
+  buildHand(1);
+  /* left hand = true mirror of the right so the thumb sits correctly */
+  for (const ob of COLL.HAND.slice()) {
+    const m = mirrorDup(ob, ob.name + '_M', 'x');
+    m.coll = 'HAND';
+    COLL.HAND.push(m);
+  }
+}
+
+/* ==========================================================================
+   10. p_hip.py -- exposed pelvis / hip actuator assembly.
+   ========================================================================== */
+
+const HIPX = 0.1120;
+const HIPY = 0.0300;
+const POD_Z = 0.8990;
+const POD_Y = 0.0470;
+
+function boltRing(cx, cy, cz, r, n, br = 0.0028, h = 0.0024, cname = 'HIP',
+                  mat = 'M_DARKMECH', tag = 'b', phase = 0.0) {
+  const objs = [];
+  for (let i = 0; i < n; i++) {
+    const a = 2 * Math.PI * (i / n) + phase;
+    const st = [{ t: 0.0, ax: br, by: br, e: 2.2 },
+                { t: h, ax: br * 0.84, by: br * 0.84, e: 2.2 }];
+    const ob = loft(st, { n: 12, rings: 4, name: `${tag}${i}`, cname,
+                          cap0: false, cap1: true, tip1: br * 0.4 });
+    xform(ob, { loc: [cx + r * Math.cos(a), cy + r * Math.sin(a), cz] });
+    finish(ob, { bevel: 0.0003, bseg: 1, bangle: 40 });
+    setmat(ob, mat);
+    objs.push(ob);
+  }
+  return objs;
+}
+
+function buildHipCentre() {
+  const objs = [];
+  let st = [{ t: 1.0060, ax: 0.0400, by: 0.0470, by2: 0.0300, e: 2.6, oy: HIPY },
+            { t: 0.9950, ax: 0.0452, by: 0.0520, by2: 0.0330, e: 2.8, oy: HIPY },
+            { t: 0.9820, ax: 0.0478, by: 0.0552, by2: 0.0348, e: 3.0, oy: HIPY },
+            { t: 0.9650, ax: 0.0482, by: 0.0558, by2: 0.0352, e: 3.1, oy: HIPY },
+            { t: 0.9480, ax: 0.0470, by: 0.0542, by2: 0.0342, e: 3.0, oy: HIPY },
+            { t: 0.9360, ax: 0.0432, by: 0.0500, by2: 0.0316, e: 2.9, oy: HIPY }];
+  const ob = loft(st, { n: 56, rings: 40, name: 'hip_centre', cname: 'HIP',
+                        cap0: true, cap1: true, tip0: 0.0090, tip1: 0.0075, mode: 'spline' });
+  finish(ob, { bevel: 0.0012, bseg: 2, bangle: 32 });
+  setmat(ob, 'M_DARKMECH');
+  objs.push(ob);
+  for (const [z, r] of [[0.9985, 0.0462], [0.9900, 0.0478], [0.9810, 0.0482]]) {
+    st = [{ t: z - 0.0026, ax: r, by: r * 1.16, by2: r * 0.72, e: 3.0, oy: HIPY },
+          { t: z, ax: r + 0.0026, by: (r + 0.0026) * 1.16, by2: (r + 0.0026) * 0.72, e: 3.0, oy: HIPY },
+          { t: z + 0.0026, ax: r, by: r * 1.16, by2: r * 0.72, e: 3.0, oy: HIPY }];
+    const rg = loft(st, { n: 56, rings: 10, name: `hipring${Math.trunc(z * 1e4)}`,
+                          cname: 'HIP', cap0: false, cap1: false, mode: 'pchip' });
+    finish(rg, { bevel: 0.0004, bseg: 1, bangle: 40 });
+    setmat(rg, 'M_DARKMECH');
+    objs.push(rg);
+  }
+  const fp = extrudeOutline(rrectOutline(0.0420, 0.0300, 0.0058, 60),
+                            -0.0075, -0.0018, { name: 'hip_plate', cname: 'HIP' });
+  xform(fp, { rot: [90, 0, 0] });
+  xform(fp, { loc: [0.0, -0.0026, 0.9740] });
+  finish(fp, { bevel: 0.0009, bseg: 2, bangle: 34 });
+  setmat(fp, 'M_DARKMECH');
+  objs.push(fp);
+  objs.push(...boltRing(0.0, -0.0060, 0.9740 + 0.0088, 0.0, 1, 0.0040, 0.0022,
+                        'HIP', 'M_DARKMECH', 'hipctrbolt'));
+  return objs;
+}
+
+function buildHipDrum(sx = 1) {
+  const objs = [];
+  const cx = sx * HIPX;
+  const rows = [[-0.0560, 0.0300, 0.0330], [-0.0470, 0.0400, 0.0442],
+                [-0.0330, 0.0466, 0.0530], [-0.0140, 0.0492, 0.0578],
+                [0.0060, 0.0496, 0.0592], [0.0250, 0.0486, 0.0576],
+                [0.0400, 0.0450, 0.0524], [0.0510, 0.0378, 0.0430],
+                [0.0560, 0.0300, 0.0330]];
+  let st = rows.map(([dx, hz, dy]) => ({
+    t: cx + sx * dx, ax: hz, by: dy, by2: dy * 0.86, e: 3.3, e_dn: 3.5, oy: POD_Y
+  }));
+  const ob = loft(st, { n: 64, rings: 56, name: `hipdrum${sx}`, cname: 'HIP',
+                        cap0: true, cap1: true, tip0: 0.0075, tip1: 0.0075,
+                        mode: 'spline', axis: 'x' });
+  xform(ob, { loc: [0.0, 0.0, POD_Z] });
+  finish(ob, { bevel: 0.0016, bseg: 3, bangle: 30 });
+  setmat(ob, 'M_DARKMECH');
+
+  const ol = rrectOutline(0.0430, 0.0490, 0.0090, 60);
+  const cut = extrudeOutline(ol, -0.0090, 0.0110, { name: `poddcut${sx}`, cname: 'HIP', taper0: 0.78 });
+  xform(cut, { rot: [90, 0, 0] });
+  xform(cut, { loc: [cx, POD_Y + 0.0600, POD_Z] });
+  boolean(ob, cut);
+  collRemove('HIP', cut);
+  shade(ob, true, 32);
+  addBevel(ob, 0.0010, 2, 30);
+  objs.push(ob);
+
+  st = [{ t: cx + sx * 0.0500, ax: 0.0250, by: 0.0250, e: 2.05, oy: POD_Y },
+        { t: cx + sx * 0.0620, ax: 0.0250, by: 0.0250, e: 2.05, oy: POD_Y },
+        { t: cx + sx * 0.0655, ax: 0.0212, by: 0.0212, e: 2.05, oy: POD_Y }];
+  const bs = loft(st, { n: 48, rings: 14, name: `hipboss${sx}`, cname: 'HIP',
+                        cap0: false, cap1: true, tip1: 0.0045, mode: 'pchip', axis: 'x' });
+  xform(bs, { loc: [0.0, 0.0, POD_Z] });
+  finish(bs, { bevel: 0.0008, bseg: 2, bangle: 34 });
+  setmat(bs, 'M_ALU');
+  objs.push(bs);
+
+  for (let i = 0; i < 8; i++) {
+    const a = 2 * Math.PI * i / 8 + 0.2;
+    const stb = [{ t: 0.0, ax: 0.0030, by: 0.0030, e: 2.2 },
+                 { t: 0.0024, ax: 0.0024, by: 0.0024, e: 2.2 }];
+    const bo = loft(stb, { n: 12, rings: 4, name: `hipbb${sx}${i}`, cname: 'HIP',
+                           cap0: false, cap1: true, tip1: 0.0010, axis: 'x' });
+    if (sx < 0) xform(bo, { rot: [0, 0, 180] });
+    xform(bo, { loc: [cx + sx * 0.0618,
+                      POD_Y + 0.0198 * Math.sin(a),
+                      POD_Z + 0.0198 * Math.cos(a)] });
+    finish(bo, { bevel: 0.0003, bseg: 1, bangle: 40 });
+    setmat(bo, 'M_DARKGREY');
+    objs.push(bo);
+  }
+  return objs;
+}
+
+function buildHipBackbox() {
+  const objs = [];
+  const rows = [[0.9850, 0.0400, 0.0790], [0.9720, 0.0452, 0.1000],
+                [0.9560, 0.0505, 0.1230], [0.9380, 0.0546, 0.1410],
+                [0.9160, 0.0570, 0.1510], [0.8940, 0.0574, 0.1540],
+                [0.8720, 0.0552, 0.1490], [0.8560, 0.0498, 0.1370],
+                [0.8460, 0.0410, 0.1170]];
+  const st = rows.map(([z, hw, by]) => ({ t: z, ax: hw, by, by2: 0.0250, e: 3.9, e_dn: 3.2 }));
+  const ob = loft(st, { n: 56, rings: 64, name: 'hip_sacrum', cname: 'HIP',
+                        cap0: true, cap1: true, tip0: 0.0080, tip1: 0.0080, mode: 'spline' });
+  finish(ob, { bevel: 0.0018, bseg: 3, bangle: 30 });
+  setmat(ob, 'M_DARKMECH');
+  objs.push(ob);
+
+  const ol = rrectOutline(0.0330, 0.0760, 0.0100, 64);
+  const cut = extrudeOutline(ol, -0.0080, 0.0100, { name: 'sacrum_cut', cname: 'HIP', taper0: 0.78 });
+  xform(cut, { rot: [90, 0, 0] });
+  xform(cut, { loc: [0.0, 0.1580, 0.9080] });
+  boolean(ob, cut);
+  collRemove('HIP', cut);
+  shade(ob, true, 32);
+  addBevel(ob, 0.0010, 2, 30);
+  return objs;
+}
+
+function buildHips() {
+  collClear('HIP');
+  buildHipCentre();
+  buildHipBackbox();
+  for (const sx of [1, -1]) buildHipDrum(sx);
+}
+
+/* ==========================================================================
+   11. p_leg.py -- thigh (dark core + white shell), knee cap, shin, ankle
+       actuators and push-rods.
+   ========================================================================== */
+
+const LEGX = 0.1170;
+
+/* (z, half-width, back Y, front depth, e_back, e_front, x-offset, y-centre) */
+const LEG = [
+  [0.8780, 0.0512, 0.1400, 0.0250, 3.1, 3.2, -0.0060, 0.0000],
+  [0.8700, 0.0560, 0.1440, 0.0330, 3.1, 3.2, -0.0050, 0.0000],
+  [0.8500, 0.0596, 0.1490, 0.0480, 3.1, 3.2, -0.0030, 0.0000],
+  [0.8200, 0.0620, 0.1490, 0.0600, 3.1, 3.2, -0.0010, 0.0000],
+  [0.7900, 0.0628, 0.1400, 0.0678, 3.1, 3.2, 0.0000, 0.0000],
+  [0.7600, 0.0630, 0.1300, 0.0728, 3.0, 3.2, 0.0005, 0.0000],
+  [0.7300, 0.0632, 0.1245, 0.0768, 3.0, 3.2, 0.0010, 0.0000],
+  [0.7000, 0.0632, 0.1180, 0.0796, 3.0, 3.2, 0.0010, 0.0000],
+  [0.6700, 0.0602, 0.1060, 0.0802, 3.0, 3.2, 0.0010, 0.0000],
+  [0.6400, 0.0578, 0.0920, 0.0790, 3.0, 3.2, 0.0010, 0.0000],
+  [0.6100, 0.0552, 0.0830, 0.0818, 3.0, 3.2, 0.0005, 0.0000],
+  [0.5800, 0.0540, 0.0712, 0.0866, 3.0, 3.2, 0.0000, 0.0000],
+  [0.5500, 0.0538, 0.0600, 0.0898, 3.0, 3.2, -0.0005, 0.0000],
+  [0.5250, 0.0538, 0.0520, 0.0918, 3.0, 3.2, -0.0010, 0.0000],
+  [0.5050, 0.0532, 0.0478, 0.0932, 3.0, 3.2, -0.0015, 0.0000],
+];
+const LZ = LEG.map(r => r[0]);
+let L_AX = null, L_BY = null, L_BY2 = null, L_OX = null;
+
+function legCurves() {
+  L_AX = new Curve1D(LZ, LEG.map(r => r[1]), 'spline');
+  L_BY = new Curve1D(LZ, LEG.map(r => r[2]), 'spline');
+  L_BY2 = new Curve1D(LZ, LEG.map(r => r[3]), 'spline');
+  L_OX = new Curve1D(LZ, LEG.map(r => r[6]), 'spline');
+}
+
+const _lst = (z, sx, shrink = 0.0) => ({
+  t: z, ax: L_AX.at(z) - shrink, by: L_BY.at(z) - shrink,
+  by2: L_BY2.at(z) - shrink, e: 3.0, e_dn: 3.2, ox: sx * (LEGX + L_OX.at(z))
+});
+
+function buildThighCore(sx = 1) {
+  const st = LEG.map(r => _lst(r[0], sx, 0.0032));
+  const ob = loft(st, { n: 72, rings: 120, name: `thigh_core${sx}`, cname: 'LEG',
+                        cap0: false, cap1: false, mode: 'spline', even: 0.66 });
+  finish(ob, { bevel: 0.0009, bseg: 2, bangle: 36 });
+  setmat(ob, 'M_BLACK');
+  return ob;
+}
+
+/* u = 0 -> outboard (+X for sx=+1); u=+1 -> back(+Y); u=-1 -> front(-Y) */
+function legSurf(sx = 1, offset = 0.0, uscale = 0.062, shrink = 0.0) {
+  const du = 4e-4, dv = 4e-4;
+  const raw = (a, v) => {
+    const u = a / uscale;
+    const th = u * Math.PI / 2.0;
+    const ax = Math.max(1e-6, L_AX.at(v) - shrink);
+    const s = Math.sin(th);
+    const by = (s >= 0 ? L_BY.at(v) : L_BY2.at(v)) - shrink;
+    const e = s >= 0 ? 3.0 : 3.2;
+    const p = 2.0 / e;
+    const c = Math.cos(th);
+    const x = ax * copysignPow(c, p, c);
+    const y = by * copysignPow(s, p, s);
+    return vec(sx * (LEGX + L_OX.at(v) + x), y, v);
+  };
+  return (a, v) => {
+    const pu = raw(a + du, v).sub(raw(a - du, v));
+    const pv = raw(a, v + dv).sub(raw(a, v - dv));
+    let n = sx > 0 ? pu.cross(pv) : pv.cross(pu);
+    if (n.length < 1e-12) n = vec(sx, 0, 0);
+    n = n.normalized();
+    return [raw(a, v).add(n.mul(offset)), n];
+  };
+}
+
+/* outline of the white thigh shell in (u, z): (z, u_front, u_back) */
+const THIGH_SHELL = [
+  [0.8735, -0.11, 0.05], [0.8690, -0.30, 0.16], [0.8600, -0.58, 0.38],
+  [0.8470, -0.90, 0.62], [0.8280, -1.18, 0.72], [0.8020, -1.36, 0.82],
+  [0.7700, -1.50, 0.90], [0.7300, -1.58, 0.96], [0.6900, -1.61, 0.99],
+  [0.6500, -1.61, 0.99], [0.6100, -1.58, 0.96], [0.5850, -1.53, 0.90],
+  [0.5650, -1.45, 0.81], [0.5520, -1.33, 0.68], [0.5440, -1.14, 0.48],
+  [0.5395, -0.88, 0.27], [0.5375, -0.56, 0.00],
+];
+
+function buildThighShell(sx = 1) {
+  const zs = THIGH_SHELL.map(t => t[0]);
+  const cf = new Curve1D(zs, THIGH_SHELL.map(t => t[1]), 'spline');
+  const cb = new Curve1D(zs, THIGH_SHELL.map(t => t[2]), 'spline');
+  const us = 0.062;
+  const z1 = THIGH_SHELL[0][0], z0 = THIGH_SHELL[THIGH_SHELL.length - 1][0];
+  const pts = [];
+  const N = 66;
+  for (let i = 0; i <= N; i++) { const v = z1 - (z1 - z0) * (i / N); pts.push([cb.at(v) * us, v]); }
+  for (let i = 0; i <= N; i++) { const v = z0 + (z1 - z0) * (i / N); pts.push([cf.at(v) * us, v]); }
+  const outline = polyOutline(pts, 200, 1);
+  const surf = legSurf(sx, 0.0016, us);
+  const ob = pillow(outline, surf, {
+    t_front: 0.0032, t_back: 0.0180, layers: 16, name: `thigh_shell${sx}`,
+    cname: 'LEG', rim: 0.20, centre: [-0.18 * us, 0.7000]
+  });
+  finish(ob, { bevel: 0.0010, bseg: 2, bangle: 30 });
+  setmat(ob, 'M_SHELL_LEG');
+  return ob;
+}
+
+const SHIN = [
+  [0.5250, 0.0542, 0.0420, 0.0880, 3.0, 3.0, 0.0000],
+  [0.5050, 0.0545, 0.0405, 0.0905, 3.0, 3.0, 0.0000],
+  [0.4850, 0.0530, 0.0470, 0.0910, 3.0, 3.0, 0.0000],
+  [0.4600, 0.0508, 0.0400, 0.0900, 3.0, 3.0, 0.0000],
+  [0.4300, 0.0358, 0.0262, 0.0850, 3.0, 3.0, 0.0000],
+  [0.4000, 0.0340, 0.0250, 0.0790, 3.0, 3.0, 0.0000],
+  [0.3600, 0.0338, 0.0300, 0.0700, 3.0, 3.0, 0.0000],
+  [0.3200, 0.0348, 0.0348, 0.0620, 3.0, 3.0, 0.0000],
+  [0.2800, 0.0322, 0.0400, 0.0560, 3.0, 3.0, 0.0000],
+  [0.2400, 0.0296, 0.0450, 0.0500, 3.0, 3.0, 0.0000],
+  [0.2000, 0.0272, 0.0480, 0.0430, 3.0, 3.0, 0.0000],
+  [0.1700, 0.0256, 0.0470, 0.0360, 3.0, 3.0, 0.0000],
+  [0.1400, 0.0242, 0.0420, 0.0300, 3.0, 3.0, 0.0000],
+  [0.1150, 0.0234, 0.0340, 0.0250, 3.0, 3.0, 0.0000],
+  [0.0980, 0.0230, 0.0270, 0.0220, 3.0, 3.0, 0.0000],
+];
+const SZ = SHIN.map(r => r[0]);
+let S_AX = null, S_BY = null, S_BY2 = null;
+
+function shinCurves() {
+  S_AX = new Curve1D(SZ, SHIN.map(r => r[1]), 'spline');
+  S_BY = new Curve1D(SZ, SHIN.map(r => r[2]), 'spline');
+  S_BY2 = new Curve1D(SZ, SHIN.map(r => r[3]), 'spline');
+}
+
+function buildShin(sx = 1) {
+  const st = SHIN.map(r => ({ t: r[0], ax: r[1], by: r[2], by2: r[3],
+                              e: 3.0, e_dn: 3.1, ox: sx * LEGX }));
+  const ob = loft(st, { n: 64, rings: 130, name: `shin${sx}`, cname: 'LEG',
+                        cap0: false, cap1: false, mode: 'spline', even: 0.66 });
+  finish(ob, { bevel: 0.0009, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_SHELL_LEG');
+  return ob;
+}
+
+function buildKneeCap(sx = 1) {
+  const rows = [[0.5320, 0.0090, 0.0140], [0.5250, 0.0200, 0.0250],
+                [0.5150, 0.0296, 0.0330], [0.5000, 0.0356, 0.0378],
+                [0.4820, 0.0372, 0.0392], [0.4640, 0.0356, 0.0378],
+                [0.4480, 0.0316, 0.0344], [0.4350, 0.0256, 0.0292],
+                [0.4270, 0.0170, 0.0215], [0.4230, 0.0080, 0.0120]];
+  const st = rows.map(([z, w, h]) => ({
+    t: z, ax: w, by: 0.0130, by2: h * 0.30 + 0.0140, e: 2.6, e_dn: 2.6,
+    ox: sx * LEGX, oy: -(S_BY2 ? S_BY2.at(z) : 0.088) + 0.0140
+  }));
+  const ob = loft(st, { n: 48, rings: 54, name: `kneecap${sx}`, cname: 'LEG',
+                        cap0: true, cap1: true, tip0: 0.0035, tip1: 0.0030, mode: 'spline' });
+  finish(ob, { bevel: 0.0010, bseg: 2, bangle: 32 });
+  setmat(ob, 'M_SHELL_LEG');
+  return ob;
+}
+
+function buildKneeGap(sx = 1) {
+  const st = [{ t: 0.5480, ax: 0.0530, by: 0.0420, by2: 0.0850, e: 3.0, ox: sx * LEGX },
+              { t: 0.5350, ax: 0.0525, by: 0.0420, by2: 0.0870, e: 3.0, ox: sx * LEGX },
+              { t: 0.5200, ax: 0.0510, by: 0.0415, by2: 0.0885, e: 3.0, ox: sx * LEGX },
+              { t: 0.5050, ax: 0.0495, by: 0.0408, by2: 0.0890, e: 3.0, ox: sx * LEGX }];
+  const ob = loft(st, { n: 56, rings: 24, name: `kneejoint${sx}`, cname: 'LEG',
+                        cap0: false, cap1: false, mode: 'spline' });
+  finish(ob, { bevel: 0.0008, bseg: 2, bangle: 36 });
+  setmat(ob, 'M_BLACK');
+  return ob;
+}
+
+function buildAnkleActuator(sx = 1, side = 1) {
+  const objs = [];
+  const zk = [0.4460, 0.3900, 0.3730, 0.2280, 0.2000, 0.1740, 0.0960];
+  const xk = [0.0430, 0.0402, 0.0400, 0.0400, 0.0356, 0.0290, 0.0150];
+  const XO = new Curve1D(zk, xk, 'spline');
+  const YO = z => 0.5 * (S_BY.at(z) - S_BY2.at(z)) - 0.0050;
+  const ox = z => sx * (LEGX + side * XO.at(z));
+
+  let sp = [[ox(0.4460), YO(0.4460), 0.4460], [ox(0.4220), YO(0.4220), 0.4220],
+            [ox(0.3980), YO(0.3980), 0.3980], [ox(0.3800), YO(0.3800), 0.3800]];
+  let rod = tube(sp, [0.0044, 0.0042, 0.0041, 0.0042],
+                 { n: 16, name: `ankrodU${sx}_${side}`, cname: 'LEG' });
+  finish(rod, { bevel: 0.0004, bseg: 2, bangle: 36 });
+  setmat(rod, 'M_ALU');
+  objs.push(rod);
+
+  const cl = extrudeOutline(rrectOutline(0.0130, 0.0175, 0.0038, 44),
+                            0.0, 0.0088, { name: `ankclv${sx}_${side}`, cname: 'LEG' });
+  xform(cl, { rot: [0, 90, 0] });
+  xform(cl, { loc: [ox(0.4480) - side * sx * 0.0044, YO(0.4480), 0.4480] });
+  finish(cl, { bevel: 0.0008, bseg: 2, bangle: 32 });
+  setmat(cl, 'M_DARKMECH');
+  objs.push(cl);
+
+  const zs = [0.3730, 0.3480, 0.3000, 0.2520, 0.2270];
+  const spine = zs.map(z => [ox(z), YO(z), z]);
+  let st = [{ t: 0.00, ax: 0.0080, by: 0.0196, e: 3.2 },
+            { t: 0.10, ax: 0.0102, by: 0.0250, e: 3.2 },
+            { t: 0.44, ax: 0.0102, by: 0.0252, e: 3.2 },
+            { t: 0.82, ax: 0.0098, by: 0.0240, e: 3.2 },
+            { t: 1.00, ax: 0.0078, by: 0.0192, e: 3.2 }];
+  const ob = loftSpine(spine, st, { n: 40, name: `ankact${sx}_${side}`, cname: 'LEG',
+                                    up: vec(1, 0, 0), cap0: true, cap1: true,
+                                    tip0: 0.0060, tip1: 0.0050, rings: 56 });
+  finish(ob, { bevel: 0.0009, bseg: 2, bangle: 32 });
+  setmat(ob, 'M_DARKMECH');
+  objs.push(ob);
+
+  const zc = [0.3790, 0.3700, 0.3610];
+  st = [{ t: 0.0, ax: 0.0078, by: 0.0196, e: 3.0 },
+        { t: 0.5, ax: 0.0112, by: 0.0264, e: 3.0 },
+        { t: 1.0, ax: 0.0104, by: 0.0252, e: 3.0 }];
+  const cap = loftSpine(zc.map(z => [ox(z), YO(z), z]), st,
+                        { n: 36, name: `ankcap${sx}_${side}`, cname: 'LEG',
+                          up: vec(1, 0, 0), cap0: true, cap1: false,
+                          tip0: 0.0040, rings: 14 });
+  finish(cap, { bevel: 0.0006, bseg: 2, bangle: 34 });
+  setmat(cap, 'M_DARKMECH');
+  objs.push(cap);
+
+  sp = [[ox(0.2290), YO(0.2290), 0.2290], [ox(0.2060), YO(0.2060), 0.2060],
+        [ox(0.1840), YO(0.1840), 0.1840], [ox(0.1680), YO(0.1680), 0.1680]];
+  rod = tube(sp, [0.0038, 0.0037, 0.0036, 0.0036],
+             { n: 16, name: `ankrodL${sx}_${side}`, cname: 'LEG' });
+  finish(rod, { bevel: 0.0004, bseg: 2, bangle: 36 });
+  setmat(rod, 'M_ALU');
+  objs.push(rod);
+
+  sp = [[ox(0.1700), YO(0.1700), 0.1700], [ox(0.1420), YO(0.1420), 0.1420],
+        [ox(0.1160), YO(0.1160), 0.1160], [ox(0.0960), YO(0.0960), 0.0960]];
+  const lk = tube(sp, [0.0040, 0.0038, 0.0038, 0.0042],
+                  { n: 16, name: `anklink${sx}_${side}`, cname: 'LEG' });
+  finish(lk, { bevel: 0.0004, bseg: 2, bangle: 36 });
+  setmat(lk, 'M_DARKMECH');
+  objs.push(lk);
+  return objs;
+}
+
+function buildAnkle(sx = 1) {
+  const objs = [];
+  let st = [{ t: 0.1080, ax: 0.0238, by: 0.0300, by2: 0.0250, e: 3.0, ox: sx * LEGX },
+            { t: 0.0950, ax: 0.0250, by: 0.0320, by2: 0.0268, e: 3.0, ox: sx * LEGX },
+            { t: 0.0840, ax: 0.0252, by: 0.0322, by2: 0.0270, e: 3.0, ox: sx * LEGX },
+            { t: 0.0740, ax: 0.0238, by: 0.0300, by2: 0.0252, e: 3.0, ox: sx * LEGX }];
+  const ob = loft(st, { n: 44, rings: 20, name: `ankle${sx}`, cname: 'LEG',
+                        cap0: false, cap1: true, tip1: 0.0060, mode: 'spline' });
+  finish(ob, { bevel: 0.0008, bseg: 2, bangle: 34 });
+  setmat(ob, 'M_DARKMECH');
+  objs.push(ob);
+  st = [{ t: -0.034, ax: 0.0080, by: 0.0080, e: 2.1 },
+        { t: 0.034, ax: 0.0080, by: 0.0080, e: 2.1 }];
+  const pin = loft(st, { n: 24, rings: 6, name: `anklepin${sx}`, cname: 'LEG',
+                         cap0: true, cap1: true, tip0: 0.0018, tip1: 0.0018, axis: 'x' });
+  xform(pin, { loc: [sx * LEGX, 0.0030, 0.0870] });
+  finish(pin, { bevel: 0.0004, bseg: 2, bangle: 40 });
+  setmat(pin, 'M_ALU');
+  objs.push(pin);
+  return objs;
+}
+
+function buildLeg(sx = 1) {
+  legCurves();
+  shinCurves();
+  buildThighCore(sx);
+  buildThighShell(sx);
+  buildKneeGap(sx);
+  buildShin(sx);
+  buildKneeCap(sx);
+  buildAnkleActuator(sx, 1);
+  buildAnkleActuator(sx, -1);
+  buildAnkle(sx);
+}
+
+function buildLegs() {
+  collClear('LEG');
+  buildLeg(1);
+  buildLeg(-1);
+}
+
+/* ==========================================================================
+   12. p_foot.py -- moulded charcoal boot: upper, sole lip, ankle socket.
+   ========================================================================== */
+
+/* (y, half-width, top z) -- y negative = toward the toe */
+const FOOT = [
+  [0.0665, 0.0270, 0.0330], [0.0600, 0.0348, 0.0500], [0.0470, 0.0410, 0.0660],
+  [0.0290, 0.0452, 0.0762], [0.0080, 0.0466, 0.0812], [-0.0180, 0.0478, 0.0824],
+  [-0.0450, 0.0482, 0.0786], [-0.0720, 0.0478, 0.0706], [-0.0980, 0.0466, 0.0602],
+  [-0.1230, 0.0458, 0.0512], [-0.1440, 0.0442, 0.0430], [-0.1600, 0.0412, 0.0374],
+  [-0.1710, 0.0364, 0.0338], [-0.1782, 0.0296, 0.0310],
+];
+
+function buildFoot(sx = 1) {
+  let st = FOOT.map(([y, w, h]) => ({ t: -y, ax: w, by: h * 0.72, by2: h * 0.30,
+                                      e: 2.15, e_dn: 3.8, oy: h * 0.28 }));
+  const ob = loft(st, { n: 60, rings: 120, name: `foot${sx}`, cname: 'FOOT',
+                        cap0: true, cap1: true, tip0: 0.0130, tip1: 0.0088,
+                        mode: 'spline', even: 0.66 });
+  xform(ob, { rot: [90, 0, 0] });
+  xform(ob, { loc: [sx * LEGX, 0.0, 0.0] });
+  finish(ob, { bevel: 0.0018, bseg: 3, bangle: 30 });
+  setmat(ob, 'M_FOOT');
+
+  st = FOOT.map(([y, w]) => ({ t: -y, ax: w + 0.0014, by: 0.0050, by2: 0.0050,
+                               e: 3.6, e_dn: 3.2, oy: 0.0050 }));
+  const lip = loft(st, { n: 60, rings: 120, name: `sole${sx}`, cname: 'FOOT',
+                         cap0: true, cap1: true, tip0: 0.0060, tip1: 0.0042,
+                         mode: 'spline', even: 0.66 });
+  xform(lip, { rot: [90, 0, 0] });
+  xform(lip, { loc: [sx * LEGX, 0.0, 0.0] });
+  finish(lip, { bevel: 0.0012, bseg: 3, bangle: 30 });
+  setmat(lip, 'M_DARKMECH');
+
+  st = [{ t: 0.0930, ax: 0.0262, by: 0.0316, by2: 0.0286, e: 2.6, oy: 0.0060 },
+        { t: 0.0860, ax: 0.0258, by: 0.0308, by2: 0.0278, e: 2.6, oy: 0.0060 },
+        { t: 0.0750, ax: 0.0246, by: 0.0292, by2: 0.0264, e: 2.6, oy: 0.0060 },
+        { t: 0.0650, ax: 0.0224, by: 0.0266, by2: 0.0240, e: 2.6, oy: 0.0060 }];
+  for (const s of st) s.ox = sx * LEGX;
+  const sock = loft(st, { n: 44, rings: 20, name: `socket${sx}`, cname: 'FOOT',
+                          cap0: false, cap1: true, tip1: 0.0050, mode: 'spline' });
+  finish(sock, { bevel: 0.0008, bseg: 2, bangle: 34 });
+  setmat(sock, 'M_DARKGREY');
+}
+
+function buildFeet() {
+  collClear('FOOT');
+  buildFoot(1);
+  buildFoot(-1);
+}
+
+/* ==========================================================================
+   13. setup.py materials -- Blender Principled BSDF -> MeshPhysicalNodeMaterial,
+       ShaderNodeTexNoise / ShaderNodeBump / ShaderNodeMapRange -> TSL.
+
+       The noise is Blender's own: lookup3 hash, quintic fade, the same
+       gradient table, x0.9820 signed scaling and the same fBm octave
+       accumulation, so scale / detail / roughness behave exactly as they do
+       in the .blend.  The one deviation is that the integer lattice is
+       offset by +8192 before hashing, because WGSL leaves a negative i32 ->
+       u32 conversion indeterminate; that translates the noise field but
+       changes nothing about its statistics.
+   ========================================================================== */
+
+const LATTICE_OFF = 8192.0;
+
+const rotl32 = (x, k) => x.shiftLeft(uint(k)).bitOr(x.shiftRight(uint(32 - k)));
+
+/* Jenkins lookup3 final() -- Blender BLI_hash_int_3d */
+const bhash3 = /*#__PURE__*/ Fn(([kx, ky, kz]) => {
+  const seed = uint(3735928584);            /* 0xdeadbeef + (3 << 2) + 13 */
+  const a = seed.toVar(), b = seed.toVar(), c = seed.toVar();
+  c.addAssign(kz); b.addAssign(ky); a.addAssign(kx);
+  c.assign(c.bitXor(b)); c.subAssign(rotl32(b, 14));
+  a.assign(a.bitXor(c)); a.subAssign(rotl32(c, 11));
+  b.assign(b.bitXor(a)); b.subAssign(rotl32(a, 25));
+  c.assign(c.bitXor(b)); c.subAssign(rotl32(b, 16));
+  a.assign(a.bitXor(c)); a.subAssign(rotl32(c, 4));
+  b.assign(b.bitXor(a)); b.subAssign(rotl32(a, 14));
+  c.assign(c.bitXor(b)); c.subAssign(rotl32(b, 24));
+  return c;
+}).setLayout({
+  name: 'bhash3', type: 'uint',
+  inputs: [{ name: 'kx', type: 'uint' }, { name: 'ky', type: 'uint' }, { name: 'kz', type: 'uint' }]
+});
+
+/* Blender noise_grad */
+const bgrad = /*#__PURE__*/ Fn(([h32, x, y, z]) => {
+  const h = h32.bitAnd(uint(15)).toVar();
+  const u = select(h.lessThan(uint(8)), x, y);
+  const vt = select(h.equal(uint(12)).or(h.equal(uint(14))), x, z);
+  const v = select(h.lessThan(uint(4)), y, vt);
+  const su = select(h.bitAnd(uint(1)).notEqual(uint(0)), u.negate(), u);
+  const sv = select(h.bitAnd(uint(2)).notEqual(uint(0)), v.negate(), v);
+  return su.add(sv);
+}).setLayout({
+  name: 'bgrad', type: 'float',
+  inputs: [{ name: 'h32', type: 'uint' }, { name: 'x', type: 'float' },
+           { name: 'y', type: 'float' }, { name: 'z', type: 'float' }]
+});
+
+const bfade = t => t.mul(t).mul(t).mul(t.mul(t.mul(6.0).sub(15.0)).add(10.0));
+
+/* Blender perlin_signed: [-1, 1] */
+const bperlin = /*#__PURE__*/ Fn(([p]) => {
+  const X = floor(p.x).toVar(), Y = floor(p.y).toVar(), Z = floor(p.z).toVar();
+  const fx = p.x.sub(X).toVar(), fy = p.y.sub(Y).toVar(), fz = p.z.sub(Z).toVar();
+  const xi = uint(X.add(LATTICE_OFF)).toVar();
+  const yi = uint(Y.add(LATTICE_OFF)).toVar();
+  const zi = uint(Z.add(LATTICE_OFF)).toVar();
+  const x1 = xi.add(uint(1)), y1 = yi.add(uint(1)), z1 = zi.add(uint(1));
+  const u = bfade(fx), v = bfade(fy), w = bfade(fz);
+  const fx1 = fx.sub(1.0), fy1 = fy.sub(1.0), fz1 = fz.sub(1.0);
+
+  const g000 = bgrad(bhash3(xi, yi, zi), fx, fy, fz);
+  const g100 = bgrad(bhash3(x1, yi, zi), fx1, fy, fz);
+  const g010 = bgrad(bhash3(xi, y1, zi), fx, fy1, fz);
+  const g110 = bgrad(bhash3(x1, y1, zi), fx1, fy1, fz);
+  const g001 = bgrad(bhash3(xi, yi, z1), fx, fy, fz1);
+  const g101 = bgrad(bhash3(x1, yi, z1), fx1, fy, fz1);
+  const g011 = bgrad(bhash3(xi, y1, z1), fx, fy1, fz1);
+  const g111 = bgrad(bhash3(x1, y1, z1), fx1, fy1, fz1);
+
+  const x00 = mix(g000, g100, u), x10 = mix(g010, g110, u);
+  const x01 = mix(g001, g101, u), x11 = mix(g011, g111, u);
+  return mix(mix(x00, x10, v), mix(x01, x11, v), w).mul(0.9820);
+}).setLayout({
+  name: 'bperlin', type: 'float', inputs: [{ name: 'p', type: 'vec3' }]
+});
+
+/* ShaderNodeTexNoise (fBM, normalize on) -> [0, 1].  `detail` is a literal in
+   every material here, so the octave loop is unrolled on the JS side.
+
+   Each octave is faded out once its period drops below about two pixels.
+   Blender resolves these frequencies by averaging 48 TAA samples per pixel;
+   a single-sample real-time pass cannot, and an unfiltered detail-8 noise at
+   scale 900 aliases into large drifting blotches under the bump node's
+   screen-space derivatives.  Dropping the octaves that are past Nyquist
+   converges on the same filtered surface Blender's supersampling produces. */
+const pixelFootprint = p => max(length(dFdx(p)), length(dFdy(p)));
+
+function bnoise(p, scale, detail, roughness = 0.5, lacunarity = 2.0) {
+  const q = p.mul(scale);
+  const fw = pixelFootprint(p).toVar();
+  let fscale = 1.0, amp = 1.0, maxamp = 0.0;
+  let sum = null;
+  const n = Math.floor(detail);
+  for (let i = 0; i <= n; i++) {
+    const band = tslSmoothstep(0.25, 0.5, fw.mul(scale * fscale)).oneMinus();
+    const t = bperlin(q.mul(fscale)).mul(amp).mul(band);
+    sum = sum === null ? t : sum.add(t);
+    maxamp += amp;
+    amp *= roughness;
+    fscale *= lacunarity;
+  }
+  return sum.mul(0.5 / maxamp).add(0.5);
+}
+
+/* setup.rough_var -- MapRange(noise, 0.25..0.75 -> base-amt..base+amt) */
+function roughVar(base, amt, scale, detail = 3.0) {
+  const nz = bnoise(positionLocal, scale, detail, 0.5);
+  const t = nz.sub(0.25).div(0.5);
+  const lo = base - amt, hi = base + amt;
+  return clamp(float(lo).add(t.mul(hi - lo)), Math.min(lo, hi), Math.max(lo, hi));
+}
+
+/* setup.noise_bump -- Bump(Strength, Distance=0.0006) over object-space noise */
+function noiseBump(scale, detail, strength, roughness = 0.55) {
+  const h = bnoise(positionLocal, scale, detail, roughness);
+  return bumpMap(h, float(strength * 0.0006));
+}
+
+/* ---- material construction --------------------------------------------- */
+
+const lin = (r, g, b) => new THREE.Color().setRGB(r, g, b, THREE.LinearSRGBColorSpace);
+
+/* Blender "Specular IOR Level" 0.5 is neutral; three's specularIntensity 1.0 */
+const specLevel = v => v / 0.5;
+
+const MATS = {};
+
+function principled(name, o) {
+  const m = new THREE.MeshPhysicalNodeMaterial();
+  m.name = name;
+  m.color = lin(...o.base);
+  m.metalness = o.metallic ?? 0.0;
+  m.roughness = o.rough ?? 0.5;
+  if (o.ior !== undefined) m.ior = o.ior;
+  m.specularIntensity = specLevel(o.spec ?? 0.5);
+  if (o.coat) { m.clearcoat = o.coat; m.clearcoatRoughness = o.coatRough ?? 0.03; }
+  if (o.sheen) {
+    m.sheen = o.sheen;
+    m.sheenRoughness = o.sheenRough ?? 0.3;
+    m.sheenColor = o.sheenTint ? lin(...o.sheenTint) : lin(1, 1, 1);
+  }
+  if (o.roughNode) m.roughnessNode = o.roughNode;
+  if (o.normalNode) m.normalNode = o.normalNode;
+  m.side = THREE.FrontSide;
+  MATS[name] = m;
+  return m;
+}
+
+function buildMaterials() {
+  /* M_SHELL -- satin off-white painted composite */
+  principled('M_SHELL', {
+    base: [0.828, 0.816, 0.796], metallic: 0.0, rough: 0.34, ior: 1.47, spec: 0.5,
+    coat: 0.26, coatRough: 0.22, sheen: 0.05, sheenRough: 0.45,
+    roughNode: roughVar(0.335, 0.045, 9.0),
+    normalNode: noiseBump(520.0, 6.0, 0.045, 0.6),
+  });
+
+  /* M_SHELL_LEG -- slightly cooler / brighter white used on the legs */
+  principled('M_SHELL_LEG', {
+    base: [0.858, 0.854, 0.846], rough: 0.36, coat: 0.22, coatRough: 0.24,
+    sheen: 0.06, sheenRough: 0.5,
+    roughNode: roughVar(0.355, 0.04, 8.0),
+    normalNode: noiseBump(520.0, 6.0, 0.045, 0.55),
+  });
+
+  /* M_BLACK -- matte soft-touch black polymer */
+  principled('M_BLACK', {
+    base: [0.0165, 0.0165, 0.0185], metallic: 0.0, rough: 0.46, spec: 0.42,
+    sheen: 0.25, sheenRough: 0.35, sheenTint: [0.30, 0.31, 0.34],
+    roughNode: roughVar(0.455, 0.05, 12.0),
+    normalNode: noiseBump(700.0, 6.0, 0.06, 0.6),
+  });
+
+  /* M_GLOSSBLACK -- piano black (unused by the current parts, kept for parity) */
+  principled('M_GLOSSBLACK', {
+    base: [0.0075, 0.0075, 0.0090], metallic: 0.0, rough: 0.055, ior: 1.52,
+    coat: 1.0, coatRough: 0.025,
+  });
+
+  /* M_VISOR -- glossy smoked glass over the sensor suite */
+  principled('M_VISOR', {
+    base: [0.0042, 0.0045, 0.0058], metallic: 0.0, rough: 0.018, ior: 1.58,
+    spec: 0.62, coat: 1.0, coatRough: 0.008,
+  });
+
+  /* M_HELMET -- matte black composite rear hood */
+  principled('M_HELMET', {
+    base: [0.0175, 0.0178, 0.0196], metallic: 0.0, rough: 0.52, ior: 1.46,
+    spec: 0.36, sheen: 0.28, sheenRough: 0.32, sheenTint: [0.30, 0.31, 0.35],
+    roughNode: roughVar(0.52, 0.045, 16.0),
+    normalNode: noiseBump(820.0, 7.0, 0.07, 0.6),
+  });
+
+  /* M_LED */
+  {
+    const m = new THREE.MeshStandardNodeMaterial();
+    m.name = 'M_LED';
+    m.color = lin(0, 0, 0);
+    m.roughness = 0.4;
+    m.emissive = lin(0.03, 0.72, 1.0);
+    m.emissiveIntensity = 11.0;
+    MATS.M_LED = m;
+  }
+
+  /* M_DARKMECH -- cast / anodised dark-grey structural mechanism */
+  principled('M_DARKMECH', {
+    base: [0.0295, 0.0300, 0.0325], metallic: 0.72, rough: 0.42,
+    roughNode: roughVar(0.42, 0.07, 55.0),
+    normalNode: noiseBump(900.0, 8.0, 0.12, 0.7),
+  });
+
+  /* M_ALU -- machined light aluminium */
+  principled('M_ALU', {
+    base: [0.560, 0.562, 0.570], metallic: 1.0, rough: 0.26,
+    roughNode: roughVar(0.26, 0.05, 90.0),
+    normalNode: noiseBump(1400.0, 6.0, 0.08, 0.55),
+  });
+
+  /* M_STEEL -- polished actuator rod */
+  principled('M_STEEL', { base: [0.540, 0.548, 0.565], metallic: 1.0, rough: 0.10 });
+
+  /* M_RUBBER -- elbow / knee pad */
+  principled('M_RUBBER', {
+    base: [0.0130, 0.0132, 0.0150], rough: 0.60, spec: 0.35,
+    sheen: 0.35, sheenRough: 0.30, sheenTint: [0.26, 0.27, 0.30],
+    normalNode: noiseBump(340.0, 8.0, 0.18, 0.7),
+  });
+
+  /* M_FOOT -- moulded charcoal sole / boot */
+  principled('M_FOOT', {
+    base: [0.0400, 0.0410, 0.0450], rough: 0.52, spec: 0.4, sheen: 0.18, sheenRough: 0.5,
+    roughNode: roughVar(0.52, 0.06, 30.0),
+    normalNode: noiseBump(450.0, 8.0, 0.13, 0.55),
+  });
+
+  /* M_LOGO */
+  principled('M_LOGO', { base: [0.055, 0.054, 0.053], rough: 0.42, metallic: 0.0 });
+
+  /* M_DARKGREY -- mid dark grey plastic for small covers */
+  principled('M_DARKGREY', {
+    base: [0.075, 0.076, 0.082], rough: 0.40, metallic: 0.25,
+    normalNode: noiseBump(800.0, 6.0, 0.07, 0.55),
+  });
+
+  return MATS;
+}
+
+/* ==========================================================================
+   14. mesh -> BufferGeometry, standard studio rig, renderer.
+
+       Blender's world axes are kept as-is (Z up), so the camera's up vector
+       is +Z and every coordinate in this file is the same number the Python
+       build uses.  Cameras and lights from setup.py are deliberately NOT
+       ported -- this is a neutral three-point studio with a soft box
+       environment.
+   ========================================================================== */
+
+function toGeometry(mesh) {
+  applyMods(mesh);
+  const { corners } = computeCornerNormals(mesh);
+  const F = mesh.f, V = mesh.v;
+
+  const pos = [], nor = [];
+  const perVert = new Map();            /* vertex -> [normal, outIndex][] */
+  const groups = new Map();             /* material slot -> index array   */
+
+  const emit = (vi, n) => {
+    let list = perVert.get(vi);
+    if (!list) { list = []; perVert.set(vi, list); }
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i][0];
+      if (Math.abs(m[0] - n[0]) < 1e-6 && Math.abs(m[1] - n[1]) < 1e-6 && Math.abs(m[2] - n[2]) < 1e-6)
+        return list[i][1];
+    }
+    const idx = pos.length / 3;
+    pos.push(V[vi][0], V[vi][1], V[vi][2]);
+    nor.push(n[0], n[1], n[2]);
+    list.push([n, idx]);
+    return idx;
+  };
+
+  for (let fi = 0; fi < F.length; fi++) {
+    const t = F[fi], c = corners[fi];
+    const slot = mesh.fm[fi] | 0;
+    let g = groups.get(slot);
+    if (!g) { g = []; groups.set(slot, g); }
+    const i0 = emit(t[0], c[0]);
+    for (let i = 1; i < t.length - 1; i++) {
+      g.push(i0, emit(t[i], c[i]), emit(t[i + 1], c[i + 1]));
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+
+  const index = [];
+  const order = [...groups.keys()].sort((a, b) => a - b);
+  const mats = [];
+  for (const slot of order) {
+    const g = groups.get(slot);
+    geo.addGroup(index.length, g.length, mats.length);
+    for (const i of g) index.push(i);
+    mats.push(mesh.mats[slot] || mesh.mats[0] || 'M_SHELL');
+  }
+  geo.setIndex(index);
+  geo.computeBoundingSphere();
+  return { geo, mats };
+}
+
+/* ---- studio environment: an equirectangular soft-box rig ---------------- */
+
+const nrm3v = v => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
+const KEY_DIR = nrm3v([-0.62, -0.78, 0.50]);
+const FILL_DIR = nrm3v([0.92, -0.42, 0.22]);
+const RIML_DIR = nrm3v([-0.72, 0.70, 0.34]);
+const RIMR_DIR = nrm3v([0.76, 0.62, 0.30]);
+
+/* Equirectangular soft-box rig.  The lighting rig is defined in world space
+   (Z up) and three samples an equirect map with the world reflection vector,
+   so no axis conversion is needed here. */
+function equirectTexture(W, H, shade) {
+  const data = new Uint16Array(W * H * 4);
+  const h2 = THREE.DataUtils.toHalfFloat;
+  for (let j = 0; j < H; j++) {
+    const v = (j + 0.5) / H;
+    const theta = (v - 0.5) * Math.PI;
+    const sy = Math.sin(theta), cy = Math.cos(theta);
+    for (let i = 0; i < W; i++) {
+      const phi = ((i + 0.5) / W - 0.5) * TAU;
+      const c = shade([cy * Math.cos(phi), sy, cy * Math.sin(phi)]);
+      const o = (j * W + i) * 4;
+      data[o] = h2(c[0]); data[o + 1] = h2(c[1]); data[o + 2] = h2(c[2]); data[o + 3] = h2(1);
+    }
+  }
+  const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.HalfFloatType);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.NoColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function studioEnvTexture() {
+  const box = (d, dir, tight, power) => {
+    const c = d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2];
+    return c <= 0 ? 0 : Math.pow(c, tight) * power;
+  };
+  return equirectTexture(768, 384, d => {
+    const g = smoothstep(-0.75, 0.9, d[2]);
+    let r = 0.010 + 0.115 * g, gg = 0.011 + 0.120 * g, bb = 0.014 + 0.132 * g;
+    const t = box(d, [0, 0, 1], 4.0, 1.10);          /* overhead soft box   */
+    r += t; gg += t; bb += t * 1.02;
+    const k = box(d, KEY_DIR, 34.0, 16.0);           /* key                 */
+    r += k; gg += k * 0.982; bb += k * 0.948;
+    const f = box(d, FILL_DIR, 9.0, 1.5);            /* cool fill           */
+    r += f * 0.90; gg += f * 0.945; bb += f;
+    const a = box(d, RIML_DIR, 70.0, 9.0);           /* back-left rim strip */
+    r += a * 0.88; gg += a * 0.93; bb += a;
+    const b = box(d, RIMR_DIR, 70.0, 7.0);           /* back-right rim strip*/
+    r += b * 0.90; gg += b * 0.94; bb += b;
+    return [r, gg, bb];
+  });
+}
+
+/* dark seamless backdrop -- keeps the soft boxes out of the visible frame */
+function backdropTexture() {
+  return equirectTexture(64, 128, d => {
+    const t = smoothstep(-0.25, 0.75, d[2]);
+    const v = 0.0295 * (1.0 - t) + 0.0045 * t;
+    return [v * 0.96, v * 0.98, v * 1.06];
+  });
+}
+
+function buildStudio(scene) {
+  scene.environment = studioEnvTexture();
+  scene.environmentIntensity = 1.0;
+  scene.background = backdropTexture();
+  scene.backgroundIntensity = 1.0;
+
+  const D = 3.2;
+  const dl = (color, intensity, dir) => {
+    const l = new THREE.DirectionalLight(color, intensity);
+    l.position.set(dir[0] * D, dir[1] * D, dir[2] * D);
+    scene.add(l, l.target);
+    return l;
+  };
+
+  const key = dl(0xfff4e6, 3.6, KEY_DIR);
+  key.castShadow = true;
+  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.camera.near = 0.5;
+  key.shadow.camera.far = 8;
+  key.shadow.camera.left = -0.9;
+  key.shadow.camera.right = 0.9;
+  key.shadow.camera.top = 1.3;
+  key.shadow.camera.bottom = -1.3;
+  key.shadow.bias = -0.0003;
+  key.shadow.normalBias = 0.003;
+  key.shadow.intensity = 0.82;
+
+  dl(0xd8e8ff, 0.85, FILL_DIR);
+  dl(0xdcecff, 2.3, RIML_DIR);
+  dl(0xe2f0ff, 1.7, RIMR_DIR);
+  dl(0xffffff, 0.55, [0.05, 0.28, 1.0]);
+
+  /* studio sweep: the floor fades out into the backdrop value */
+  const floorMat = new THREE.MeshStandardNodeMaterial();
+  floorMat.roughness = 0.55;
+  floorMat.metalness = 0.0;
+  const rad = positionLocal.xy.length();
+  floorMat.colorNode = mix(vec3(0.0175, 0.0180, 0.0205), vec3(0.0032, 0.0034, 0.0042),
+                           clamp(rad.sub(0.6).div(2.6), 0.0, 1.0));
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(14, 128), floorMat);
+  floor.receiveShadow = true;
+  scene.add(floor);
+  return { key, floor };
+}
+
+/* ---- build the figure --------------------------------------------------- */
+
+async function buildFigure() {
+  const steps = [
+    ['torso', buildTorso], ['head', buildHead], ['arms', buildArms],
+    ['hands', buildHands], ['hips', buildHips], ['legs', buildLegs],
+    ['feet', buildFeet],
+  ];
+  for (let i = 0; i < steps.length; i++) {
+    await progress(`building ${steps[i][0]}…`, 0.05 + 0.7 * (i / steps.length));
+    steps[i][1]();
+  }
+}
+
+const root = new THREE.Group();
+
+async function assemble() {
+  const order = ['TORSO', 'HEAD', 'ARM', 'HAND', 'HIP', 'LEG', 'FOOT'];
+  let tris = 0, objects = 0;
+  for (let ci = 0; ci < order.length; ci++) {
+    const cname = order[ci];
+    await progress(`shading ${cname.toLowerCase()}…`, 0.75 + 0.2 * (ci / order.length));
+    const group = new THREE.Group();
+    group.name = cname;
+    for (const m of COLL[cname]) {
+      const { geo, mats } = toGeometry(m);
+      const mm = mats.map(name => MATS[name] || MATS.M_SHELL);
+      const mesh = new THREE.Mesh(geo, mm.length === 1 ? mm[0] : mm);
+      mesh.name = m.name;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+      tris += geo.getIndex().count / 3;
+      objects++;
+    }
+    root.add(group);
+  }
+  return { tris, objects };
+}
+
+/* ---- renderer ----------------------------------------------------------- */
+
+async function main() {
+  await progress('compiling geometry kernels…', 0.02);
+  buildMaterials();
+  await buildFigure();
+  const stats = await assemble();
+
+  const scene = new THREE.Scene();
+  scene.add(root);
+  buildStudio(scene);
+
+  const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.02, 60);
+  camera.up.set(0, 0, 1);
+  camera.position.set(-1.85, -3.35, 1.62);
+
+  const renderer = new THREE.WebGPURenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.setClearColor(0x0b0c0e, 1);
+  renderer.toneMapping = THREE.AgXToneMapping;
+  renderer.toneMappingExposure = 1.15;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 0, 0.92);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.minDistance = 0.35;
+  controls.maxDistance = 12;
+  controls.maxPolarAngle = Math.PI * 0.52;
+  controls.update();
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  await progress('compiling shaders…', 0.97);
+  await renderer.init();
+  await renderer.compileAsync(scene, camera);
+
+  HUD.innerHTML = `<b>TESLA OPTIMUS &mdash; GEN 2</b><br>`
+    + `${stats.objects} objects &middot; ${(stats.tris / 1000).toFixed(0)}k tris<br>`
+    + `<span>three.js r185 &middot; WebGPU / TSL &middot; 1730 mm</span><br>`
+    + `<span>drag to orbit &middot; scroll to zoom</span>`;
+
+  /* handle for inspection from the console */
+  window.OPT = { scene, camera, controls, renderer, root, mats: MATS, coll: COLL };
+
+  await progress('done', 1.0);
+  LOAD.classList.add('done');
+
+  renderer.setAnimationLoop(() => {
+    controls.update();
+    renderer.render(scene, camera);
+  });
+}
+
+main().catch(e => {
+  const el = document.getElementById('err');
+  el.style.display = 'block';
+  el.textContent = (e && e.stack) || String(e);
+});
+</script>

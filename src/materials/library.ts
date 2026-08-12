@@ -301,6 +301,44 @@ export function castMineral(): MeshStandardNodeMaterial {
   return material
 }
 
+/**
+ * Polished dark marble — the Optimus plinth's deck slab.
+ *
+ * Veins are the ZERO-CROSSINGS of a folded field over a domain-warped noise,
+ * not a thresholded blob: that is the only construction that gives thin,
+ * continuous, branching seams (the lesson `fountain/fountainMaterials.ts`
+ * records for its ivory stone; this is the same technique on a dark palette,
+ * kept here because the shared kit must not depend on a feature module).
+ *
+ * The field is 3-D and world-space, so the pattern runs continuously over the
+ * slab's top face, its chamfer and its edge band the way a sawn block does,
+ * and it cannot swim under the camera.
+ */
+export function darkMarble(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const p = positionWorld.mul(0.42)
+  // Domain warp: straight noise gives veins that wander like contour lines.
+  const warped = p.add(vec3(mx_noise_float(p.mul(0.7)), mx_noise_float(p.mul(0.7).add(19.3)), mx_noise_float(p.mul(0.7).add(41.1))).mul(0.55))
+  const folded = mx_noise_float(warped.mul(0.85)).mul(6.6).sin().abs()
+  const vein = smoothstep(0.30, 0.015, folded)
+  // Hairlines ride the same warp an octave up and are BUNDLED to the bedding:
+  // a fracture wandering alone across clear field reads as a survey contour.
+  const fine = mx_noise_float(warped.mul(2.6).add(vec3(7.7))).mul(10.4).sin().abs()
+  const hair = smoothstep(0.13, 0.01, fine).mul(smoothstep(0.62, 0.18, folded))
+  // Calcite grain: granular at arm's length, gone by 10 m.
+  const grain = mx_noise_float(positionWorld.mul(38)).mul(0.5).add(0.5)
+
+  const ground = mix(vec3(0.028, 0.029, 0.034), vec3(0.048, 0.05, 0.058), mx_noise_float(warped.mul(0.3)).mul(0.5).add(0.5))
+  const veined = mix(ground, vec3(0.30, 0.305, 0.325), vein.mul(0.62))
+  material.colorNode = mix(veined, vec3(0.46, 0.45, 0.47), hair.mul(0.34)).mul(grain.mul(0.1).add(0.95))
+  // Polished, but the veins are softer stone and take less of a polish — that
+  // difference is most of what stops a dark slab reading as painted plastic.
+  material.roughnessNode = float(0.14).add(vein.mul(0.13)).add(grain.mul(0.03))
+  material.metalness = 0
+  applySpecularAA(material)
+  return material
+}
+
 /** Matte technical fabric (chairs, the porch jacket, awnings). */
 export function fabric(color: Color): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial()
@@ -400,6 +438,7 @@ export function kitMaterials(): KitMaterials {
       orangeTop: polishedRailTop(),
       deck: deckPlate(),
       cast: castMineral(),
+      darkStone: darkMarble(),
       habShell: habShell(),
       darkGlass: darkGlass(),
       growBar: growBar(),

@@ -12,6 +12,7 @@ import { buildFreedomTower } from './districts/freedomTower'
 import { buildHydroTower } from './districts/hydroTower'
 import { buildInteriors } from './districts/interiors'
 import { buildLeisure } from './districts/leisure'
+import { buildOptimusPlaza } from './districts/optimusPlaza'
 import { buildResidential } from './districts/residential'
 import type { DistrictServices } from './districts/types'
 import { buildWorks } from './districts/works'
@@ -63,6 +64,7 @@ export class ParkAssemblySystem implements GameSystem {
     buildCommons(services)
     buildHydroTower(services)
     buildFreedomTower(services)
+    buildOptimusPlaza(services)
     buildAmenities(services)
     buildInteriors(services)
     this.opsAnchor = services.opsAnchor

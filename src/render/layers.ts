@@ -14,6 +14,19 @@ export const DYNAMIC_SHADOW_LAYER = 2
  * RECTANGLE and walks across the ground as a growing silhouette (owner
  * defect class, greenhouse spray). */
 export const PARTICLE_LAYER = 3
+/**
+ * Geometry that exists ONLY to cast the cached sun shadow: never rendered by
+ * the main camera, always rendered by the static clipmap cameras.
+ *
+ * This is what lets an object LOD-switch in the main view while its shadow
+ * stays fixed. A cached clipmap records its casters into an immutable render
+ * bundle once; an object whose draw changes afterwards (an InstancedMesh
+ * whose `count` moves, a mesh that turns invisible) either freezes at
+ * whatever it looked like at seal time or drops out of the shadow entirely.
+ * A separate, never-switched proxy at a mid LOD sidesteps both: the shadow is
+ * stable and cheap, and the main view is free to swap detail underneath it.
+ */
+export const STATIC_SHADOW_PROXY_LAYER = 4
 
 export function enableMainDetailLayer(camera: Camera): void {
   camera.layers.enable(MAIN_DETAIL_LAYER)
@@ -29,6 +42,13 @@ export function markParticle(object: Object3D): void {
 
 export function markMainDetail(object: Object3D): void {
   object.layers.set(MAIN_DETAIL_LAYER)
+}
+
+/** Confine an object to the cached sun-shadow pass — see the layer's note. */
+export function markStaticShadowProxy(object: Object3D): void {
+  object.traverse((node) => {
+    node.layers.set(STATIC_SHADOW_PROXY_LAYER)
+  })
 }
 
 /**

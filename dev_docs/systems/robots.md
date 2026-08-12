@@ -96,3 +96,13 @@ other prop.
 (the gantry is ~53 m of arc at the current dome radius, not the 100 m the
 older constants implied). Wheels are built once per (spec, hand) and cloned, so
 the four/six wheels of a machine share geometry and materials.
+
+## The Optimus exhibit (2026-08-12)
+
+Not part of the fleet above and not a `RobotsSystem` concern: eight static
+Tesla Optimus Gen-2 figures on a plinth at (−28, 70), a verbatim port of
+`ref_images/optimus.html`. Separate system (`robots/optimusExhibit.ts`),
+separate geometry kernels (`procgen/blenderkit/`), separate shadow strategy
+(a never-switched proxy on `STATIC_SHADOW_PROXY_LAYER`, because the fleet's
+`markDynamic` path is for things that MOVE and these do not).
+Full write-up: `dev_docs/systems/optimus-exhibit.md`.
