@@ -39,6 +39,8 @@ export class RobotsSystem implements GameSystem {
   private readonly player: PlayerSystem | null
   private vapor: Sprite[] = []
   private readonly vaporLife = uniform(0)
+  private readonly toTarget = new Vector3()
+  private readonly toPlayer = new Vector3()
 
   constructor(player: PlayerSystem | null) {
     this.player = player
@@ -175,13 +177,13 @@ export class RobotsSystem implements GameSystem {
       }
       const target = robot.waypoints[robot.index]
       const position = rig.group.position
-      const toTarget = new Vector3().subVectors(target, position)
+      const toTarget = this.toTarget.subVectors(target, position)
       toTarget.y = 0
       const distance = toTarget.length()
       // Yield politely to the walking player.
       const player = this.player
       if (player && !player.seated) {
-        const toPlayer = new Vector3().subVectors(player.eye, position)
+        const toPlayer = this.toPlayer.subVectors(player.eye, position)
         toPlayer.y = 0
         if (toPlayer.length() < 1.7) {
           continue

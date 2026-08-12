@@ -55,6 +55,8 @@ export class AudioEngineSystem implements GameSystem {
   private readonly player: PlayerSystem | null
   private readonly robots: RobotsSystem | null
   private readonly tram: TramSystem | null
+  private readonly listenerForward = new Vector3()
+  private readonly listenerUp = new Vector3()
 
   constructor(player: PlayerSystem | null, robots: RobotsSystem | null, tram: TramSystem | null) {
     this.player = player
@@ -452,8 +454,8 @@ export class AudioEngineSystem implements GameSystem {
     const listener = context.listener
     const camera = ctx.camera
     const position = camera.position
-    const forward = new Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
-    const up = new Vector3(0, 1, 0).applyQuaternion(camera.quaternion)
+    const forward = this.listenerForward.set(0, 0, -1).applyQuaternion(camera.quaternion)
+    const up = this.listenerUp.set(0, 1, 0).applyQuaternion(camera.quaternion)
     if (listener.positionX) {
       listener.positionX.value = position.x
       listener.positionY.value = position.y

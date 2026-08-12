@@ -67,6 +67,7 @@ const BOARD_SETTLE = 1.3 // s from E press until the doors start closing
 const VICINITY = 2.75 // m from the portal anchor that holds doors open
 const CRUISE = 3.3 // m/s
 const ACCEL = 1.1 // m/s²
+const LANDINGS = ['bottom', 'top'] as const
 
 const CAB_GLASS_R = 1.145
 const CAB_WALL_TOP = 2.42
@@ -150,7 +151,7 @@ export class FreedomElevatorSystem implements GameSystem {
     }
 
     // ---- landing doors -------------------------------------------------
-    for (const landing of ['bottom', 'top'] as const) {
+    for (const landing of LANDINGS) {
       const floorY = landing === 'bottom' ? f.terraceY : f.deckY
       for (const sign of [1, -1]) {
         const leaf = buildDoorLeaf(materials, 1.3, 0.055, 2.34, sign)
@@ -226,7 +227,7 @@ export class FreedomElevatorSystem implements GameSystem {
       body.setRotation(rot, false)
       this.cabBody = body
 
-      for (const landing of ['bottom', 'top'] as const) {
+      for (const landing of LANDINGS) {
         const floorY = landing === 'bottom' ? f.terraceY : f.deckY
         const doorBody = world.createRigidBody(api.RigidBodyDesc.fixed())
         const portal = new Vector3(
@@ -252,7 +253,7 @@ export class FreedomElevatorSystem implements GameSystem {
     // ---- interaction ---------------------------------------------------
     if (this.interaction && this.player) {
       const player = this.player
-      for (const landing of ['bottom', 'top'] as const) {
+      for (const landing of LANDINGS) {
         const anchor = landing === 'bottom' ? f.doorAnchorBottom : f.doorAnchorTop
         this.interaction.register({
           position: anchor,
@@ -287,13 +288,14 @@ export class FreedomElevatorSystem implements GameSystem {
     const f = this.frame
     const eye = new Vector3()
     const yaw = Math.atan2(-f.ux, -f.uz) // face the door (the view side)
+    const pose = { eye, yaw }
     player.enterVehicle(() => {
       eye.set(
         f.cabX - f.ux * 0.3,
         this.cabFloorY + 1.7,
         f.cabZ - f.uz * 0.3,
       )
-      return { eye, yaw }
+      return pose
     })
   }
 
@@ -398,7 +400,7 @@ export class FreedomElevatorSystem implements GameSystem {
     // someone stands in the vicinity (the rider inside counts — that is
     // what reopens them on arrival); they drive shut once a boarded rider
     // has settled, and stay shut whenever the cab is elsewhere.
-    for (const landing of ['bottom', 'top'] as const) {
+    for (const landing of LANDINGS) {
       const parkedHere = this.cabParkedAt(landing)
       let want = 0
       if (parkedHere && this.nearLanding(landing)) want = 1
@@ -452,13 +454,12 @@ export class FreedomElevatorSystem implements GameSystem {
         : this.phase === 'parkedBottom'
           ? this.doorOpen.bottom
           : 0
-    const eased = (t: number): number => t * t * (3 - 2 * t)
-    const cabSwing = eased(hereOpen) * DOOR_OPEN_ARC
+    const cabSwing = smoothstep01(hereOpen) * DOOR_OPEN_ARC
     this.cabDoorLeaves[0].rotation.y = -cabSwing
     this.cabDoorLeaves[1].rotation.y = cabSwing
     const yaw = Math.atan2(-f.uz, f.ux)
-    for (const landing of ['bottom', 'top'] as const) {
-      const swing = eased(this.doorOpen[landing]) * DOOR_OPEN_ARC
+    for (const landing of LANDINGS) {
+      const swing = smoothstep01(this.doorOpen[landing]) * DOOR_OPEN_ARC
       this.landingLeaves[landing][0].rotation.y = yaw - swing
       this.landingLeaves[landing][1].rotation.y = yaw + swing
     }
@@ -494,6 +495,10 @@ export class FreedomElevatorSystem implements GameSystem {
   dispose(ctx: GameContext): void {
     ctx.scene.remove(this.root)
   }
+}
+
+function smoothstep01(t: number): number {
+  return t * t * (3 - 2 * t)
 }
 
 // ------------------------------------------------------------- cab builders

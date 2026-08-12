@@ -3276,3 +3276,36 @@ band at 76 % weight. The metric is also a **Chebyshev** distance in the
 clipmap's own light basis (`lookAt(ORIGIN, lightDirection, +Y).invert()`), so
 an audit that invents its own perpendicular axes gets a different number.
 Replicate both or the check is theatre — `tools/starship-site-audit.mjs`.
+
+### Movement input must be normalized before it is scaled by target speed
+
+`PlayerInput.forward` / `.strafe` are each −1/0/+1, so any diagonal (W+D,
+S+A, …) is a √2-magnitude stick. Multiplying that raw by `SPRINT_SPEED`
+made a diagonal sprint run at 5.94 m/s instead of 4.2.
+
+The visible symptom was NOT "I move too fast" — it was **footsteps that got
+faster than sprint when strafing**, because the cadence law
+(`CADENCE_BASE + planarSpeed · CADENCE_SLOPE`) reads TRUE planar speed, so
+the overspeed extrapolated past the 4.0 steps/s sprint cadence to ~5.0.
+Anything derived from real speed (bob, cadence, future stamina/dust/audio)
+will amplify a locomotion bug into a symptom that looks unrelated to speed.
+Fix is at the source: `targetSpeed / max(1, hypot(forward, strafe))`.
+
+## Zero-compromise performance sweep (2026-08-13)
+
+- Chromium WebGPU cannot upload a `CanvasTexture` whose canvas has never
+  acquired/painted a 2D context. The three untouched Ops canvases caused the
+  three `CopyExternalImageToTexture()` warnings; paint their real initial
+  state before constructing the texture, then keep the authored refresh
+  cadence.
+- `@dimforge/rapier3d-compat@0.19.3` itself calls wasm-bindgen with the
+  deprecated positional initializer. Keep its exact WASM and patch only the
+  wrapper call via `tools/patch-rapier-init.mjs`. The regular
+  `@dimforge/rapier3d@0.19.3` WASM has a different SHA-256/byte length, so it
+  is not an acceptable silent substitution when behavior must remain
+  identical.
+- Reuse owner-held scratch objects only across synchronous consumers that do
+  not retain them. This safely covers audio listener axes, robot steering
+  deltas, tram curve samples/collider centres, seat-pose records, player
+  movement records, and frame timing; it does not justify broad matrix
+  freezing or any render/simulation budget reduction.

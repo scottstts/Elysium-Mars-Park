@@ -3064,26 +3064,6 @@ export function buildAmenities(services: DistrictServices): void {
     })
   }
 
-  // `!== false` rather than truthy: the headless gate (tools/amenity-audit.mjs)
-  // runs this module outside vite, where `import.meta.env` is undefined.
-  if (import.meta.env?.DEV !== false) {
-    const parts: string[] = []
-    for (const [family, count] of [...d.site.counts].sort((a, b) => b[1] - a[1])) {
-      parts.push(`${family} ${count}`)
-    }
-    let rejected = 0
-    const refused: string[] = []
-    for (const [family, n] of d.site.rejects) {
-      rejected += n
-      refused.push(`${family} ${n}`)
-    }
-    console.info(
-      `[amenities] ${d.site.total()} placements (${parts.join(', ')}); ` +
-        `${rejected} refused by the clearance rules (${refused.join(', ')}); ` +
-        `${d.faces.length} sign faces, ${d.arts.size} atlas tiles, ` +
-        `${d.banners.length} banners`,
-    )
-  }
 }
 
 /**

@@ -42,6 +42,7 @@ const CAR_GAP = 0.7
 /** Gate opens when the arrival has this much left to run: at 45 m/s the six
  *  blades (1.6 s travel) are fully housed ~2.5 s before the car passes. */
 const GATE_OPEN_REMAINING = 190
+const STATION_ORDER = ['portal', 'farmside', 'overlook'] as const
 
 type Phase = 'waiting' | 'arrival' | 'dwell' | 'run'
 
@@ -76,6 +77,13 @@ export class TramSystem implements GameSystem {
   private readonly player: PlayerSystem | null
   private readonly interaction: InteractionSystem | null
   private readonly boardPosition = new Vector3()
+  private readonly pathPoint = new Vector3()
+  private readonly pathAhead = new Vector3()
+  private readonly transformScratch = new Vector3()
+  private readonly colliderCentre = new Vector3()
+  private readonly rotationScratch = new Quaternion()
+  private readonly seatEye = new Vector3()
+  private readonly seatPoseValue = { eye: this.seatEye, yaw: 0 }
   private gate: PortalGate | null = null
   private irisOpen = 0
 
@@ -172,9 +180,9 @@ export class TramSystem implements GameSystem {
     }
   }
 
-  private stationOrder(): string[] {
+  private stationOrder(): readonly string[] {
     // Travel order with decreasing angle parametrization.
-    return ['portal', 'farmside', 'overlook']
+    return STATION_ORDER
   }
 
   private seatPlayer(): void {
@@ -189,13 +197,14 @@ export class TramSystem implements GameSystem {
     // Front-left AISLE seat when the new cabin provides it: the window
     // seat's A-pillar bisects the dead-ahead arrival view (vehicle report).
     const seat = car.seats[2] ?? car.seats[0]
-    const world = seat.position.clone().applyMatrix4(car.group.matrixWorld)
+    const world = this.seatEye.copy(seat.position).applyMatrix4(car.group.matrixWorld)
     world.y += 0.74
-    const quaternion = car.group.getWorldQuaternion(new Quaternion())
-    const forward = new Vector3(0, 0, 1).applyQuaternion(quaternion)
+    const quaternion = car.group.getWorldQuaternion(this.rotationScratch)
+    const forward = this.transformScratch.set(0, 0, 1).applyQuaternion(quaternion)
     // Player yaw 0 looks along −Z, so looking WITH travel T needs
     // atan2(−T.x, −T.z); seat.yaw π flips for the rear-facing pair.
-    return { eye: world, yaw: Math.atan2(-forward.x, -forward.z) + seat.yaw }
+    this.seatPoseValue.yaw = Math.atan2(-forward.x, -forward.z) + seat.yaw
+    return this.seatPoseValue
   }
 
   private board(): void {
@@ -209,10 +218,10 @@ export class TramSystem implements GameSystem {
     this.riding = false
     // Stand on the platform side (left of travel = +X local, right-handed).
     const car = this.cars[0]
-    const left = new Vector3(1, 0, 0).applyQuaternion(
-      car.group.getWorldQuaternion(new Quaternion()),
-    )
-    const door = car.group.position.clone().addScaledVector(left, 2.4)
+    const left = this.transformScratch
+      .set(1, 0, 0)
+      .applyQuaternion(car.group.getWorldQuaternion(this.rotationScratch))
+    const door = this.colliderCentre.copy(car.group.position).addScaledVector(left, 2.4)
     door.y = interiorHeight(door.x, door.z) + 0.02
     // Every platform decks at the cabin floor less the 20 mm step.
     if (Math.abs(Math.hypot(door.x, door.z) - LOOP.radius) < 8) {
@@ -340,8 +349,9 @@ export class TramSystem implements GameSystem {
         false,
       )
       if (player && !this.riding && this.speed > 0.02) {
+        const center = this.colliderCentre.set(car.position.x, cy, car.position.z)
         player.nudgeOutOfBox(
-          new Vector3(car.position.x, cy, car.position.z),
+          center,
           yaw,
           CAR_WIDTH / 2 + 0.05,
           1.5,
@@ -358,17 +368,21 @@ export class TramSystem implements GameSystem {
    * clears, `s` is a plain loop arc length. Every consumer of a car pose
    * goes through here — the dock instant must never re-place a car.
    */
-  private carPoint(s: number): Vector3 {
+  private carPoint(s: number, target: Vector3): Vector3 {
     const track = this.track
-    if (!track) return new Vector3()
+    if (!track) return target.set(0, 0, 0)
     if (!this.spurActive) {
-      return track.loop.getPointAt(mod(s, track.loopLength) / track.loopLength)
+      return track.loop.getPointAt(mod(s, track.loopLength) / track.loopLength, target)
     }
     if (s <= track.arrivalLength) {
-      return track.arrival.getPointAt(clamp(s, 0, track.arrivalLength) / track.arrivalLength)
+      return track.arrival.getPointAt(
+        clamp(s, 0, track.arrivalLength) / track.arrivalLength,
+        target,
+      )
     }
     return track.loop.getPointAt(
       mod(track.handoffS + (s - track.arrivalLength), track.loopLength) / track.loopLength,
+      target,
     )
   }
 
@@ -396,10 +410,11 @@ export class TramSystem implements GameSystem {
     }
     for (let i = 0; i < this.cars.length; i++) {
       const offset = (i === 0 ? 0.5 : -0.5) * spacing
-      const point = this.carPoint(trainS + offset)
-      const ahead = this.carPoint(trainS + offset + 1.5)
+      const point = this.carPoint(trainS + offset, this.pathPoint)
+      const ahead = this.carPoint(trainS + offset + 1.5, this.pathAhead)
       const car = this.cars[i].group
-      car.position.copy(point).add(new Vector3(0, 0.62, 0))
+      car.position.copy(point)
+      car.position.y += 0.62
       car.rotation.set(0, Math.atan2(ahead.x - point.x, ahead.z - point.z), 0)
       const pitch = Math.atan2(ahead.y - point.y, Math.hypot(ahead.x - point.x, ahead.z - point.z))
       car.rotateX(-pitch)
@@ -414,8 +429,7 @@ export class TramSystem implements GameSystem {
 
     // Keep the boarding caption anchored at the front car's left door.
     const car = this.cars[0]
-    const left = new Vector3(1.6, 1.2, 0).applyMatrix4(car.group.matrixWorld)
-    this.boardPosition.copy(left)
+    this.boardPosition.set(1.6, 1.2, 0).applyMatrix4(car.group.matrixWorld)
   }
 
   dispose(ctx: GameContext): void {

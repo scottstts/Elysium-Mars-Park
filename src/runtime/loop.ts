@@ -26,6 +26,7 @@ export class GameLoop {
   private renderedWhilePaused = false
   private readonly ctx: GameContext
   private readonly registry: SystemRegistry
+  private readonly frameTiming: FrameTiming = { cpuMs: 0, frameIntervalMs: 0, nowMs: 0 }
 
   constructor(ctx: GameContext, registry: SystemRegistry) {
     this.ctx = ctx
@@ -102,10 +103,10 @@ export class GameLoop {
   }
 
   private finishFrame(frameStart: number, rawDt: number, nowMs: number): void {
-    this.onFrameEnd?.({
-      cpuMs: performance.now() - frameStart,
-      frameIntervalMs: Math.max(1, rawDt * 1000),
-      nowMs,
-    })
+    const timing = this.frameTiming
+    timing.cpuMs = performance.now() - frameStart
+    timing.frameIntervalMs = Math.max(1, rawDt * 1000)
+    timing.nowMs = nowMs
+    this.onFrameEnd?.(timing)
   }
 }

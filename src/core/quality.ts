@@ -48,7 +48,9 @@ export class QualityState {
   tier: number
   renderScale = 1
 
-  private readonly recent: number[] = []
+  private readonly recent = new Float64Array(120)
+  private recentCount = 0
+  private recentCursor = 0
 
   constructor(tier: number) {
     this.tier = Math.max(0, Math.min(2, tier))
@@ -60,14 +62,15 @@ export class QualityState {
 
   /** Called once per frame with the presented frame interval. */
   submitFrame(frameIntervalMs: number): void {
-    this.recent.push(frameIntervalMs)
-    if (this.recent.length > 120) this.recent.shift()
+    this.recent[this.recentCursor] = frameIntervalMs
+    this.recentCursor = (this.recentCursor + 1) % this.recent.length
+    this.recentCount = Math.min(this.recent.length, this.recentCount + 1)
   }
 
   /** Rolling median frame interval (ms) for auto-tuning decisions. */
   medianFrameMs(): number {
-    if (this.recent.length === 0) return 16.6
-    const sorted = [...this.recent].sort((a, b) => a - b)
+    if (this.recentCount === 0) return 16.6
+    const sorted = Array.from(this.recent.subarray(0, this.recentCount)).sort((a, b) => a - b)
     return sorted[sorted.length >> 1]
   }
 }

@@ -70,6 +70,8 @@ export class PlayerSystem implements GameSystem {
   /** Last frame's pose yaw, for carrying the head with a turning vehicle. */
   private seatYawCarry: number | null = null
   private readonly walkEye = new Vector3()
+  private readonly desiredMovement = { x: 0, y: 0, z: 0 }
+  private readonly nextTranslation = { x: 0, y: 0, z: 0 }
 
   /** Locomotion gate for camera rigs; look stays live regardless. */
   controlEnabled = true
@@ -126,9 +128,10 @@ export class PlayerSystem implements GameSystem {
   sit(seatSurface: Vector3, yaw: number): void {
     if (this.seatedPose) return
     const eye = seatSurface.clone().add(new Vector3(0, 0.74, 0))
+    const pose = { eye, yaw }
     // No yaw/pitch snap: the seated cone tightens with the blend instead.
     this.exitPose = null
-    this.seatedPose = () => ({ eye, yaw })
+    this.seatedPose = () => pose
     this.velocity.set(0, 0, 0)
   }
 
@@ -296,12 +299,17 @@ export class PlayerSystem implements GameSystem {
       return
     }
 
-    // Desired planar velocity in yaw space.
+    // Desired planar velocity in yaw space. The stick is normalized: W+D
+    // held together is still ONE stride's worth of input, not √2. Left raw,
+    // a diagonal sprint ran at 5.94 m/s and the cadence law — which reads
+    // TRUE planar speed — fired ~5 steps/s, faster than the 4.0 the sprint
+    // cadence is defined to top out at.
     const targetSpeed = input.sprint ? SPRINT_SPEED : WALK_SPEED
+    const inputScale = targetSpeed / Math.max(1, Math.hypot(input.forward, input.strafe))
     const sin = Math.sin(this.yaw)
     const cos = Math.cos(this.yaw)
-    const desiredX = (input.strafe * cos - input.forward * sin) * targetSpeed
-    const desiredZ = (-input.forward * cos - input.strafe * sin) * targetSpeed
+    const desiredX = (input.strafe * cos - input.forward * sin) * inputScale
+    const desiredZ = (-input.forward * cos - input.strafe * sin) * inputScale
     const accel = this.grounded ? ACCEL_GROUND : ACCEL_AIR
     this.velocity.x += (desiredX - this.velocity.x) * Math.min(1, accel * dt)
     this.velocity.z += (desiredZ - this.velocity.z) * Math.min(1, accel * dt)
@@ -314,18 +322,17 @@ export class PlayerSystem implements GameSystem {
     }
     input.jumpQueued = false
 
-    controller.computeColliderMovement(collider, {
-      x: this.velocity.x * dt,
-      y: this.velocity.y * dt,
-      z: this.velocity.z * dt,
-    })
+    const desiredMovement = this.desiredMovement
+    desiredMovement.x = this.velocity.x * dt
+    desiredMovement.y = this.velocity.y * dt
+    desiredMovement.z = this.velocity.z * dt
+    controller.computeColliderMovement(collider, desiredMovement)
     const movement = controller.computedMovement()
     const translation = body.translation()
-    const next = {
-      x: translation.x + movement.x,
-      y: translation.y + movement.y,
-      z: translation.z + movement.z,
-    }
+    const next = this.nextTranslation
+    next.x = translation.x + movement.x
+    next.y = translation.y + movement.y
+    next.z = translation.z + movement.z
     body.setTranslation(next, false)
 
     this.grounded = controller.computedGrounded()

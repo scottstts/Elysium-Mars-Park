@@ -15,6 +15,7 @@ export class PlayerInput {
 
   private readonly keys = new Set<string>()
   private readonly element: HTMLElement
+  private readonly drainedLook = { yaw: 0, pitch: 0 }
 
   constructor(element: HTMLElement) {
     this.element = element
@@ -70,11 +71,12 @@ export class PlayerInput {
 
   /** Read-and-clear the accumulated mouse deltas (per render frame). */
   drainLook(): { yaw: number; pitch: number } {
-    const yaw = this.yawDelta
-    const pitch = this.pitchDelta
+    const look = this.drainedLook
+    look.yaw = this.yawDelta
+    look.pitch = this.pitchDelta
     this.yawDelta = 0
     this.pitchDelta = 0
-    return { yaw, pitch }
+    return look
   }
 
   dispose(): void {

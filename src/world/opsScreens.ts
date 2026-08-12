@@ -17,7 +17,6 @@ export class OpsScreensSystem implements GameSystem {
   readonly id = 'opsScreens'
 
   private screens: Array<{
-    canvas: HTMLCanvasElement
     texture: CanvasTexture
     draw: (ctx: GameContext) => void
   }> = []
@@ -127,6 +126,25 @@ export class OpsScreensSystem implements GameSystem {
       const canvas = document.createElement('canvas')
       canvas.width = 512
       canvas.height = 288
+      const g = canvas.getContext('2d')
+      if (!g) continue
+      const definition = definitions[i]
+      const draw = (gameCtx: GameContext): void => {
+        g.fillStyle = '#101614'
+        g.fillRect(0, 0, canvas.width, canvas.height)
+        g.strokeStyle = '#31413a'
+        g.lineWidth = 3
+        g.strokeRect(8, 8, canvas.width - 16, canvas.height - 16)
+        g.fillStyle = '#cfd8c8'
+        g.font = '700 30px "Helvetica Neue"'
+        g.fillText(definition.title, 24, 46)
+        definition.draw(g, gameCtx)
+      }
+
+      // Paint before constructing the CanvasTexture. An untouched canvas has
+      // no extractable image resource in Chromium's WebGPU upload path,
+      // producing one CopyExternalImageToTexture warning per dashboard.
+      draw(ctx)
       const texture = new CanvasTexture(canvas)
       texture.colorSpace = SRGBColorSpace
       const material = new MeshStandardNodeMaterial()
@@ -147,22 +165,10 @@ export class OpsScreensSystem implements GameSystem {
       screen.rotation.y = yaw + Math.PI / 2
       ctx.scene.add(screen)
 
-      const definition = definitions[i]
       this.screens.push({
-        canvas,
         texture,
         draw: (gameCtx) => {
-          const g = canvas.getContext('2d')
-          if (!g) return
-          g.fillStyle = '#101614'
-          g.fillRect(0, 0, canvas.width, canvas.height)
-          g.strokeStyle = '#31413a'
-          g.lineWidth = 3
-          g.strokeRect(8, 8, canvas.width - 16, canvas.height - 16)
-          g.fillStyle = '#cfd8c8'
-          g.font = '700 30px "Helvetica Neue"'
-          g.fillText(definition.title, 24, 46)
-          definition.draw(g, gameCtx)
+          draw(gameCtx)
           texture.needsUpdate = true
         },
       })
