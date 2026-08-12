@@ -1,8 +1,8 @@
-# THE FOUNTAIN (2026-08-12)
+# THE FOUNTAIN (2026-08-12, physics pass 2026-08-12b)
 
 Replaces the Regolith Gardens' raked furrows and steel-edged beds at
 `gardens-main` (−38, −40) with a monumental tiered fountain on a paved court.
-`src/fountain/`, one system, nine modules.
+`src/fountain/`, one system, ten modules.
 
 Only design decisions that the code cannot state for itself are recorded here.
 
@@ -11,206 +11,236 @@ Only design decisions that the code cannot state for itself are recorded here.
 ## 1. Why the gardens went, and what stayed
 
 The rake was authored as swept tube ridges 5 cm proud. At any honest viewing
-angle those ridges are sub-pixel, so the karesansui idea never arrived — what
-shipped read as a contour map scribed on flat dirt. The steel-edged beds were
-four sedge clumps in a picture frame. **Neither is worth re-attempting as
-geometry**: raked ground wants a normal-mapped GROUND MATERIAL, and rationed
-planting wants a reason to be where it is.
+angle those ridges are sub-pixel, so the karesansui idea never arrived. The
+steel-edged beds were four sedge clumps in a picture frame. **Neither is worth
+re-attempting as geometry.** The rock groups stayed — kept off the fountain by
+`pavedSignedDistance`, the same rule that keeps them off every other pour.
 
-The rock groups stayed. They are the only part of that idea that worked, and
-they are what gives open regolith its scale. They are kept off the fountain by
-`pavedSignedDistance`, which now includes the court — the same rule that keeps
-them off every other pour, not a special case.
-
-`GARDENS` still exists in `parkPlan` as an open-regolith **zone** descriptor
-(`groundworks` tints it, `groundScatter` thins its debris, `robotsSystem`
-patrols it). It no longer means "there is a garden here".
+`GARDENS` still exists in `parkPlan` as an open-regolith **zone** descriptor.
+It no longer means "there is a garden here".
 
 ## 2. One datum, and everything local to it
 
 Every height in `fountainPlan.ts` is metres above the court's paved top.
 `FountainSystem.init` samples `interiorHeight` **once** and adds it. Nothing
-else in the feature calls `interiorHeight`, because the court is a flat pad and
-a second sample can only introduce a second answer.
+else in the feature calls `interiorHeight`. Consequences of the discipline:
 
-The consequences of that discipline are worth stating, because they are what
-make the piece hold together:
-
-- the ripple field's wave trains are seeded from the ring radii the streams
-  module actually throws water at;
-- the jet nozzles' cant angle IS the launch angle of the ballistic solve;
-- the figures' arm length is stretched to land on `tazzaUndersideY`, so a
-  change to the bowl's proportions moves the hands with it;
+- the sim's impact sampler, the droplet shader and the splash rings all read
+  the same drag-corrected landing solves;
+- the jet nozzles' cant angle IS the launch angle of the flight solve;
+- the vortex columns run from the pedestal cap to `tazzaUndersideY`, so
+  re-authoring the bowl moves the sculpture with it;
 - the planting and the soil are poured from the same `planterBays()`.
 
-## 3. Water is split at the BREAKUP POINT, not by rendering convenience
+## 3. The basin is a SIMULATION (`waterSim.ts`)
 
-This is the load-bearing idea of the whole feature.
+The water's meso-scale motion is a bounded heightfield fluid sim: the damped
+wave equation on a 512² grid (28 mm texels) over the basin annulus, forced by
+DISCRETE IMPACT EVENTS and reflecting off the same two walls the ray-traced
+volume intersects. Rings radiate from where water landed this second,
+interfere where they cross, and come back off the coping — none of which the
+previous steady authored wave trains could do, because a steady train has no
+memory.
 
-- **Before breakup** water has a surface with a normal. It reflects and
-  refracts as a body. That length is real connected geometry
-  (`waterStreams.coherentSheet` / `coherentJet`) with a Fresnel-driven opacity
-  that rises toward the silhouette.
-- **After breakup** it is a cloud of independent millimetre lenses. Every one
-  is an actual projectile: `p(t) = p₀ + v₀t + ½gt²` solved in closed form per
-  instance per frame (`waterDroplets.ts`).
+- **Forcing without readback.** Each fixed step the CPU sampler
+  (`fountainSystem.sampleImpacts`) draws a handful of landing events from the
+  stream module's source specs — on the wandered landing rings, using the
+  SAME `wanderRadial` function the droplet shader launches with — and pushes
+  them as volume-neutral craters `(1 − 2q²)e^(−2q²)`. Neutrality is not
+  cosmetic: the wave update cannot damp a DC offset, so a biased deposit
+  would ratchet the pool level forever.
+- **Wave speed** is the deep-water phase speed of the dominant ring at MARS
+  gravity (c = √(g·λ/2π) ≈ 0.5 m/s; kh ≈ 6, comfortably deep-water — √(g·h)
+  would be wrong here). Non-dispersive is THE approximation of the scheme;
+  the capillary bands, whose dispersion matters visually, stay analytic in
+  `waterField.ts` with their exact ω(k).
+- **Explicit viscosity** (`h += ν·∇²h`, small) kills the discrete Laplacian's
+  weakly-damped Nyquist checkerboard, which otherwise reaches the specular
+  lobe as glitter noise.
+- **Foam is a simulated scalar** in the same texture: injected by impacts,
+  diffusing, decaying on ~3 s. It sits exactly where water lands — including
+  everywhere the jets' aim wander drags their rings — and the surface's foam
+  mask reads it instead of painting analytic landing bands (a band centred on
+  a nominal radius is a decal once the landing point actually moves).
+- **The derive kernel** turns the raw field into one texture the surface
+  reads with two taps: gradient, foam, and the differential-area caustic
+  gain 1/|det(I + βH)| — sim Hessian by finite differences PLUS the analytic
+  capillary Hessian in closed form. Moving this off the water fragment onto
+  0.26 M texels is a net perf win, and the texture's bilinear filter is
+  itself the caustic web's anti-aliasing.
+- **Clocking:** one kernel dispatch per FIXED park step (catch-up batched per
+  frame, warmup ramp on early frames), so the sim freezes with the pause card
+  and stays in lockstep with `fountainTime`. CFL ≈ 0.29.
 
-The first implementation drew whole streams as swept sheets with strands cut
-out by an alpha function, and it read as **plastic ribbons** — correctly, since
-a texture on a fixed surface cannot separate, cannot be overtaken by the parcel
-behind it, and cannot be seen edge-on. It was also ruinous on fill rate: a
-ribbon rasterises its full height whatever its alpha says. Do not go back.
+The template for the storage-texture ping-pong compute pattern is SeaPark's
+`wakeFoamMap.ts` — proven idioms for `textureStore`/`textureLoad`/uniform
+splat arrays on this exact stack.
 
-Three physical behaviours do most of the visual work:
+## 4. Streams: split at the breakup point, DRAGGED after it
 
-1. **Motion stretch is exposure, not style.** A parcel crossing the sensor
-   during an exposure paints a streak of `d + |v|·τ`. At 2–5 m/s that is 6–17 cm
-   against a 4 mm droplet, which is why fountains photograph as bright streaks.
-   Billboards align to the **screen-projected** velocity.
-2. **Atomisation is progressive.** Diameter runs from ligament scale at
-   breakup down to fine spray; transverse scatter starts only at breakup. So a
-   stream narrows, frays, then disperses — for the reason it does in reality.
-3. **Sub-pixel parcels keep their energy.** Below ~1.6 px the quad is clamped
-   up and its opacity scaled by the AREA RATIO. Distant spray fades into
-   coherent haze instead of aliasing into crawling confetti.
+Before breakup water is real connected geometry (Fresnel cores — and
+BALLISTIC: a coherent column's mass-to-surface ratio makes its drag
+negligible over half a metre). After breakup every parcel is an independent
+projectile IN AIR: Mars gravity plus the linear-drag closed form
 
-### Making it not look uniform
+    v_t = g·τ;  x(t) = v_h·τ(1−e^(−t/τ));  y(t) = (v_y+v_t)·τ(1−e^(−t/τ)) − v_t·t
 
-Six independent hashes per parcel, each retiring a specific artificial-looking
-regularity: release phase inside its own slot; launch scatter per orifice;
-radial scatter and the size draw; spin direction after breakup; intermittency;
-and the snaking phase. Plus a per-strand `flowOf` term — a weir does not shed
-evenly along its lip and a ring of orifices is never balanced. Keep the
-intermittency GENTLE: an early tuning could take a whole strand to zero, which
-reads as "four of the sixteen jets are switched off" rather than as breathing.
+with τ ∝ the parcel's own size draw. Dome One holds a breathable ~70 kPa mix
+(ρ ≈ 0.85 kg/m³) — this is a park, not the 600 Pa outside — and at these
+speeds drag is anything but negligible:
 
-## 4. Mars gravity is the strongest single cue
+- arcs lose ~30 % of their vacuum reach, so `dragArc()` (Newton on the apex
+  identity and the landing time) solves launch velocities that put the MEAN
+  parcel on the designed ring; heavies overshoot, fines fall short — spread
+  around the ring, not a shifted ring;
+- the launch angle comes out ~5° flatter than the vacuum identity
+  atan(4·rise/span); the nozzle cant reads `jetLaunchAngle()` so the hardware
+  points where the water actually goes;
+- fines decelerate toward a ~1 m/s terminal fall and hang (the veil), heavies
+  fly on — sprays sort themselves by size along the arc;
+- each parcel Newton-solves its OWN landing time from its own τ in the vertex
+  stage (3 iterations) and recycles exactly when it lands — a height-based
+  death, not a timer;
+- splash crown speeds are set from the impact speed the drag actually
+  delivers.
 
-3.721 m/s², everywhere: ballistic arcs, curtain fall times, splash flight, AND
-the ripple field's dispersion `ω = √(gk + σk³/ρ)`. A jet that rises 0.9 m hangs
-1.4 s here; a 0.6 m ring travels ~40 % slower than on Earth. Nobody names it and
-everybody reads it. The caustic clamp is also Mars-specific: the solar disc is
-half Earth's angular size, so the web genuinely focuses tighter (0.3, where an
-Earth pool would support ~0.5).
+**Breakup time is arc length, not length/launch-speed:** a weir sheet leaves
+its lip at centimetres a second and is doing 1.8 m/s by the end of its
+coherent run, so t solves v₀t + ½gt² = L. The length/speed version put a
+curtain's breakup 2 m below the end of its sheet and the water vanished in
+between.
 
-## 5. The basin is a RAY-TRACED volume
+**Parcels launch FROM their site.** Angular spread is a per-emitter fraction
+of the site spacing (~0.9 for a weir's virtual ligaments, ~0.05 for a
+physical orifice). The first pass used a uniform half-slot offset and the jet
+threads rose a metre beside their nozzles.
 
-Every surface under the water is an analytic primitive — dished floor disc,
-coping's inner cylinder, island's riser cylinder — so the refracted view ray is
-intersected against them and the hit is shaded on the spot. True path length
-drives Beer–Lambert; the analytic caustic gain modulates the sun that reaches
-it.
+**Aim wander:** two incommensurate sine pairs per site, evaluated at the
+parcel's LAUNCH time, shared verbatim with the CPU impact sampler — arcs
+snake, landing rings breathe, and the sim's rings follow the water exactly.
 
-This is deliberately NOT a screen-space refraction offset. A heuristic UV push
-has no depth rejection, samples foreground objects, and its "thickness" is a
-fudge. Here the thickness IS the geometry, so the parallax is right at every
-angle and the shoreline against stone stays exact.
+## 5. The basin surface (`waterSurface.ts`)
 
-There is **no planar reflector**. Reflection is the analytic Mars sky plus an
-analytic occlusion of the fountain's own masses (two tazza discs, the island
-column, the coping ring seen from inside) — the only local reflectors above
-this pool. The sun's mirror image is an authored two-lobe glint, because the
-sky function's 1800× disc sampled through a rippled normal is an alias
-generator.
+Still a ray-traced volume: refracted view ray intersected against the dished
+floor disc, the coping's inner cylinder and the island's riser; Beer–Lambert
+over the true path; no screen-space refraction, no planar reflector.
+Changes in the physics pass:
 
-### Caustics are analytic, not rasterised
+- normals = sim gradient (footprint-faded) + analytic capillary + seiche;
+- caustic = ONE texture tap at the sun's entry point (see §3);
+- foam = the simulated field, shaped by churn noise + the two shoreline
+  scum lines + crest whitening;
+- foam also boosts the water column's in-scatter — plunge zones read milky;
+- **the sun glint is a filtered microfacet lobe** (GGX, height-correlated
+  Smith): α² = 2σ², where σ² is the slope variance every unresolved band
+  paid in (chop fade + sim fade + a base micro-turbulence floor). Energy
+  moves from geometry to roughness, never vanishes — up close resolved
+  wavelets flash the sun as real geometry; with distance the same energy
+  widens into the smooth sheen a photograph shows. The anti-aliasing is IN
+  the BRDF; the authored two-lobe glint is gone.
 
-`P(S) = S + β∇h(S)`, so concentration is `1/|det(I + βH)|` — the differential-
-area definition evaluated in closed form, which is possible only because the
-ripple field has an analytic Hessian. That in turn is why the field is a sum of
-authored trains rather than a noise texture.
+**The looks-like-the-floor illusion (diagnostic lesson).** From above, calm
+water over its own ray-traced floor image is nearly indistinguishable from
+the bare floor mesh (the parallax is 27 cm, fresnel is 3 %). The definitive
+test is not staring at screenshots: HOIST THE MESH half a metre from the
+console — if it is rendering you see a glass disc; if not, nothing changes.
+An afternoon of shader bisecting chased a bug that did not exist. Related:
+`.toVar()` chains are EMITTED even when an early debug return skips them —
+early-return bisects do not prune what you think they prune.
 
-## 6. Two aliasing traps this feature paid for
+## 6. Mars gravity is the strongest single cue
 
-**Screen-space derivatives are constant across a triangle.** Driving a steep
-fade (micro-band attenuation, floor detail) from `dFdx(position)` stamps the
-mesh's own quad grid onto the water as a wire lattice at grazing angles. The
-footprint measure is now analytic — pixel angle × range ÷ cos(incidence) — and
-therefore continuous. See `metresPerPixel` in `waterSurface.ts`.
+3.721 m/s² in every flight solve AND the ripple dispersion AND the sim's
+wave speed. Arcs hang ~1.6× Earth, rings spread ~40 % slower, and the solar
+disc is half Earth's — the caustic web genuinely focuses tighter (clamp 3.4).
 
-**Pure sinusoids interfere into a lattice.** Three tidy capillary bands
-produced a perfectly periodic beat, and the caustic Jacobian amplified exactly
-that curvature: the basin floor came out woven. There are now seven bands at
-mutually incommensurate wavelengths (ratios near √2, φ, √5 — never a simple
-fraction) with amplitudes falling as ~λ^(3/4), the equilibrium slope spectrum.
-The beat period is now longer than the basin.
+## 7. Two aliasing traps this feature paid for (unchanged)
 
-## 7. Winding, and the failure mode that hides itself
+**Screen-space derivatives are constant across a triangle** — footprint fades
+must be analytic (`metresPerPixel`). **Pure sinusoids interfere into a
+lattice** — seven incommensurate capillary bands, amplitudes ~λ^(3/4).
 
-Two surfaces shipped inside-out during the build and the symptom is not "it
-looks wrong" — it is "it is not there", which is far harder to see in a
-screenshot than a wrong colour.
+## 8. Stone: proportions and the drip arris
 
-- **Hand-built index buffers**: for a polar grid, `(a → b)` is +θ and
-  `(a → c)` is +radius, so `θ̂ × r̂` is +Y and `(a, b, c)` faces UP.
-- **`archkit` lofts**: `recalcNormals` orients CLOSED components by signed
-  volume (safe) but OPEN ones by the AUTHORED winding. An annulus lathe is
-  topologically open even when its profile closes on itself, so the basin
-  floor's profile must run its underside outward and its top back inward. A
-  lathe whose top run goes outward faces down.
+- A tazza's DEPTH RATIO decides bowl-vs-drum: 0.45 here.
+- Gadroons: fewer and deeper; they stop BEFORE the rim moulding — a lobe
+  reaching into the ovolo scallops it ±15 mm, which reads at grazing light
+  as bright/dark patches along the whole rim.
+- The rim moulding is a DENSE roll (~150° of section turn over 10 edges,
+  every dihedral under the 40° smooth-shade threshold) whose outermost point
+  is the DRIP ARRIS (`tazzaDripY/R` in the plan), with everything below it
+  undercut. The first pass put the widest bulge BELOW the shedding lip —
+  backwards: the falling curtain must clear the stone. Both curtains launch
+  from the arris helpers, so stone and water share the line.
+- Marble hairline veins are BUNDLED to the broad bedding (`nearBed` gate in
+  `marbleAlbedo`); hairlines wandering alone across clear field read as
+  contour lines on a survey map — the tazza bowls proved it.
+- Nozzles are plumbed: flange, riser, canted head (cant = `jetLaunchAngle`).
 
-## 8. Proportion notes worth keeping
+## 9. THE VORTEX RING (`fountainVortices.ts`)
 
-- A tazza's **depth ratio** decides whether it reads as a bowl or a drum.
-  0.29 read as a table on a post; 0.45 reads as a tazza. The underside dome
-  blends 55 % `sin` with 45 % `1−cos`: pure `1−cos` is a mushroom stalk, pure
-  `sin` throws the rim beyond a raised arm's reach.
-- **Gadroons**: fewer and deeper. 36 shallow flutes on a 5.4 m bowl are
-  sub-pixel and only soften the silhouette into mush.
-- **Curtain strands** are set from strand WIDTH, not picked. 36 lanes at a
-  0.2 half-width is a 96 mm strand — a picket fence that hid the entire figure
-  group. 88 lanes at 0.14 is a 27 mm ligament.
-- **Jet launch angle** is `atan(4·rise/span)`. 72° is a garden sprinkler; the
-  reference's generous civic arcs are ~52°.
-- **Nozzles are plumbed.** A canted head at the launch height with nothing
-  under it floats. The riser from the floor slab is what makes the water read
-  as *supplied*.
+The four draped caryatids are gone, by owner directive: **a draped human
+figure lives or dies on a thousand anatomical judgements a parametric loft
+cannot make.** Two full passes (canon sections, contrapposto, fold cascade,
+knee press, baked cavity) produced "remarkably good for procedural" and
+nothing better. The replacement inverts the problem: choose a subject whose
+whole identity IS a mathematical form.
 
-## 9. The figures
+**Four dust devils turned to stone**, carrying the bowl — the park's vista
+shows real ones walking the valley through the glass, and the one place the
+colony spends water in public is now held up by the planet's own dry
+weather. Each column is a single closed loft: a wide turbulent SKIRT merging
+into the pedestal cap; a FUNNEL of five braided lobes (rounded crests,
+narrowed grooves — a raw cosine is machine fluting) under a helical twist
+that ACCELERATES with height, counter-spiralled by fine striations; a MOUTH
+whose last rings morph per-vertex onto `tazzaUndersideY` + 30 mm, welding
+into the bowl whatever its future shape. One rotation sense across the four
+(a cyclonic family), individual twist rates and meanders.
 
-Draped caryatids as a stack of honest sections plus a spine — the geometry a
-floor-length chiton actually is, which is why caryatids have been carved this
-way for 2500 years. There are no legs to model; the garment IS the geometry.
+Craft notes that cost a pass each: the mouth flare must be MODEST and the
+weld band SHORT (a wide flare flattening onto the dome smears sideways into
+melted cheese); the lobe depth must survive to the top (fading it 45 % made
+the upper third a plain turned baluster).
 
-Four things separate "carved" from "lathed", in order of how much they buy:
+The baked `uv.x` cavity channel (per-face-corner uvs authored after `loft`,
+surviving `cleanMesh` — order matters) reads as crevice occlusion in the
+`sculpture` material slot. GENTLE: at −40 % a crease is a painted black
+stripe from two metres; occlusion whispers (−18 %, dust only past 0.72).
 
-1. **Fold cross-section shape.** Hanging cloth gathers into round tubular
-   ridges separated by narrow creases — fabric cannot hold a sharp convex edge
-   but holds a concave one happily. `foldProfile` broadens the positive lobe
-   and sharpens the negative. A raw cosine is fluting.
-2. **The belt.** Fold amplitude collapses to near zero at the waist and blooms
-   above and below it. A monotone taper from hem to shoulder is a column.
-3. **Contrapposto.** Hips displaced toward the engaged leg, shoulders
-   counter-displaced, head recentred. Sections stacked on one axis read as a
-   bollard however good the sections are.
-4. **The himation.** A diagonal swag with its own folds and a hard edge. It
-   gives the torso a second silhouette, which is what the eye reads as
-   "drapery" long before it reads any individual fold.
+## 10. Audio and the keep-out
 
-Faces carry brow, eye SOCKETS, nose, lips, chin, cheekbone and jaw. Cutting
-matters more than adding — a socket's shadow under a low sun is what makes a
-head read as a head at ten metres, far more than a nose does.
+- `src/assets/fountain.mp3` is the soundscape's ONE recorded asset (owner
+  supplied). Decoded to an AudioBuffer for a sample-accurate loop; loop
+  points step inside the file ends because MP3 encoder padding otherwise
+  ticks once per lap; playback starts at `loopStart` so the first second is
+  water, not lead-in. Distance does the mixing: an inverse-law PannerNode at
+  the fountain axis under the engine's shared listener pose — audible swell
+  by the court, gone under the room tone by ~40 m. Starts on the same
+  user-gesture event as the rest of the soundscape.
+- Colliders: two walkable stylobate cylinders, the coping cylinder, one box
+  per planter bay — plus the KEEP-OUT: a solid cylinder at the coping's
+  INNER lip rising to 3.4 m. The coping alone stops a walker (0.525 m rise
+  vs 0.42 m autostep) but not a 0.38 g jumper (3 m/s jump ⇒ 1.21 m apex ⇒
+  2.05 m reach from the coping seat); 3.4 m clears that by a margin. Sitting
+  on the rim still works; crossing it never does. Circular by construction.
 
-Arms start INSIDE the torso and end 30 mm inside the tazza. Two closed solids
-sharing an interior is invisible; two shells butted at a shoulder either gap or
-z-fight.
+## 11. Contracts inherited from the park (unchanged)
 
-## 10. Contracts inherited from the park
+Transparent meshes set `mrtNode = mrt({ normal: vec4(0) })`; billboards are
+`markParticle`d; `fountainTime` follows `ctx.time.sim`; the coping planters
+are instanced into the shared `PlantingPalette`.
 
-- Every transparent mesh sets `mrtNode = mrt({ normal: vec4(0) })`, and every
-  billboard is `markParticle`d. Both lessons are already paid for elsewhere in
-  this park (the greenhouse mist's walking rectangles).
-- `fountainTime` follows `ctx.time.sim`, not TSL's global `time`: the water
-  freezes with the pause card, and a fixed validation camera is therefore a
-  usable regression surface.
-- The four coping planters are instanced into the **shared** `PlantingPalette`
-  by `VegetationSystem`. A private palette for four beds would double every
-  foliage draw call and material in the park.
+## 12. Verifying in the in-app pane
 
-## 11. Naming
+The pane SUSPENDS requestAnimationFrame while hidden: a freshly loaded page
+has ticked ~0 frames when you probe it, and the sim will genuinely be flat.
+Load with `?debug=1` and drive `window.__elysium.step(n)` — synthetic frames
+that run fixed steps, updates and renders regardless of pane visibility.
+Never diagnose "broken" from a screenshot of a page that has not ticked.
 
-The zone is signed **THE FOUNTAIN** — wayfinding fingerposts, the gate ident at
-(−18.4, −22.4), the park model's destination list, and the entry-screen map.
-The postcard bookmark `gardens` was replaced by `fountain` (the REQUIRED list
-in `postcards.ts` changed with it). `parkAmenities`' private drinking-fountain
-part cache was renamed `DRINKING_FOUNTAIN` to free the name.
+## 13. Naming
+
+The zone is signed **THE FOUNTAIN** — wayfinding fingerposts, the gate ident,
+the park model's destination list, the entry-screen map, and the postcard
+bookmark `fountain` (REQUIRED list updated). `parkAmenities`' drinking
+fountain part cache is `DRINKING_FOUNTAIN`.

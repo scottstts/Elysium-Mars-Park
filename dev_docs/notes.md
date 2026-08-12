@@ -2802,3 +2802,85 @@ The pane throttles compositing when it is not fronted, and after any
 with no fountain in frame. Compare two views in the same session before
 believing a regression, and prefer the GPU-fenced `MessageChannel` harness
 (notes: render-pipeline) for anything load-bearing.
+
+## FOUNTAIN physics pass (2026-08-12b) — sim, drag, and three expensive illusions
+
+The fountain's water is now a real system: a 512² heightfield SIM in the basin
+(damped wave equation at Mars wave speed, forced by sampled droplet impacts,
+foam as a simulated scalar — see `systems/fountain.md` §3) and closed-form
+LINEAR-DRAG flight for every parcel (τ ∝ diameter; the dome is a ~70 kPa
+habitat, so drag is real and big). The caryatids are gone — replaced by four
+petrified dust-devil vortices (`fountainVortices.ts`). Lessons with reach
+beyond the fountain:
+
+### `.toVar()` defeats dead-code pruning — bisect returns lie
+
+TSL emits every `.toVar()` chain even when your early debug `return` skips
+using it. An early-return bisect therefore only changes WHICH value reaches
+`output.color`, not what is compiled — every "stage" of mine carried the whole
+shader, and the pass/fail pattern I read as "this subtree kills the draw" was
+actually "this OUTPUT VALUE looks like the background at this camera angle".
+
+### Calm water over its own refracted floor is invisible — HOIST it
+
+A ray-traced pool seen from above shows its floor image 27 cm above the real
+floor at 3 % fresnel — near-identical to no water at all. Before diagnosing
+"the mesh is not rendering," move it: `mesh.position.y += 0.5` from the
+console. A glass disc appears → it was always rendering. (It was.) This is the
+transmission-side sibling of the red-material trick already in these notes.
+
+### The in-app pane SUSPENDS rAF while hidden
+
+A freshly navigated page has ticked ~0 frames when you probe it headlessly:
+systems have not updated, sims are flat, `window.__x` handles you added in
+`update()` are undefined. That is not a broken loop — it is a paused one. Use
+`?debug=1` + `__elysium.step(n)` (built for exactly this) to drive synthetic
+frames, and only then judge.
+
+### GPU compute on this stack: crib SeaPark's `wakeFoamMap.ts`
+
+StorageTexture ping-pong, `textureLoad(texture(t), ivec2)`, bare
+`textureStore(...)` statements, uniformArray splats, `.value` repointing after
+swap (TextureNode `.sample()` clones follow the base via referenceNode) — all
+proven there, reused verbatim in `waterSim.ts`. `renderer.debug.getShaderAsync`
+dumps generated WGSL; `device.addEventListener('uncapturederror', ...)` hooked
+from a system's init() catches pipeline errors that fire before console tools
+attach.
+
+### Emitter geometry: parcels must launch FROM their site
+
+A per-parcel angular offset that fills the ring is right for a WEIR (sites are
+virtual ligaments) and wrong for a NOZZLE (site is a physical orifice) — the
+uniform half-slot version had jet threads rising a metre beside their nozzles.
+`angularSpread` is per-emitter now. Same family: breakup time solves
+v₀t + ½gt² = L (arc length), not L/v₀ — a sheet leaving at 0.07 m/s does not
+take 30 s to fall 42 cm.
+
+### Drag flattens launch angles — hardware must read the same solve
+
+Through air the solve launches faster and ~5° flatter to land on the same
+ring; nozzle cant now reads `jetLaunchAngle()`. Any time water and hardware
+are authored from "the same numbers", make sure they are the same SOLVED
+numbers, not the same inputs.
+
+### Procedural humans: retired, and the lesson is the replacement
+
+Two full passes of honest craft (canon sections, contrapposto, fold cascade,
+knee press, baked crevice channel) landed at "good for procedural" — which is
+another way of saying wrong. The owner's call: subjects whose identity IS a
+mathematical form (vortices: lobed column × helical twist × meander) render
+EXACTLY at any resolution with no anatomical judgement to miss. Craft still
+bites: mouth flares welding onto a dome must be modest and weld late (else
+melted cheese), grooves must survive to the top (else turned baluster), and
+crevice-occlusion bakes must WHISPER (−18 %) — at −40 % they are painted
+stripes.
+
+### Misc numbers that were wrong the first time
+
+Tazza rim: gadroons must stop BEFORE the ovolo; the moulding needs ~10 edges
+for its 150° roll (40° smooth threshold); the DRIP ARRIS is the section's
+outermost point with undercut below (the sheet must clear the stone).
+Marble hairlines bundle to the bedding or they read as topo contours. MP3
+loops need loopStart/End inside the encoder padding, decoded to a buffer
+(HTMLAudio gaps). The fountain keep-out is sized against the JUMP (3 m/s at
+0.38 g = 1.21 m apex), not the autostep.

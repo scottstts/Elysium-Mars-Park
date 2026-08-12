@@ -8,6 +8,7 @@ import {
   cameraViewMatrix,
   cos,
   dot,
+  exp,
   float,
   floor,
   fract,
@@ -51,33 +52,45 @@ import { fountainTime } from './waterField'
  *
  * What is here instead is the physical object: a jet or a weir sheds a
  * COHERENT length, then Rayleigh–Plateau instability atomises it into
- * droplets, and after that every droplet is an independent projectile. So
- * every droplet here IS an independent projectile:
+ * droplets, and after that every droplet is an independent projectile IN AIR —
+ * Mars gravity, habitat drag. Linear drag has a closed form, so the flight is
+ * still solved exactly per instance, per frame, on the GPU:
  *
- *     p(t) = p₀ + v₀·t + ½·g·t²          g = −3.721 m/s² (Mars)
- *     v(t) = v₀ + g·t
+ *     v_t   = g·τ                                  (terminal fall speed)
+ *     x(t)  = v_h·τ·(1 − e^(−t/τ))
+ *     y(t)  = (v_y + v_t)·τ·(1 − e^(−t/τ)) − v_t·t
+ *     v(t)  = (v₀ + g⃗τ)·e^(−t/τ) − g⃗τ
  *
- * solved in closed form per instance, per frame, on the GPU. Nothing is
- * animated by scrolling anything.
+ * with τ ∝ the parcel's own diameter (its size DRAW), so the spray sorts
+ * itself: heavy drops fly nearly ballistic arcs while fines shed their
+ * momentum, drift to a halt and sink at terminal speed — the veil that hangs
+ * around every real fountain, produced by the equations rather than painted.
+ * Nothing is animated by scrolling anything. As τ → ∞ every line above
+ * degenerates to the vacuum solution.
  *
- * ## Three physical behaviours that do the visual work
+ * ## Four physical behaviours that do the visual work
  *
  * 1. **Motion stretch is exposure, not a style.** A droplet crossing the
- *    sensor during an exposure paints a streak of length `d + |v|·τ`. At the
+ *    sensor during an exposure paints a streak of length `d + |v|·τₑ`. At the
  *    2–5 m/s these parcels travel that is 6–17 cm against a 4 mm droplet, so
  *    a fountain photographs as bright *streaks*. Billboards are therefore
- *    aligned to the SCREEN-PROJECTED velocity and stretched by it — which is
- *    also why the streams read as fast even in a still frame.
+ *    aligned to the SCREEN-PROJECTED velocity and stretched by it — and since
+ *    the velocity is the DRAGGED one, streaks visibly shorten as parcels
+ *    spend their speed.
  * 2. **Atomisation is progressive.** Diameter runs from the ligament scale at
  *    breakup down to fine spray at the end of flight, and the transverse
- *    scatter velocity only starts at the breakup point. A stream therefore
- *    narrows, frays and finally disperses along its length, for the reason it
- *    does in reality.
+ *    scatter velocity only starts at the breakup point (and then itself
+ *    decays on the same τ — scattered fines do not keep boring sideways
+ *    through air forever).
  * 3. **Sub-pixel droplets keep their energy.** Below ~1.6 px the billboard is
  *    clamped up to that size and its opacity is scaled by the AREA RATIO, so
  *    distant spray fades into a coherent haze instead of aliasing into
- *    crawling white confetti. This is the same conservation rule the water
- *    surface's micro-band fades obey.
+ *    crawling white confetti.
+ * 4. **The aim breathes.** A real orifice flaps: launch velocity carries a
+ *    slow per-site wander (two incommensurate sine pairs, evaluated at the
+ *    parcel's LAUNCH time), so an arc snakes along its own length and its
+ *    landing point wanders — the same wander the basin sim's impact sampler
+ *    evaluates on the CPU, so the rings follow the water exactly.
  *
  * ## Pipeline contract
  *
@@ -92,6 +105,21 @@ const TAU = Math.PI * 2
 const EXPOSURE = 1 / 34
 /** Minimum rendered droplet size, in pixels of the vertical screen axis. */
 const MIN_PIXELS = 1.6
+
+/** Aim-wander amplitudes at scale 1 (radial, radial-fast, vertical, tangential). */
+const WANDER = { r1: 0.05, r2: 0.033, y: 0.02, t: 0.035 } as const
+
+/** The wander's radial multiplier — CPU mirror of the shader's, for the
+ * basin sim's impact sampler. `site` is the launch-site index, `t` the LAUNCH
+ * time on the park clock. */
+export function wanderRadial(site: number, t: number, scale: number): number {
+  return (
+    1 +
+    scale *
+      (WANDER.r1 * Math.sin(0.53 * t + site * 2.417) +
+        WANDER.r2 * Math.sin(1.31 * t + site * 5.71))
+  )
+}
 
 /**
  * How many metres a pixel spans at a view-space position — measured by
@@ -123,11 +151,15 @@ export interface DropletEmitter {
   vVertical: number
   /** Metres of unbroken stream before atomisation begins. */
   coherentLength: number
-  /** Total flight time to the receiving surface, seconds. */
+  /**
+   * MEAN flight time to the receiving surface (drag-corrected, at draw = 1).
+   * Each parcel then solves its OWN landing time from its own τ — fines hang
+   * longer, heavies land sooner — and recycles exactly when it lands.
+   */
   flightTime: number
   /** Droplets per launch site. */
   perSite: number
-  /** Droplet diameter at breakup and at the end of flight, metres. */
+  /** Rendered streak width at breakup and at the end of flight, metres. */
   dBreakup: number
   dFinal: number
   /** Transverse velocity acquired at breakup, m/s. */
@@ -136,6 +168,20 @@ export interface DropletEmitter {
   density: number
   /** Extra vertical launch spread (jet orifices are never perfect), m/s. */
   jitter: number
+  /**
+   * Angular launch spread, as a FRACTION of the site spacing. A weir's
+   * "sites" are virtual ligaments, so ~0.9 fills the ring; a jet's site is a
+   * physical orifice, so ~0.05 keeps every parcel coming out of the nozzle
+   * it belongs to. (Shipped once at a uniform half-slot offset: the jet
+   * threads rose a metre BESIDE their nozzles, and it showed.)
+   */
+  angularSpread: number
+  /** Drag response time of the MEAN (draw = 1) parcel, seconds. */
+  tauMean: number
+  /** Aim-wander scale: ~0.15 for a weir lip, ~1 for a nozzle, more for fines. */
+  wander: number
+  /** Local height of the receiving surface — parcels die there, not on a timer. */
+  landY: number
 }
 
 /**
@@ -147,13 +193,18 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
   const anchor = uniform(center)
   const count = spec.sites * spec.perSite
   const speed0 = Math.hypot(spec.vRadial, spec.vVertical)
-  const tBreak = Math.min(spec.coherentLength / Math.max(speed0, 0.2), spec.flightTime * 0.85)
+  // Time to TRAVERSE the coherent length, not length/launch-speed: a weir
+  // sheet leaves its lip at centimetres a second and is doing 1.8 m/s by the
+  // end of its unbroken run — gravity is the conveyor. |v|(t) ≈ v₀ + g·t
+  // integrates to the arc length, so t solves v₀t + ½gt² = L. (Length over
+  // launch speed put a curtain's breakup 2 m below the end of its sheet, and
+  // the water simply vanished in between.)
+  const tBreak = Math.min(
+    (Math.sqrt(speed0 * speed0 + 2 * MARS_G * spec.coherentLength) - speed0) / MARS_G,
+    spec.flightTime * 0.6,
+  )
+  const dropH = spec.launchY - spec.landY
 
-  /**
-   * The parcel, solved in the VERTEX stage: `vec4(position, diameter)` plus a
-   * second varying for velocity. `instanceIndex` is a vertex-stage builtin in
-   * WGSL, so nothing downstream may recompute from it.
-   */
   /**
    * The per-parcel constants, gathered once so state, velocity and age all
    * read the SAME numbers. Six hashes, and every one of them exists to break a
@@ -179,14 +230,9 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
     r6: hash(instanceIndex.add(49979687)),
   })
 
-  /** Age in seconds. Slot-jittered, so spacing along a strand is irregular. */
-  const ageOf = (s: ReturnType<typeof seeds>) =>
-    fract(
-      s.rank
-        .add(s.r1.mul(0.92).add(0.04))
-        .div(spec.perSite)
-        .add(fountainTime.div(spec.flightTime)),
-    ).mul(spec.flightTime)
+  /** Slot phase: where in the cycle this parcel's release sits, 0…1. */
+  const slotOf = (s: ReturnType<typeof seeds>) =>
+    s.rank.add(s.r1.mul(0.92).add(0.04)).div(spec.perSite)
 
   /**
    * Per-strand flow, 0.45…1. A weir does not shed evenly along its lip and a
@@ -202,17 +248,57 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
       .add(sin(s.site.mul(5.11).sub(fountainTime.mul(0.19))).mul(0.16))
       .add(0.72)
 
+  /**
+   * The parcel's KINEMATICS: its size draw, its own drag time, its wandered
+   * launch velocity, and its own landing time (three Newton steps on the
+   * closed-form height — exact enough that a parcel recycles within
+   * milliseconds of actually reaching the receiving surface).
+   */
+  const kinemat = (s: ReturnType<typeof seeds>) => {
+    const draw = s.r3.mul(s.r1).mul(1.7).add(0.35)
+    const tauP = float(spec.tauMean).mul(draw).toVar()
+    const vt = tauP.mul(MARS_G).toVar()
+    // Launch-time aim wander: evaluated where the parcel LEFT the orifice.
+    // The launch time is approximated off the mean cycle — the wander's
+    // slowest period is 12 s, so slot-level precision is ample.
+    const t0 = fountainTime.sub(fract(slotOf(s).add(fountainTime.div(spec.flightTime))).mul(spec.flightTime))
+    const wr = float(1)
+      .add(float(WANDER.r1 * spec.wander).mul(sin(t0.mul(0.53).add(s.site.mul(2.417)))))
+      .add(float(WANDER.r2 * spec.wander).mul(sin(t0.mul(1.31).add(s.site.mul(5.71)))))
+    const wy = float(1).add(float(WANDER.y * spec.wander).mul(sin(t0.mul(0.79).add(s.site.mul(3.7)))))
+    const wt = float(WANDER.t * spec.wander).mul(sin(t0.mul(0.61).add(s.site.mul(4.31))))
+    const vv = float(spec.vVertical).add(s.r2.sub(0.5).mul(spec.jitter)).mul(wy).toVar()
+    const vr = float(spec.vRadial).mul(s.r3.mul(0.1).add(0.95)).mul(wr).toVar()
+    const vtan = float(speed0).mul(wt).toVar()
+    // Landing time: Newton on y(t) + dropH = 0 off the mean-flight seed.
+    const lift = vv.add(vt).toVar()
+    const cycle = float(spec.flightTime).toVar()
+    for (let i = 0; i < 3; i++) {
+      const decay = exp(cycle.div(tauP).negate())
+      const f = lift.mul(tauP).mul(float(1).sub(decay)).sub(vt.mul(cycle)).add(dropH)
+      const fp = min(lift.mul(decay).sub(vt), float(-0.12))
+      cycle.assign(cycle.sub(f.div(fp)).clamp(spec.flightTime * 0.5, spec.flightTime * 4.5))
+    }
+    return { draw, tauP, vt, lift, vv, vr, vtan, cycle }
+  }
+
+  /** Age in seconds within this parcel's OWN cycle (fines dwell longer). */
+  const ageOf = (s: ReturnType<typeof seeds>, cycle: Node<'float'>) =>
+    fract(slotOf(s).add(fountainTime.div(cycle))).mul(cycle)
+
   const state = Fn(() => {
     const s = seeds()
-    const t = ageOf(s).toVar()
-    const theta = s.site.add(s.r2.mul(0.5).add(0.25)).div(spec.sites).mul(TAU).add(spec.ringPhase).toVar()
+    const k = kinemat(s)
+    const t = ageOf(s, k.cycle).toVar()
+    const theta = s.site.add(s.r2.sub(0.5).mul(spec.angularSpread)).div(spec.sites).mul(TAU).add(spec.ringPhase).toVar()
     const cs = cos(theta)
     const sn = sin(theta)
-    const vv = float(spec.vVertical).add(s.r2.sub(0.5).mul(spec.jitter)).toVar()
-    const vr = float(spec.vRadial).mul(s.r3.mul(0.1).add(0.95)).toVar()
 
-    const radius = float(spec.ringRadius).add(vr.mul(t))
-    const height = vv.mul(t).sub(t.mul(t).mul(MARS_G * 0.5))
+    // The dragged flight, closed form. `run` is the effective time τ(1−e^-t/τ)
+    // — equal to t while the parcel is fast, saturating at τ as it stalls.
+    const run = k.tauP.mul(float(1).sub(exp(t.div(k.tauP).negate()))).toVar()
+    const radius = float(spec.ringRadius).add(k.vr.mul(run))
+    const height = k.lift.mul(run).sub(k.vt.mul(t))
 
     // Ligament snaking: a coherent thread does not fall straight, it wanders
     // on a slow transverse instability that grows as the thread thins. This
@@ -220,23 +306,27 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
     const snakePhase = s.site.mul(3.7).add(s.r6.mul(TAU)).add(t.mul(4.1))
     const snake = sin(snakePhase).mul(t.div(spec.flightTime).mul(0.055).add(0.004))
 
-    // Transverse scatter, from the breakup point onward only.
-    const free = max(t.sub(tBreak), 0).toVar()
+    // Transverse scatter, from the breakup point onward only — and itself
+    // drag-decayed: the sideways kick is spent the same way the launch is.
     const spin = s.r4.mul(TAU)
-    const lateral = free.mul(spec.scatter).mul(s.r3.mul(1.6).add(0.25)).toVar()
+    const freeRun = max(
+      k.tauP.mul(exp(float(tBreak).div(k.tauP).negate()).sub(exp(t.div(k.tauP).negate()))),
+      0,
+    ).toVar()
+    const lateral = freeRun.mul(spec.scatter).mul(s.r3.mul(1.6).add(0.25)).toVar()
     const acrossX = sn.negate()
     const acrossZ = cs
-    const offX = cos(spin).mul(lateral).mul(acrossX).add(snake.mul(acrossX))
-    const offZ = cos(spin).mul(lateral).mul(acrossZ).add(snake.mul(acrossZ))
+    const swing = k.vtan.mul(run)
+    const offX = cos(spin).mul(lateral).add(snake).add(swing).mul(acrossX)
+    const offZ = cos(spin).mul(lateral).add(snake).add(swing).mul(acrossZ)
     const offY = sin(spin).mul(lateral).mul(0.7)
 
     // Atomisation: ligament scale at breakup, fine spray by the end. The size
     // draw is squared so small droplets dominate — a real spray's size
     // distribution has a long thin tail, not a uniform spread.
-    const shatter = free.div(Math.max(spec.flightTime - tBreak, 1e-3)).clamp(0, 1)
-    const draw = s.r3.mul(s.r1).mul(1.7).add(0.35)
+    const shatter = t.sub(tBreak).div(k.cycle.sub(tBreak).max(1e-3)).clamp(0, 1)
     const size = mix(float(spec.dBreakup), float(spec.dFinal), shatter)
-      .mul(draw)
+      .mul(k.draw)
       .mul(flowOf(s).mul(0.4).add(0.7))
     return vec4(
       anchor.x.add(cs.mul(radius)).add(offX),
@@ -248,14 +338,24 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
 
   const velocity = Fn(() => {
     const s = seeds()
-    const t = ageOf(s)
-    const theta = s.site.add(s.r2.mul(0.5).add(0.25)).div(spec.sites).mul(TAU).add(spec.ringPhase)
-    const vv = float(spec.vVertical).add(s.r2.sub(0.5).mul(spec.jitter)).sub(t.mul(MARS_G))
-    const vr = float(spec.vRadial).mul(s.r3.mul(0.1).add(0.95))
-    return vec3(cos(theta).mul(vr), vv, sin(theta).mul(vr))
+    const k = kinemat(s)
+    const t = ageOf(s, k.cycle)
+    const theta = s.site.add(s.r2.sub(0.5).mul(spec.angularSpread)).div(spec.sites).mul(TAU).add(spec.ringPhase)
+    const decay = exp(t.div(k.tauP).negate()).toVar()
+    const vyNow = k.lift.mul(decay).sub(k.vt)
+    const vrNow = k.vr.mul(decay)
+    const vtNow = k.vtan.mul(decay)
+    const cs = cos(theta)
+    const sn = sin(theta)
+    return vec3(cs.mul(vrNow).sub(sn.mul(vtNow)), vyNow, sn.mul(vrNow).add(cs.mul(vtNow)))
   })()
 
-  const age = Fn(() => ageOf(seeds()))()
+  const ageFrac = Fn(() => {
+    const s = seeds()
+    const k = kinemat(s)
+    return vec2(ageOf(s, k.cycle), ageOf(s, k.cycle).div(k.cycle))
+  })()
+
   /**
    * Intermittency: a parcel its strand's flow was too thin to shed. Kept
    * GENTLE — the first tuning could take a whole strand to zero, which reads
@@ -282,7 +382,7 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
   })()
 
   const parcel = varying(state)
-  const parcelAge = varying(age)
+  const parcelAge = varying(ageFrac)
   const parcelGain = varying(streak.z.mul(present))
 
   material.vertexNode = Fn(() => {
@@ -330,10 +430,14 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
       .sub(smoothstep(0.25, 1.0, q.y.abs()))
       .mul(float(1).sub(smoothstep(0.55, 1.0, q.x.abs())))
     // Fade in as the parcel leaves the coherent core it was hidden inside.
-    const emerge = smoothstep(tBreak * 0.55, tBreak * 1.05 + 0.02, parcelAge)
-    // …and out at the receiving surface, where it becomes splash, not droplet.
-    const land = float(1).sub(smoothstep(spec.flightTime * 0.93, spec.flightTime, parcelAge))
-    return core.mul(emerge).mul(land).mul(parcelGain).mul(spec.density)
+    const emerge = smoothstep(tBreak * 0.55, tBreak * 1.05 + 0.02, parcelAge.x)
+    // …and out AT THE RECEIVING SURFACE — a height, not a timer, because with
+    // drag every parcel has its own landing time. The age term is only the
+    // backstop that guarantees zero at the recycle teleport.
+    const landPlane = anchor.y.add(spec.landY)
+    const sink = smoothstep(landPlane.sub(0.03), landPlane.add(0.09), parcel.y)
+    const wrap = float(1).sub(smoothstep(0.93, 1.0, parcelAge.y))
+    return core.mul(emerge).mul(sink).mul(wrap).mul(parcelGain).mul(spec.density)
   })()
 
   material.transparent = true
@@ -358,7 +462,9 @@ export function dropletMesh(center: Vector3, spec: DropletEmitter): InstancedMes
 /**
  * A SPLASH emitter: the crown of droplets thrown back up where a stream lands.
  * Same projectile model, launched from the water rather than from a nozzle,
- * and killed at the surface it falls back into.
+ * and killed at the surface it falls back into. Launch speeds are set by the
+ * IMPACT speed the drag solve delivers (see `waterStreams`), so a harder
+ * plunge genuinely throws a taller crown.
  */
 export interface SplashEmitter {
   name: string

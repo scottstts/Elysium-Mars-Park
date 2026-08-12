@@ -96,13 +96,14 @@ export const PLINTH_STEPS = [
 export const PEDESTAL_TOP_Y = 1.95
 export const PEDESTAL_BASE_R = 1.36
 
-/** Where the four figures stand on the pedestal cap, and how tall they are. */
-export const FIGURE_RADIUS = 0.86
-export const FIGURE_COUNT = 4
-// Heroic scale, as monumental sculpture always is: a caryatid reads as
-// life-size from the ground precisely because it is over life-size on its
-// plinth. It also buys the reach the raised arms need under the tazza.
-export const FIGURE_HEIGHT = 1.86
+/**
+ * The sculpture ring on the pedestal cap: four DUST DEVILS turned to stone,
+ * carrying the lower tazza (see `fountainVortices.ts`). Radius is where they
+ * stand; their height is DERIVED — each column runs from the cap to the
+ * tazza's underside, so re-authoring the bowl moves the sculpture with it.
+ */
+export const SCULPTURE_RADIUS = 0.86
+export const SCULPTURE_COUNT = 4
 
 /** The central column the figures stand around, carrying the tazza's load. */
 export const COLUMN_RADIUS = 0.34
@@ -172,6 +173,22 @@ export const FINIAL_Y = 6.9
 export const TAZZA_RIM_BAND = 0.14
 
 /**
+ * The DRIP ARRIS: the outermost, lowest convex edge of the rim moulding — the
+ * line the curtain actually sheds from. Water arrives over the lip from the
+ * dish, runs down the ovolo's outer face, and leaves at the first edge where
+ * the face turns back inward; everything below that edge is UNDERCUT so the
+ * falling sheet clears the stone. Both the stone's moulding and the water's
+ * launch read these two numbers — a sheet authored off any other line either
+ * slices the moulding or floats off it.
+ */
+export function tazzaDripRadius(spec: TazzaSpec): number {
+  return spec.rimR + 0.044
+}
+export function tazzaDripY(spec: TazzaSpec): number {
+  return spec.rimTopY - TAZZA_RIM_BAND * 0.35
+}
+
+/**
  * The underside dome of a tazza at a plan radius — a cosine dome, steep at the
  * core and flattening under the rim. THE geometry and THE figures' reach both
  * read this, so a raised arm can never end in air or inside the bowl by more
@@ -181,15 +198,12 @@ export function tazzaUndersideY(spec: TazzaSpec, radius: number): number {
   const t = Math.min(1, Math.max(0, (radius - spec.dishCenterR) / (spec.rimR - spec.dishCenterR)))
   // A blend of the two quarter-cosines. Pure `1 − cos` is flat at the core and
   // steep at the rim — a mushroom stalk, and the source of the first pass's
-  // drum. Pure `sin` is steep at the core, which throws the rim so high the
-  // figures cannot reach it. 55/45 gives a dome that genuinely falls away from
-  // the rim and still lands under a raised arm at r = FIGURE_RADIUS.
+  // drum. Pure `sin` is steep at the core, which throws the rim beyond the
+  // sculpture ring's reach. 55/45 gives a dome that genuinely falls away from
+  // the rim and still lands over the vortex columns at SCULPTURE_RADIUS.
   const shape = 0.55 * Math.sin(t * Math.PI * 0.5) + 0.45 * (1 - Math.cos(t * Math.PI * 0.5))
   return spec.coreY + (spec.rimTopY - TAZZA_RIM_BAND - spec.coreY) * shape
 }
-
-/** Where the raised fingertips meet the lower tazza — derived, never typed. */
-export const FIGURE_REACH_Y = /*@__PURE__*/ tazzaUndersideY(LOWER_TAZZA, FIGURE_RADIUS)
 
 // ── the waterworks ──────────────────────────────────────────────────────────
 
@@ -256,6 +270,20 @@ export const CROWN = {
   bellRise: 1.45,
   bellLandR: 1.9,
 } as const
+
+/**
+ * NOZZLE HEAD GEOMETRY — where the orifice actually is.
+ *
+ * `nozzleY` above is the plan's SETTING-OUT height, not the opening: the head
+ * pivots at `nozzleY − NOZZLE_SHOULDER_DROP` and its mouth ring stands
+ * `NOZZLE_MOUTH_REACH` further along the cant axis. So the real opening is
+ * several centimetres up-and-over from the plan point, and water launched
+ * from the plan point sprouts beside its own hardware — which is exactly the
+ * defect this constant pair exists to prevent. `jetSolve` in `waterStreams`
+ * derives the mouth from these, and `emitNozzle` builds the head from them.
+ */
+export const NOZZLE_SHOULDER_DROP = 0.055
+export const NOZZLE_MOUTH_REACH = 0.121
 
 /**
  * Submerged uplights. Set just OUTSIDE the curtain's landing ring, aimed back

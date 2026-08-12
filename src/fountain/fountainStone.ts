@@ -15,6 +15,8 @@ import {
   JETS_OUTWARD,
   LENS_SETBACK,
   LOWER_TAZZA,
+  NOZZLE_MOUTH_REACH,
+  NOZZLE_SHOULDER_DROP,
   PEDESTAL_BASE_R,
   PEDESTAL_TOP_Y,
   PLINTH_STEPS,
@@ -27,10 +29,13 @@ import {
   basinFloorY,
   bayWeight,
   planterBays,
+  tazzaDripRadius,
+  tazzaDripY,
   tazzaUndersideY,
   wallThickness,
 } from './fountainPlan'
 import type { TazzaSpec } from './fountainPlan'
+import { jetSolve } from './waterStreams'
 
 /**
  * THE STONEWORK.
@@ -450,18 +455,34 @@ function emitTazza(writer: PartWriter, center: Vector3, spec: TazzaSpec): void {
     // `tazzaUndersideY` is shared with the figures' reach: one curve.
     push(r, tazzaUndersideY(spec, r), taper)
   }
-  // The rim moulding: an ovolo rolling out to the widest point, then the drip
-  // arris — a real undercut, so the sheet leaves the stone on a defined line
-  // instead of creeping back along the underside. The band is TAZZA_RIM_BAND
-  // tall, the same number `tazzaUndersideY` reserves, so the dome and the
-  // moulding always meet exactly.
+  // The rim moulding. Three rules, all paid for:
+  //
+  //  - The gadroons stop BEFORE the moulding (taper is already 0 at the dome's
+  //    last station, and every moulding point is authored at 0). A lobe that
+  //    reaches into the ovolo scallops it ±15 mm, and at grazing light that
+  //    reads as alternating bright/dark patches along the whole rim.
+  //  - The roll is DENSE: ~150° of section turn over 10 edges keeps every
+  //    dihedral under the 40° smooth-shade threshold. Five points left some
+  //    edges welded and some broken — the same patchy banding, from shading.
+  //  - The DRIP ARRIS (`tazzaDripY/R`) is the section's outermost point, and
+  //    everything below it is undercut. The first pass put the widest bulge
+  //    BELOW the shedding lip, which is backwards: the falling curtain has to
+  //    clear the stone, so the stone must retreat under the edge that sheds.
   const band = TAZZA_RIM_BAND
-  push(spec.rimR + 0.022, spec.rimTopY - band * 0.78, 0.18)
-  push(spec.rimR + 0.04, spec.rimTopY - band * 0.5, 0.05)
-  push(spec.rimR + 0.044, spec.rimTopY - band * 0.3, 0)
-  push(spec.rimR + 0.032, spec.rimTopY - band * 0.14, 0)
+  const dripR = tazzaDripRadius(spec)
+  const dripY = tazzaDripY(spec)
+  // Undercut: from the dome's edge out to the arris, hollowing as it goes.
+  push(spec.rimR + 0.004, spec.rimTopY - band * 0.94, 0)
+  push(spec.rimR + 0.014, spec.rimTopY - band * 0.72, 0)
+  push(spec.rimR + 0.021, spec.rimTopY - band * 0.55, 0)
+  push(spec.rimR + 0.033, spec.rimTopY - band * 0.44, 0)
   const dripIndex = profile.length
-  push(spec.rimR + 0.012, spec.rimTopY - 0.018, 0)
+  push(dripR, dripY, 0)
+  // The ovolo above the arris: out-facing roll up to the lip.
+  push(dripR - 0.002, spec.rimTopY - band * 0.24, 0)
+  push(dripR - 0.011, spec.rimTopY - band * 0.12, 0)
+  push(dripR - 0.024, spec.rimTopY - band * 0.04, 0)
+  push(spec.rimR + 0.002, spec.rimTopY - 0.004, 0)
   // Over the top and down into the dish.
   push(spec.rimR - 0.012, spec.rimTopY, 0)
   push(spec.dishRimR, spec.dishRimY, 0)
@@ -598,7 +619,7 @@ function emitNozzle(
     ],
   })
   // Riser: a plain spigot from the flange up to the head's shoulder.
-  const shoulder = y - 0.055
+  const shoulder = y - NOZZLE_SHOULDER_DROP
   writer.tube({
     path: [
       new Vector3(center.x + x, center.y + floor + 0.01, center.z + z),
@@ -631,11 +652,14 @@ function emitNozzle(
     uvScale: 3,
   })
   // The mouth: a thin ring standing 6 mm proud of the head, so the orifice
-  // reads as an opening and the stream has a lip to leave from.
+  // reads as an opening and the stream has a lip to leave from. Its outer
+  // face is at NOZZLE_MOUTH_REACH along the cant — the same point `jetSolve`
+  // launches the water from, which is the whole reason that constant is in
+  // the plan rather than typed here.
   writer.tube({
     path: [
-      pivot.clone().addScaledVector(axis, 0.101),
-      pivot.clone().addScaledVector(axis, 0.121),
+      pivot.clone().addScaledVector(axis, NOZZLE_MOUTH_REACH - 0.02),
+      pivot.clone().addScaledVector(axis, NOZZLE_MOUTH_REACH),
     ],
     radius: 0.028,
     slot: 'bronze',
@@ -696,22 +720,25 @@ export function buildFountainStone(writer: PartWriter, center: Vector3): void {
   emitTazza(writer, center, UPPER_TAZZA)
   emitStem(writer, center)
 
-  // Jet nozzles, both sets. The tilt is the launch angle of the ballistic
-  // solve in `waterStreams.ts` — the stream and the hardware it leaves are one
-  // number, not two that have to be kept in sync by hand.
+  // Jet nozzles, both sets. The tilt is the launch angle of the DRAG-AWARE
+  // flight solve in `waterStreams.ts` — the stream and the hardware it leaves
+  // are one number, not two that have to be kept in sync by hand. (Through
+  // the habitat's air that angle is ~5° flatter than the vacuum identity
+  // atan(4·rise/span): drag steals horizontal run, so the solve launches
+  // faster and lower to land on the same ring.)
   for (const set of [JETS_INWARD, JETS_OUTWARD]) {
     const inward = set === JETS_INWARD
+    const { cant } = jetSolve(set)
     for (let i = 0; i < set.count; i++) {
       const theta = (i / set.count) * TAU + set.phase
       const bearing = inward ? theta + Math.PI : theta
-      const span = Math.abs(set.landR - set.nozzleR)
       emitNozzle(
         writer,
         center,
         Math.cos(theta) * set.nozzleR,
         Math.sin(theta) * set.nozzleR,
         set.nozzleY,
-        Math.atan2(4 * set.apexRise, span),
+        cant,
         bearing,
       )
     }

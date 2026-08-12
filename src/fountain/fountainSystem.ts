@@ -1,5 +1,6 @@
 import { Group, Vector3 } from 'three'
 import { PartWriter } from '../archkit/writer'
+import type { Rng } from '../core/prng'
 import type { PhysicsSystem } from '../physics/physicsWorld'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
@@ -21,10 +22,13 @@ import {
   WALL_THICKNESS,
   WATER_Y,
 } from './fountainPlan'
-import { buildFountainFigures } from './fountainFigures'
 import { buildFountainStone } from './fountainStone'
+import { buildFountainVortices } from './fountainVortices'
+import { wanderRadial } from './waterDroplets'
 import { fountainTime } from './waterField'
+import { FountainWaterSim } from './waterSim'
 import { buildFountainStreams } from './waterStreams'
+import type { ImpactSource } from './waterStreams'
 import { fountainWaterMesh, tazzaWaterMesh } from './waterSurface'
 
 /**
@@ -32,15 +36,16 @@ import { fountainWaterMesh, tazzaWaterMesh } from './waterSurface'
  *
  * The system itself is deliberately thin: it resolves the ONE datum every
  * other module is authored against (the court's paved top under the axis),
- * builds the five layers, installs the colliders, and drives a single time
- * uniform. Everything with an opinion lives in its own module.
+ * builds the five layers, installs the colliders, and drives the clock and
+ * the basin simulation. Everything with an opinion lives in its own module.
  *
  * Layers, in the order they are added:
  *   `fountainStone`    stylobate, coping, basin floor, island, tazze, bronze
- *   `fountainFigures`  the four caryatids
+ *   `fountainVortices` the four petrified dust devils carrying the bowl
  *   `waterSurface`     the basin's ray-traced volume + the two dish surfaces
- *   `waterStreams`     the ballistic solves and the short COHERENT cores
+ *   `waterStreams`     the flight solves and the short COHERENT cores
  *   `waterDroplets`    every disconnected parcel, as a real projectile
+ *   `waterSim`         the basin heightfield the surface reads
  *
  * ## The clock
  *
@@ -49,11 +54,28 @@ import { fountainWaterMesh, tazzaWaterMesh } from './waterSurface'
  * freezes with the pause card instead of running behind it, and two sessions
  * with the same seed show the same wave at the same tick — which is what makes
  * a fixed validation camera a usable regression surface for this feature.
+ *
+ * ## The impact sampler
+ *
+ * The sim is forced by discrete impact events, sampled here on the CPU from
+ * the stream module's source descriptions: each fixed step draws a handful of
+ * landing points — on the wandered landing rings, with the same aim-wander
+ * function the droplet shader evaluates — and pushes them as drops. No GPU
+ * readback anywhere: the shader and the sampler agree because they share the
+ * numbers, not because one reads the other.
  */
 export class FountainSystem implements GameSystem {
   readonly id = 'fountain'
   private readonly group = new Group()
   private readonly physics: PhysicsSystem
+  private sim: FountainWaterSim | null = null
+  private sources: ImpactSource[] = []
+  private accumulators: number[] = []
+  private rng: Rng | null = null
+  private pendingSteps = 0
+  /** Extra sim steps on early frames, so the pool is already alive when the
+   * player first sees it (5 s of waves, spread invisibly over ~1 s). */
+  private warmup = 300
 
   constructor(physics: PhysicsSystem) {
     this.physics = physics
@@ -68,7 +90,7 @@ export class FountainSystem implements GameSystem {
 
     const writer = new PartWriter()
     buildFountainStone(writer, center)
-    buildFountainFigures(writer, center)
+    buildFountainVortices(writer, center)
     const materials = fountainMaterials({
       waterWorldY: center.y + WATER_Y,
       landRadius: MAIN_CURTAIN_LAND_R,
@@ -78,15 +100,22 @@ export class FountainSystem implements GameSystem {
     stone.name = 'fountain-stone'
     this.group.add(stone)
 
+    // The basin simulation — built first, because the surface material closes
+    // over its texture nodes.
+    this.sim = new FountainWaterSim()
+
     // Water. The basin's surface is opaque (it computes its own volume), so it
     // sits in the normal depth-sorted pass; everything else here is
     // transparent and renders after it by renderOrder.
-    this.group.add(fountainWaterMesh({ center }))
+    this.group.add(fountainWaterMesh({ center, sim: this.sim }))
     this.group.add(tazzaWaterMesh(center, LOWER_TAZZA))
     this.group.add(tazzaWaterMesh(center, UPPER_TAZZA))
 
     const streams = buildFountainStreams(center)
     for (const mesh of streams.meshes) this.group.add(mesh)
+    this.sources = streams.sources
+    this.accumulators = this.sources.map(() => 0)
+    this.rng = ctx.rng.fork('fountain-impacts')
 
     this.installColliders(center)
     ctx.scene.add(this.group)
@@ -137,6 +166,15 @@ export class FountainSystem implements GameSystem {
     }
     for (const step of STYLOBATE_STEPS) cylinder(step.radius, step.top)
     cylinder(BASIN_INNER_R + WALL_THICKNESS, COPING_TOP_Y)
+    // The KEEP-OUT barrier. The coping cylinder alone stops a walker (its
+    // 0.525 m rise beats the 0.42 m autostep) but not a 0.38 g JUMPER — a
+    // floaty lope clears the seat height easily, and the solid stack under
+    // it would then let a guest stroll across the pool a hand above the
+    // water. This inner cylinder rises to 3.4 m — beyond any reach the
+    // park's gravity grants from the coping — at the coping's INNER lip, so
+    // sitting on the rim still works and crossing it never does. Circular by
+    // construction, like everything else here.
+    cylinder(BASIN_INNER_R + 0.08, 3.4)
 
     for (let b = 0; b < PLANTER_BAYS; b++) {
       const theta = (b / PLANTER_BAYS) * Math.PI * 2
@@ -165,9 +203,72 @@ export class FountainSystem implements GameSystem {
 
   fixedUpdate(ctx: GameContext, _dt: number): void {
     fountainTime.value = ctx.time.sim
+    this.pendingSteps++
+    this.sampleImpacts(ctx.time.sim)
+  }
+
+  /**
+   * One fixed step's worth of landing events, pushed as sim drops. Fractional
+   * per-step rates accumulate, so a source owed 0.4 events a step fires every
+   * 2–3 steps rather than never.
+   */
+  private sampleImpacts(simTime: number): void {
+    const sim = this.sim
+    const rng = this.rng
+    if (!sim || !rng) return
+    for (let i = 0; i < this.sources.length; i++) {
+      const source = this.sources[i]
+      this.accumulators[i] += source.perStep
+      let due = Math.floor(this.accumulators[i])
+      this.accumulators[i] -= due
+      while (due-- > 0) {
+        let bearing: number
+        let site: number
+        if (source.kind === 'points') {
+          site = Math.floor(rng.range(0, source.count)) % source.count
+          bearing = (site / source.count) * Math.PI * 2 + source.phase
+        } else {
+          bearing = rng.range(0, Math.PI * 2)
+          site = (bearing / (Math.PI * 2)) * source.count
+        }
+        // The SAME wander the droplet shader launches with, evaluated at this
+        // parcel's launch time — so the ring the waves radiate from is the
+        // ring the streaks are visibly landing on, even while it drifts.
+        const wander = wanderRadial(site, simTime - source.flightTime, source.wander)
+        const swing = source.span * (wander - 1) * (source.inward ? -1 : 1)
+        // Triangular scatter around the wandered ring: individual parcels
+        // never land in single file.
+        const spread = (rng.range(0, 1) + rng.range(0, 1) - 1) * source.spread * 1.7
+        const radius = source.radius + swing + spread
+        sim.pushDrop(
+          Math.cos(bearing) * radius,
+          Math.sin(bearing) * radius,
+          source.dropRadius * rng.range(0.85, 1.2),
+          source.dropDepth * rng.range(0.7, 1.35),
+        )
+      }
+    }
+  }
+
+  update(ctx: GameContext, _dt: number, _alpha: number): void {
+    const sim = this.sim
+    if (!sim) return
+    let steps = this.pendingSteps
+    this.pendingSteps = 0
+    if (this.warmup > 0 && steps > 0) {
+      // Catch-up ramp: a few extra steps per frame until the field carries
+      // its steady-state wave energy. Impacts for the extra steps too, or the
+      // warm field would be suspiciously calm.
+      const extra = Math.min(6, this.warmup)
+      this.warmup -= extra
+      for (let i = 0; i < extra; i++) this.sampleImpacts(ctx.time.sim)
+      steps += extra
+    }
+    sim.update(ctx.renderer, steps)
   }
 
   dispose(ctx: GameContext): void {
+    this.sim?.dispose()
     ctx.scene.remove(this.group)
   }
 }

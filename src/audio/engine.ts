@@ -7,19 +7,23 @@ import type { TramSystem } from '../tram/tramSystem'
 import {
   COMMONS,
   FARMSIDE,
+  FOUNTAIN,
   FREEDOM_TOWER,
   OVERLOOK_LOUNGE,
   PORTAL_STATION,
   RESIDENTIAL,
   WORKS,
 } from '../world/parkPlan'
+import { interiorHeight } from '../world/interiorHeight'
 import { pavedSignedDistance } from '../world/pavingPlan'
 
 /**
- * The park's voice (plan §13) — fully procedural WebAudio, no assets, no
- * music (canon). The dome is a vast soft room; interiors are small warm
- * ones; the tube is a duct. Every source is synthesized: noise beds,
- * filtered bursts for footsteps, servo whines, the tram's rail-sing.
+ * The park's voice (plan §13) — procedural WebAudio, no music (canon). The
+ * dome is a vast soft room; interiors are small warm ones; the tube is a
+ * duct. Every source is synthesized — noise beds, filtered bursts for
+ * footsteps, servo whines, the tram's rail-sing — except THE FOUNTAIN, the
+ * park's one recorded voice (owner-supplied loop), placed in the world
+ * behind the same panner model as everything else.
  */
 
 type Zone = 'park' | 'interior' | 'tram' | 'tube'
@@ -224,6 +228,55 @@ export class AudioEngineSystem implements GameSystem {
       x: WORKS.machineHall.x + 6,
       z: WORKS.machineHall.z + WORKS.machineHall.depth / 2 + 7,
     })
+
+    void this.startFountain(context, master)
+  }
+
+  /**
+   * THE FOUNTAIN's loop — the one recorded asset in the soundscape.
+   *
+   * Decoded to an AudioBuffer so the loop is SAMPLE-ACCURATE (an HTMLAudio
+   * loop gaps); the loop points then step inside the ends by a few tens of
+   * milliseconds, because an MP3 always carries encoder padding and a seam
+   * that dips through that padding ticks once per lap. Falling water is
+   * broadband, so a mid-stream splice is inaudible by construction.
+   *
+   * Distance does the mixing: an inverse-law panner at the fountain axis,
+   * fed by the same listener pose every other source uses — walk toward the
+   * court and the water swells, drift down the boulevard and it fades under
+   * the room tone by about forty metres. No zone logic, no scripting.
+   */
+  private async startFountain(context: AudioContext, master: GainNode): Promise<void> {
+    try {
+      const url = new URL('../assets/fountain.mp3', import.meta.url)
+      const response = await fetch(url)
+      const encoded = await response.arrayBuffer()
+      const buffer = await context.decodeAudioData(encoded)
+      if (!this.context) return
+      const source = context.createBufferSource()
+      source.buffer = buffer
+      source.loop = true
+      if (buffer.duration > 1.5) {
+        source.loopStart = 0.06
+        source.loopEnd = buffer.duration - 0.09
+      }
+      const gain = context.createGain()
+      gain.gain.value = 0.8
+      const panner = context.createPanner()
+      panner.distanceModel = 'inverse'
+      panner.refDistance = 7
+      panner.rolloffFactor = 1.5
+      panner.positionX.value = FOUNTAIN.x
+      panner.positionY.value = interiorHeight(FOUNTAIN.x, FOUNTAIN.z) + 1.4
+      panner.positionZ.value = FOUNTAIN.z
+      source.connect(gain).connect(panner).connect(master)
+      // Start on a loop-interior sample so the very first second is water,
+      // not the encoder's lead-in.
+      source.start(0, source.loopStart)
+    } catch {
+      // Asset unreadable: the fountain stays a visual feature. Nothing else
+      // in the soundscape depends on it.
+    }
   }
 
   private hissSource(

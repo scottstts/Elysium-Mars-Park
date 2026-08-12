@@ -13,6 +13,7 @@ import {
   saturate,
   sin,
   smoothstep,
+  uv,
   vec2,
   vec3,
 } from 'three/tsl'
@@ -64,9 +65,13 @@ export const marbleAlbedo = /*@__PURE__*/ Fn(([p, keep]: [Node<'vec3'>, Node<'fl
   const broad = abs(sin(mx_noise_float(warped.mul(0.62)).mul(7.4)))
   const vein = smoothstep(0.32, 0.02, broad)
   // Hairlines ride the same warp one octave up, so they run WITH the bedding
-  // instead of crossing it at random — the tell of procedural stone.
+  // instead of crossing it at random — and they are BUNDLED to it: a hairline
+  // wandering alone across clear field reads as a contour line on a survey
+  // map, which is exactly how the tazza bowls read before this gate. Real
+  // marble keeps its fractures where the bedding already broke the crystal.
   const fine = abs(sin(mx_noise_float(warped.mul(2.35).add(vec3(31.7))).mul(11.0)))
-  const hair = smoothstep(0.16, 0.01, fine).mul(keep)
+  const nearBed = smoothstep(0.58, 0.16, broad)
+  const hair = smoothstep(0.16, 0.01, fine).mul(nearBed).mul(keep)
   // Sugary crystal grain: calcite reads granular at arm's length, flat at 10 m.
   const grain = mx_noise_float(p.mul(46.0)).mul(0.5).add(0.5)
 
@@ -138,6 +143,36 @@ export function fountainStone(options: FountainStoneOptions): MeshStandardNodeMa
   // Wet stone: darker (the film kills subsurface return) and much smoother.
   material.colorNode = mix(dusted, dusted.mul(0.46), wet)
   material.roughnessNode = mix(float(0.44).sub(keep.mul(0.05)), float(0.11), wet)
+  material.metalness = 0
+  applySpecularAA(material)
+  return material
+}
+
+/**
+ * The SCULPTURE stone: the same marble, plus the baked crevice channel.
+ *
+ * The vortex lofts know exactly how deep each vertex sits inside a lobe
+ * groove (the relief is analytic) and bake that into `uv.x`. Here it becomes
+ * occlusion: a groove sees less sky, holds its dust, and scatters a little
+ * less light back — which is what makes carved relief read under the flat
+ * Martian ambient. The park's GTAO gathers at 0.9 m and is blind to a 3 cm
+ * groove; a screen-space curvature term would be piecewise-constant per
+ * triangle (the `dFdx` trap). The bake is exact, free at runtime, and lives
+ * where the knowledge lives — in the loft.
+ */
+export function fountainSculptureStone(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const keep = detailKeep(30)
+  const albedo = marbleAlbedo(positionWorld, keep)
+  const cavity = uv().x
+  // Crevice shading: darker, faintly warmer-dusty at the very bottom of the
+  // cut (settled fines), and slightly rougher — a crease never polishes.
+  // GENTLE on purpose: at −40 % a crease reads as a painted black stripe from
+  // two metres, which is worse than no cavity at all. Occlusion whispers.
+  const creased = mix(albedo, albedo.mul(vec3(0.82, 0.81, 0.795)), cavity)
+  const dustLine = smoothstep(0.72, 1.0, cavity).mul(0.1)
+  material.colorNode = mix(creased, vec3(0.5, 0.42, 0.34), dustLine)
+  material.roughnessNode = float(0.44).sub(keep.mul(0.05)).add(cavity.mul(0.08))
   material.metalness = 0
   applySpecularAA(material)
   return material
@@ -271,6 +306,7 @@ export function fountainSoil(): MeshStandardNodeMaterial {
 export function fountainMaterials(options: FountainStoneOptions): Record<string, MeshStandardNodeMaterial> {
   return {
     stone: fountainStone(options),
+    sculpture: fountainSculptureStone(),
     stoneWet: fountainStoneWet(),
     bronze: fountainBronze(),
     basinFloor: fountainBasinFloor(options.center),

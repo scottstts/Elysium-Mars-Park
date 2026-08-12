@@ -3,7 +3,6 @@ import { MeshBasicNodeMaterial } from 'three/webgpu'
 import type { Node } from 'three/webgpu'
 import {
   Fn,
-  atan,
   cameraPosition,
   cameraProjectionMatrix,
   cameraViewMatrix,
@@ -41,17 +40,16 @@ import {
 import { basinFloorAlbedo, marbleAlbedo } from './fountainMaterials'
 import {
   BASIN_INNER_R,
-  JETS_INWARD,
-  JETS_OUTWARD,
   LOWER_TAZZA,
-  MAIN_CURTAIN_LAND_R,
   PEDESTAL_TOP_Y,
   PLINTH_STEPS,
   UPPER_TAZZA,
   WATER_Y,
   basinFloorY,
 } from './fountainPlan'
-import { causticGain, fountainTime, waterField } from './waterField'
+import { analyticDetail, fountainTime, seicheField } from './waterField'
+import { SIM_SIZE } from './waterSim'
+import type { FountainWaterSim } from './waterSim'
 
 /**
  * THE BASIN SURFACE — a ray-traced pool volume, not a tinted plane.
@@ -81,10 +79,12 @@ import { causticGain, fountainTime, waterField } from './waterField'
  *
  * ## Ownership
  *
- * Height, gradient and curvature all come from `waterField`. The floor's
- * albedo comes from `fountainMaterials.basinFloorAlbedo`, which is the same
- * function the physical floor mesh under the water is shaded with. Nothing in
- * this file re-authors either.
+ * The meso-scale field — height, gradient, caustic gain, foam — comes from
+ * the SIMULATION (`waterSim.ts`); the capillary detail and the seiche from
+ * `waterField.ts`; the floor's albedo from
+ * `fountainMaterials.basinFloorAlbedo`, which is the same function the
+ * physical floor mesh under the water is shaded with. Nothing in this file
+ * re-authors any of them.
  */
 
 /** Water's absorption per metre (pure water, RGB at 600/550/450 nm). */
@@ -131,7 +131,17 @@ const metresPerPixel = /*@__PURE__*/ Fn(([viewPos]: [Node<'vec4'>]) => {
 export interface WaterSurfaceOptions {
   /** World position of the fountain axis at the court's paved top. */
   center: Vector3
+  /** The basin's heightfield simulation — the surface's meso-scale motion. */
+  sim: FountainWaterSim
 }
+
+/**
+ * Micro slope variance of moving water below every representable band —
+ * sub-millimetre capillaries and surface turbulence. It is the floor the
+ * specular roughness can never fall under, and the reason even glass-calm
+ * fountain water shows a live sparkle rather than a laser-dot sun.
+ */
+const BASE_MICRO_VARIANCE = 0.0006
 
 /**
  * Ray/cylinder-and-disc occlusion of the fountain's own masses.
@@ -214,42 +224,40 @@ const submergedRadiance = /*@__PURE__*/ Fn(
 )
 
 /**
- * FOAM — aeration where water actually lands, plus crest whitening.
+ * FOAM — the SIMULATED aeration field, shaped, plus the two static residues.
  *
- * Every band here is centred on a landing ring the streams module genuinely
- * throws water at, with the same angular beat the ripple trains use. Foam that
- * is a scrolling texture unrelated to the crest metric is a named failure;
- * this is the opposite — it is placed by the plumbing.
+ * The load-bearing input is the sim's foam channel: it was injected by the
+ * same impact events that raised the waves, diffused and decayed in place, so
+ * it sits exactly where water is landing THIS second — including everywhere
+ * the jets' aim wander drags their rings. The analytic landing bands the
+ * first pass painted here are gone; a band centred on a nominal radius is a
+ * decal once the landing point actually moves.
+ *
+ * What stays authored: the thin scum lines both shorelines hold (a statics
+ * problem, not a dynamics one — floating residue collects against walls), a
+ * churn noise that keeps large foam sheets from reading as airbrush, and
+ * crest whitening off the local slope.
  */
 const foamMask = /*@__PURE__*/ Fn(
-  ([planXZ, radius, slope]: [Node<'vec2'>, Node<'float'>, Node<'float'>]) => {
-    const theta = atan(planXZ.y, planXZ.x)
+  ([planXZ, radius, slope, simFoam]: [
+    Node<'vec2'>,
+    Node<'float'>,
+    Node<'float'>,
+    Node<'float'>,
+  ]) => {
     const churn = mx_noise_float(
       vec3(planXZ.x.mul(2.6), planXZ.y.mul(2.6), fountainTime.mul(0.85)),
     )
       .mul(0.5)
       .add(0.5)
-    const band = (center: number, width: number, lobes: number, depth: number) => {
-      const ring = float(1).sub(radius.sub(center).abs().div(width).min(1))
-      const beat = float(1).sub(float(depth).mul(float(0.5).sub(cos(theta.mul(lobes)).mul(0.5))))
-      return ring.mul(ring).mul(beat)
-    }
-    const aeration = max(
-      band(MAIN_CURTAIN_LAND_R, 0.5, 36, 0.25),
-      max(
-        band(JETS_INWARD.landR, 0.36, JETS_INWARD.count, 0.72),
-        band(JETS_OUTWARD.landR, 0.3, JETS_OUTWARD.count, 0.78),
-      ),
-    )
+    const aeration = simFoam.mul(churn.mul(0.7).add(0.72))
     // Shorelines: the wall and the island both hold a thin line of scum-foam.
     const shore = max(
       float(1).sub(radius.sub(RIM_R).abs().div(0.14).min(1)),
       float(1).sub(radius.sub(ISLAND_R).abs().div(0.12).min(1)),
-    ).mul(0.5)
+    ).mul(churn.mul(0.4).add(0.24))
     const crest = slope.mul(9).clamp(0, 1)
-    return smoothstep(0.24, 0.92, max(aeration, shore).mul(churn.mul(0.7).add(0.55)))
-      .add(crest.mul(0.16))
-      .min(1)
+    return smoothstep(0.07, 0.58, max(aeration, shore)).add(crest.mul(0.16)).min(1)
   },
 )
 
@@ -261,10 +269,15 @@ export function fountainWaterMaterial(options: WaterSurfaceOptions): MeshBasicNo
   const material = new MeshBasicNodeMaterial()
   const center = uniform(options.center)
   const centerXZ = vec2(center.x, center.z)
+  const { sim } = options
 
-  // ── vertex: macro displacement only. The surface mesh is a polar grid, so
-  // the concentric trains resolve radially at 6 cm while costing nothing
-  // angularly; the capillary bands live in the normal, where they belong.
+  /** Plan offset from the axis → the sim texture's uv. */
+  const simUvOf = (planXZ: Node<'vec2'>) => planXZ.add(SIM_SIZE / 2).div(SIM_SIZE)
+
+  // ── vertex: macro displacement only — the SIMULATED field plus the seiche.
+  // The surface mesh is a polar grid bunched toward the island, and the sim's
+  // 28 mm texels resolve every ring it carries; the capillary bands live in
+  // the normal, where they belong.
   //
   // `positionNode` is LOCAL space. The mesh's geometry is authored in world
   // coordinates on an identity transform (see `fountainWaterMesh`), so local
@@ -272,7 +285,8 @@ export function fountainWaterMaterial(options: WaterSurfaceOptions): MeshBasicNo
   // someone parents this mesh to a moved group the ripple centre goes with it.
   material.positionNode = Fn(() => {
     const local = positionLocal
-    const h = waterField(vec2(local.x, local.z), centerXZ, float(0), float(0)).x
+    const planXZ = vec2(local.x.sub(center.x), local.z.sub(center.z))
+    const h = sim.stateNode.sample(simUvOf(planXZ)).x.add(seicheField(planXZ).x)
     return vec3(local.x, local.y.add(h), local.z)
   })()
 
@@ -300,8 +314,28 @@ export function fountainWaterMaterial(options: WaterSurfaceOptions): MeshBasicNo
       .div(flatNdotV)
       .toVar()
 
-    const field = waterField(planXZ, centerXZ, footprint, float(1)).toVar()
-    const normal = normalize(vec3(field.y.negate(), 1.0, field.z.negate())).toVar()
+    // ── THE FIELD: simulated meso-scale + analytic capillary + the seiche.
+    //
+    // The sim's single bilinear tap has its own competence limit: once a
+    // pixel spans several 28 mm texels the tap point-samples a field it
+    // should be averaging, which is the same aliasing class the chop bands
+    // obey. So the sim gradient fades on the footprint too — and BOTH fades
+    // pay their energy into σ², the slope variance the specular lobe widens
+    // by. Detail leaves the geometry by becoming roughness, never by
+    // vanishing: that is why the water's sparkle dims into a sheen with
+    // distance instead of the pool going matte.
+    const simDeriv = sim.derivNode.sample(simUvOf(planXZ)).toVar()
+    const wSim = float(1).sub(smoothstep(0.035, 0.13, footprint)).toVar()
+    const detail = analyticDetail(planXZ, footprint).toVar()
+    const seiche = seicheField(planXZ)
+    const gx = simDeriv.x.mul(wSim).add(detail.y).add(seiche.y)
+    const gz = simDeriv.y.mul(wSim).add(detail.z).add(seiche.z)
+    const normal = normalize(vec3(gx.negate(), 1.0, gz.negate())).toVar()
+    const simSlope2 = simDeriv.x.mul(simDeriv.x).add(simDeriv.y.mul(simDeriv.y))
+    const sigma2 = detail.w
+      .add(simSlope2.mul(float(1).sub(wSim.mul(wSim))).mul(0.5))
+      .add(BASE_MICRO_VARIANCE)
+      .toVar()
     const ndotv = max(dot(normal, view), 1e-3).toVar()
     const f0 = float(((1 - ETA) / (1 + ETA)) ** 2 + 0.025)
     const fresnel = f0.add(float(1).sub(f0).mul(pow(float(1).sub(ndotv), 5.0))).toVar()
@@ -371,14 +405,15 @@ export function fountainWaterMaterial(options: WaterSurfaceOptions): MeshBasicNo
     ).normalize()
     const sunPath = world.y.sub(hit.y).div(SUN_COS_T).toVar()
     const entry = vec2(hit.x, hit.z).sub(vec2(sunT.x, sunT.z).mul(sunPath))
-    const beta = depth.mul((1 - ETA) / SUN_COS_T)
-    // The web itself is a fine pattern and obeys the same competence rule as
-    // everything else down there: past ~8 cm per pixel it dissolves into its
-    // own mean (1.0, since differential-area reprojection conserves flux)
-    // rather than sparkling.
+    // The differential-area gain 1/|det(I + βH)| is PRECOMPUTED by the sim's
+    // derive kernel (simulated Hessian + analytic capillary Hessian), so the
+    // web here is one texture tap at the sun's entry point for THIS floor
+    // point. It still obeys the competence rule: past ~8 cm per pixel it
+    // dissolves into its own mean (1.0, since differential-area reprojection
+    // conserves flux) rather than sparkling.
     const caustic = mix(
       float(1),
-      mix(float(1), causticGain(entry, centerXZ, beta), keep),
+      mix(float(1), sim.derivNode.sample(simUvOf(entry.sub(centerXZ))).z, keep),
       onFloor,
     ).toVar()
     // ONE lattice sample and ONE mass test, at the surface. The floor hit is
@@ -396,11 +431,13 @@ export function fountainWaterMaterial(options: WaterSurfaceOptions): MeshBasicNo
     const absorb = vec3(ABSORPTION[0], ABSORPTION[1], ABSORPTION[2])
     const transmittance = exp(absorb.mul(tHit).negate())
     // Aerated fountain water carries a little in-scatter of its own; it is
-    // what stops 30 cm of water reading as a sheet of glass.
+    // what stops 30 cm of water reading as a sheet of glass. Under a landing
+    // zone the column is genuinely full of entrained bubbles — the sim's foam
+    // channel is exactly a map of where — so the milkiness follows the plunge.
     const inscatter = vec3(SCATTER[0], SCATTER[1], SCATTER[2])
       .mul(marsAmbientIrradiance(vec3(0, 1, 0)))
       .mul(float(1).sub(transmittance))
-      .mul(2.4)
+      .mul(simDeriv.w.mul(3.2).add(2.4))
     const transmitted = body.mul(transmittance).add(inscatter).toVar()
 
     // ── REFLECTION: the analytic sky, occluded by the fountain's own mass.
@@ -428,20 +465,37 @@ export function fountainWaterMaterial(options: WaterSurfaceOptions): MeshBasicNo
     const localMass = max(massed, towardRim.mul(0.85)).toVar()
     const reflection = mix(sky, stoneRadiance, localMass).toVar()
 
-    // Two-lobe sun glint: a tight core for the specular star and a broad halo
-    // for the sheen. Killed wherever the fountain blocks the sun.
-    const sunAlign = max(dot(bounce, sunDirectionUniform), 0).toVar()
+    // ── THE SUN'S MIRROR IMAGE: a filtered microfacet lobe, not an authored
+    // power pair. The roughness IS the slope variance every unresolved band
+    // paid in above (α² = 2σ², the Toksvig mapping), floored by the water's
+    // own micro-turbulence — so up close the resolved wavelets flash the sun
+    // as real geometry with a near-mirror lobe, and with distance the same
+    // energy widens the lobe into the smooth sheen a photograph shows. The
+    // anti-aliasing is IN the BRDF; nothing here needs a footprint fade of
+    // its own. GGX with height-correlated Smith visibility; the clamp keeps
+    // a grazing streak inside what bloom can carry gracefully.
     const skyVisible = float(1).sub(localMass).mul(sunVisible)
+    const alpha2 = sigma2.mul(2).toVar()
+    const halfway = normalize(view.add(sunDirectionUniform)).toVar()
+    const noh = max(dot(normal, halfway), 0).toVar()
+    const nol = max(dot(normal, sunDirectionUniform), 1e-3).toVar()
+    const voh = max(dot(view, halfway), 1e-3)
+    const dDenom = noh.mul(noh).mul(alpha2.sub(1)).add(1)
+    const dGgx = alpha2.div(dDenom.mul(dDenom).mul(Math.PI))
+    const visSmith = float(0.5).div(
+      nol
+        .mul(sqrt(ndotv.mul(ndotv).mul(float(1).sub(alpha2)).add(alpha2)))
+        .add(ndotv.mul(sqrt(nol.mul(nol).mul(float(1).sub(alpha2)).add(alpha2)))),
+    )
+    const fSpec = f0.add(float(1).sub(f0).mul(pow(float(1).sub(voh), 5.0)))
     const glint = sunColorUniform
-      .mul(pow(sunAlign, 1400.0).mul(7.5).add(pow(sunAlign, 22.0).mul(0.55)))
+      .mul(SUN_LIGHT_INTENSITY)
+      .mul(fSpec.mul(dGgx).mul(visSmith).mul(nol))
       .mul(skyVisible)
-      // Micro-chop that a pixel can no longer resolve must not keep sparkling:
-      // fade the tight lobe out with the footprint, the same competence rule
-      // the wave bands obey.
-      .mul(float(1).sub(smoothstep(0.02, 0.09, footprint)).mul(0.75).add(0.25))
+      .min(vec3(11.0))
 
     const slope = float(1).sub(normal.y).clamp(0, 1)
-    const foam = foamMask(planXZ, radius, slope).toVar()
+    const foam = foamMask(planXZ, radius, slope, simDeriv.w).toVar()
     const foamRadiance = vec3(0.82, 0.79, 0.75).mul(
       marsAmbientIrradiance(vec3(0, 1, 0))
         .mul(ENVIRONMENT_INTENSITY)

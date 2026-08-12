@@ -32,8 +32,12 @@ import {
   MARS_G,
   UPPER_CURTAIN_LAND_R,
   UPPER_CURTAIN_STRANDS,
+  NOZZLE_MOUTH_REACH,
+  NOZZLE_SHOULDER_DROP,
   UPPER_TAZZA,
   WATER_Y,
+  tazzaDripRadius,
+  tazzaDripY,
 } from './fountainPlan'
 import { dropletMesh, splashMesh } from './waterDroplets'
 import type { DropletEmitter, SplashEmitter } from './waterDroplets'
@@ -43,9 +47,10 @@ import type { DropletEmitter, SplashEmitter } from './waterDroplets'
  *
  * This module owns two things and delegates the third:
  *
- *  1. **The ballistic solves.** Given a launch point, a target and a rise, it
- *     returns the launch velocity and flight time at MARS gravity. Every
- *     nozzle in `fountainStone.ts`, every wave train in `waterField.ts` and
+ *  1. **The flight solves.** Given a launch point, a target and a rise, it
+ *     returns the launch velocity and flight time at MARS gravity — WITH the
+ *     aerodynamic drag of the dome's air (see below). Every nozzle in
+ *     `fountainStone.ts`, every impact the basin sim is forced with, and
  *     every droplet in `waterDroplets.ts` is aimed by these same numbers, so
  *     hardware, water and ripples cannot disagree about where a jet lands.
  *  2. **The coherent cores.** A jet leaves an orifice as an unbroken glassy
@@ -56,24 +61,152 @@ import type { DropletEmitter, SplashEmitter } from './waterDroplets'
  *
  * The split is not a rendering convenience — it is where the physics changes.
  * Before breakup the water has a surface with a normal, so it reflects and
- * refracts like a body. After breakup it is a cloud of independent lenses.
- * Drawing the whole stream one way or the other is what makes a fountain look
- * either like a plastic ribbon or like a smoke machine.
+ * refracts like a body — and its mass-to-surface ratio is so high that drag
+ * is negligible: the CORES fly ballistic arcs. After breakup every parcel is
+ * a millimetre sphere whose drag is anything but negligible, which is why the
+ * droplet model carries it and the core model does not. One stream, two
+ * regimes, split at the same point the rendering splits.
+ *
+ * ## The atmosphere, and what drag does here
+ *
+ * Dome One holds a breathable ~70 kPa habitat mix (ρ ≈ 0.85 kg/m³) — this is
+ * a PARK, not the 600 Pa outside. For a droplet of diameter d the momentum
+ * response time is τ = (4/3)·(ρw/ρa·Cd)·d/v — about 2 s for a 2.5 mm drop at
+ * these speeds, 0.4 s for a fine. Three visible consequences, all real:
+ * arcs lose ~30 % of their ballistic reach (the launch solve compensates, so
+ * the DESIGNED landing rings still hold for the mean parcel); fine spray
+ * decelerates toward a ~1 m/s terminal fall and hangs while heavy drops carry
+ * on (sprays sort themselves by size along the arc); and impact speeds — and
+ * with them the splash crowns — come down to what the drag actually delivers.
  *
  * ## Mars
  *
  * Every flight time here is roughly 1.6× its Earth equivalent, and the arcs
- * are correspondingly long and flat. A jet rising 1.55 m hangs 1.84 s. That
+ * are correspondingly long and flat. A jet rising 0.9 m hangs 1.4 s. That
  * one constant is most of why this reads as another planet.
  */
 
 const TAU = Math.PI * 2
 
-/** Launch speed and flight time for a ballistic arc with a given rise/drop. */
-export function ballistic(rise: number, drop: number): { vy: number; time: number } {
-  const vy = Math.sqrt(2 * MARS_G * Math.max(rise, 1e-4))
-  const time = (vy + Math.sqrt(vy * vy + 2 * MARS_G * Math.max(drop, 0))) / MARS_G
-  return { vy, time }
+/** Habitat air density (70 kPa mix) over water density, folded with Cd. */
+const K_DRAG = (4 / 3) * (1000 / 0.85) / 0.55
+
+/** Momentum response time of a droplet of diameter d at flight speed v. */
+export function dragTau(diameter: number, speed: number): number {
+  return (K_DRAG * diameter) / Math.max(speed, 0.3)
+}
+
+export interface DragArc {
+  /** Launch speeds, m/s. */
+  vy: number
+  vh: number
+  /** Time to the receiving surface, s. */
+  time: number
+  /** Speed at impact, m/s — what the splash crown gets to spend. */
+  impactSpeed: number
+}
+
+/**
+ * Launch velocity and flight time for an arc that must RISE `rise` above the
+ * launch point, then land `drop` below it, `span` metres away — through air,
+ * with linear drag of response time `tau`. Closed forms:
+ *
+ *   y(t) = (vy + v_t)·τ·(1 − e^(−t/τ)) − v_t·t,  v_t = g·τ
+ *   x(t) = vh·τ·(1 − e^(−t/τ))
+ *   apex: t_a = τ·ln(1 + vy/v_t)  ⇒  rise = τ·vy − v_t·τ·ln(1 + vy/v_t)
+ *
+ * `vy` from the apex identity (Newton, analytic derivative τ·vy/(v_t+vy)),
+ * `time` from y(T) = −drop (Newton off the ballistic seed), `vh` exact from
+ * the horizontal run. As τ → ∞ every line degenerates to the ballistic case.
+ */
+export function dragArc(rise: number, drop: number, span: number, tau: number): DragArc {
+  const vt = MARS_G * tau
+  let vy = Math.sqrt(2 * MARS_G * Math.max(rise, 1e-4))
+  if (rise > 1e-4) {
+    for (let i = 0; i < 24; i++) {
+      const f = tau * vy - vt * tau * Math.log(1 + vy / vt) - rise
+      const df = (tau * vy) / (vt + vy)
+      vy -= f / df
+      if (Math.abs(f) < 1e-6) break
+    }
+  } else {
+    vy = 0
+  }
+  let time = (vy + Math.sqrt(vy * vy + 2 * MARS_G * Math.max(drop, 1e-3))) / MARS_G
+  for (let i = 0; i < 24; i++) {
+    const decay = Math.exp(-time / tau)
+    const f = (vy + vt) * tau * (1 - decay) - vt * time + drop
+    const df = Math.min((vy + vt) * decay - vt, -0.05)
+    time -= f / df
+    if (Math.abs(f) < 1e-6) break
+  }
+  const run = tau * (1 - Math.exp(-time / tau))
+  const vh = span / Math.max(run, 1e-4)
+  const vyEnd = (vy + vt) * Math.exp(-time / tau) - vt
+  const vhEnd = vh * Math.exp(-time / tau)
+  return { vy, vh, time, impactSpeed: Math.hypot(vyEnd, vhEnd) }
+}
+
+/** Mean PHYSICAL droplet diameters, per stream family (m). The billboard
+ * sizes in the emitter specs are display widths, deliberately larger — a
+ * 2.5 mm droplet at ten metres is invisible; its STREAK is not. Drag reads
+ * the physics, rendering reads the display. */
+const DROP_D = { curtain: 0.003, jet: 0.0026, bell: 0.0016, column: 0.0014, upper: 0.0022 }
+
+export interface JetSolution extends DragArc {
+  /** Cant of the head — the launch angle AND the hardware's tilt, one number. */
+  cant: number
+  /** THE ORIFICE: plan radius and local height of the mouth ring's opening. */
+  mouthRadius: number
+  mouthY: number
+  /** Horizontal run from the mouth to the landing ring, metres. */
+  span: number
+  /** Drag response time of the mean parcel at the solved launch speed. */
+  tau: number
+}
+
+/**
+ * The complete jet solve — ONE call that both the hardware and the water read.
+ *
+ * A nozzle's opening is not its setting-out point: the head pivots
+ * `NOZZLE_SHOULDER_DROP` below `nozzleY` and its mouth stands
+ * `NOZZLE_MOUTH_REACH` out along the cant, so the orifice sits ~3 cm higher
+ * and ~8 cm inboard of the plan point. The arc must therefore be solved FROM
+ * THE MOUTH — and the mouth's position depends on the cant, which depends on
+ * the arc. Three fixed-point passes close that loop (converged to well under a
+ * millimetre by the second), and the single `cant` this returns is what
+ * `emitNozzle` tilts the bronze with, so the stream can only ever leave the
+ * hole it is drawn leaving. Launching from the plan point instead put every
+ * thread a hand's width off its own nozzle.
+ */
+export function jetSolve(set: {
+  nozzleR: number
+  nozzleY: number
+  apexRise: number
+  landR: number
+}): JetSolution {
+  const inward = set.landR < set.nozzleR
+  const sign = inward ? -1 : 1
+  let arc = dragArc(
+    set.apexRise,
+    set.nozzleY - WATER_Y,
+    Math.abs(set.landR - set.nozzleR),
+    dragTau(DROP_D.jet, 3.5),
+  )
+  let cant = Math.atan2(arc.vy, arc.vh)
+  let mouthRadius = set.nozzleR
+  let mouthY = set.nozzleY
+  let span = Math.abs(set.landR - set.nozzleR)
+  let tau = dragTau(DROP_D.jet, Math.hypot(arc.vy, arc.vh))
+  for (let i = 0; i < 3; i++) {
+    mouthRadius = set.nozzleR + Math.cos(cant) * NOZZLE_MOUTH_REACH * sign
+    mouthY = set.nozzleY - NOZZLE_SHOULDER_DROP + Math.sin(cant) * NOZZLE_MOUTH_REACH
+    span = Math.abs(set.landR - mouthRadius)
+    tau = dragTau(DROP_D.jet, Math.hypot(arc.vy, arc.vh))
+    arc = dragArc(set.apexRise, mouthY - WATER_Y, span, tau)
+    cant = Math.atan2(arc.vy, arc.vh)
+  }
+  return { ...arc, cant, mouthRadius, mouthY, span, tau }
 }
 
 /**
@@ -85,9 +218,16 @@ export function ballistic(rise: number, drop: number): { vy: number; time: numbe
  * water has no diffuse term. Opacity therefore rises toward the silhouette
  * rather than being uniform — which is the single cue that separates "a tube
  * of water" from "a painted tube".
+ *
+ * `thinning` is mass conservation on a falling sheet: flux = thickness × v is
+ * constant, so as gravity runs v up the sheet thins as 1/v. Along the run
+ * v² = v₀²·(1 + thinning·f²) with f the parametric distance, so opacity gets
+ * a 1/√(1 + thinning·f²) factor — the reason a weir nappe is translucent at
+ * the lip and glassy-thin 30 cm down.
  */
-function coherentWaterMaterial(): MeshBasicNodeMaterial {
+function coherentWaterMaterial(options: { thinning?: number } = {}): MeshBasicNodeMaterial {
   const material = new MeshBasicNodeMaterial()
+  const thinning = options.thinning ?? 0
 
   // A plain expression builder, not a nested `Fn`: a zero-argument shader
   // function called from two different material slots is a shader-call node
@@ -117,12 +257,19 @@ function coherentWaterMaterial(): MeshBasicNodeMaterial {
 
   material.opacityNode = Fn(() => {
     // The core is nearly clear; the rim is where the ray's path through water
-    // is longest and the reflection strongest.
+    // is longest and the reflection strongest. Even the rim stays moderate —
+    // a 28 mm glass column is never a solid rod, and an opacity that lets the
+    // silhouette go opaque renders every jet as dark cast bronze against a
+    // bright pool.
     const rim = surfaceFresnel()
-    // Fade out along the run: by the end of a coherent length the sheet has
-    // already begun necking, and the droplets take over from there.
-    const along = float(1).sub(smoothstep(0.55, 1.0, uv().y))
-    return rim.mul(0.85).add(0.12).mul(along)
+    // Mass conservation: the sheet thins as it accelerates (see above)…
+    const f = uv().y
+    const thin =
+      thinning > 0 ? float(1).div(pow(float(1).add(f.mul(f).mul(thinning)), 0.5)) : float(1)
+    // …and fades out along the run: by the end of a coherent length the sheet
+    // has already begun necking, and the droplets take over from there.
+    const along = float(1).sub(smoothstep(0.55, 1.0, f))
+    return rim.mul(0.5).add(0.09).mul(along).mul(thin)
   })()
 
   material.transparent = true
@@ -156,9 +303,9 @@ function toGeometry(a: Attributes): BufferGeometry {
 
 /**
  * The unbroken sheet a weir sheds: a short surface of revolution following the
- * true trajectory, thinning as it accelerates (mass flow is conserved, so a
- * sheet moving twice as fast is half as thick — the reason a curtain is
- * translucent at the lip and glassy 20 cm down).
+ * true trajectory. The core is BALLISTIC — coherent water's mass-to-surface
+ * ratio makes its drag negligible over half a metre (the parcels inherit the
+ * air's argument only after breakup).
  */
 function coherentSheet(
   center: Vector3,
@@ -239,10 +386,38 @@ function coherentJet(
   }
 }
 
+/**
+ * A source of impacts on the BASIN's water, for the sim's forcing sampler.
+ * Everything the sampler needs to reproduce where parcels are landing right
+ * now — including the launch-time aim wander — without reading the GPU back.
+ */
+export interface ImpactSource {
+  kind: 'ring' | 'points'
+  /** Launch sites (points) or a continuous ring. */
+  count: number
+  phase: number
+  /** Mean landing radius (drag-corrected) and the arc's horizontal span. */
+  radius: number
+  span: number
+  inward: boolean
+  /** Mean impact EVENTS per fixed step (fractional → stochastic). */
+  perStep: number
+  /** Crater rim radius and depth handed to the sim per event (m). */
+  dropRadius: number
+  dropDepth: number
+  /** Aim-wander scale (matches the droplet shader's) and mean flight time. */
+  wander: number
+  flightTime: number
+  /** Random radial scatter of individual landings (m). */
+  spread: number
+}
+
 export interface StreamMeshes {
   meshes: Array<Mesh | InstancedMesh>
-  /** Where water lands, for the record (the ripple field reads the plan). */
+  /** Where water lands, for the record. */
   impacts: Array<{ x: number; z: number; y: number }>
+  /** Basin impact sources for the heightfield sim's forcing. */
+  sources: ImpactSource[]
 }
 
 /**
@@ -252,6 +427,7 @@ export interface StreamMeshes {
 export function buildFountainStreams(center: Vector3): StreamMeshes {
   const meshes: Array<Mesh | InstancedMesh> = []
   const impacts: StreamMeshes['impacts'] = []
+  const sources: ImpactSource[] = []
   const emitters: DropletEmitter[] = []
   const splashes: SplashEmitter[] = []
 
@@ -264,26 +440,29 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
   }
 
   const lowerDishY = LOWER_TAZZA.dishCenterY + (LOWER_TAZZA.dishRimY - LOWER_TAZZA.dishCenterY) * 0.78
+  const upperDishY = UPPER_TAZZA.dishCenterY + (UPPER_TAZZA.dishRimY - UPPER_TAZZA.dishCenterY) * 0.78
 
   // ── THE MAIN CURTAIN: the lower tazza's drip arris down to the basin. ─────
   {
-    const lipRadius = LOWER_TAZZA.rimR + 0.012
-    const lipY = LOWER_TAZZA.rimTopY - 0.018
+    const lipRadius = tazzaDripRadius(LOWER_TAZZA)
+    const lipY = tazzaDripY(LOWER_TAZZA)
     const drop = lipY - WATER_Y
-    const flightTime = Math.sqrt((2 * drop) / MARS_G)
-    // The outward drift is a real launch velocity, solved so the sheet lands
-    // exactly on the ring the ripple field seeds its strongest train from.
-    const vRadial = (MAIN_CURTAIN_LAND_R - lipRadius) / flightTime
+    const tau = dragTau(DROP_D.curtain, 3.2)
+    // The outward drift is a real launch velocity, solved (through the air)
+    // so the MEAN ligament lands exactly on the ring the sim is forced at.
+    const arc = dragArc(0, drop, MAIN_CURTAIN_LAND_R - lipRadius, tau)
     const coherent = 0.42
     finish(
       new Mesh(
         coherentSheet(center, {
           lipRadius,
           lipY: center.y + lipY,
-          vRadial,
+          vRadial: arc.vh,
           length: coherent,
         }),
-        coherentWaterMaterial(),
+        // v₀ off the lip is nearly pure horizontal drift; half a metre down
+        // the fall speed dominates it — the nappe visibly thins.
+        coherentWaterMaterial({ thinning: (2 * MARS_G * coherent) / (arc.vh * arc.vh + 0.25) }),
       ),
       14,
     )
@@ -293,10 +472,10 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       launchY: lipY,
       sites: MAIN_CURTAIN_STRANDS,
       ringPhase: 0,
-      vRadial,
+      vRadial: arc.vh,
       vVertical: 0,
       coherentLength: coherent,
-      flightTime,
+      flightTime: arc.time,
       // 26 parcels over 4.6 m of fall: at 4–5 m/s their motion streaks are
       // 12–15 cm, so a strand reads as a continuous line of water that
       // visibly beads apart toward the bottom.
@@ -306,13 +485,17 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       scatter: 0.055,
       density: 0.9,
       jitter: 0.1,
+      angularSpread: 0.9,
+      tauMean: tau,
+      wander: 0.15,
+      landY: WATER_Y,
     })
     splashes.push({
       name: 'curtain-splash',
       radius: MAIN_CURTAIN_LAND_R,
       points: 0,
       ringPhase: 0,
-      up: [0.75, 2.1],
+      up: [arc.impactSpeed * 0.16, arc.impactSpeed * 0.45],
       out: [0.12, 0.66],
       size: [0.014, 0.04],
       count: 280,
@@ -322,20 +505,34 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       life: 1.3,
     })
     impacts.push({ x: center.x, z: center.z, y: center.y + WATER_Y })
+    sources.push({
+      kind: 'ring',
+      count: MAIN_CURTAIN_STRANDS,
+      phase: 0,
+      radius: MAIN_CURTAIN_LAND_R,
+      span: MAIN_CURTAIN_LAND_R - lipRadius,
+      inward: false,
+      perStep: 6,
+      dropRadius: 0.11,
+      dropDepth: 0.0054,
+      wander: 0.15,
+      flightTime: arc.time,
+      spread: 0.13,
+    })
   }
 
   // ── THE UPPER CURTAIN: the small tazza into the big one. ─────────────────
   {
-    const lipRadius = UPPER_TAZZA.rimR + 0.012
-    const lipY = UPPER_TAZZA.rimTopY - 0.018
+    const lipRadius = tazzaDripRadius(UPPER_TAZZA)
+    const lipY = tazzaDripY(UPPER_TAZZA)
     const drop = lipY - lowerDishY
-    const flightTime = Math.sqrt((2 * drop) / MARS_G)
-    const vRadial = (UPPER_CURTAIN_LAND_R - lipRadius) / flightTime
+    const tau = dragTau(DROP_D.upper, 1.8)
+    const arc = dragArc(0, drop, UPPER_CURTAIN_LAND_R - lipRadius, tau)
     const coherent = 0.3
     finish(
       new Mesh(
-        coherentSheet(center, { lipRadius, lipY: center.y + lipY, vRadial, length: coherent }),
-        coherentWaterMaterial(),
+        coherentSheet(center, { lipRadius, lipY: center.y + lipY, vRadial: arc.vh, length: coherent }),
+        coherentWaterMaterial({ thinning: (2 * MARS_G * coherent) / (arc.vh * arc.vh + 0.25) }),
       ),
       14,
     )
@@ -345,39 +542,48 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       launchY: lipY,
       sites: UPPER_CURTAIN_STRANDS,
       ringPhase: 0.05,
-      vRadial,
+      vRadial: arc.vh,
       vVertical: 0,
       coherentLength: coherent,
-      flightTime,
+      flightTime: arc.time,
       perSite: 16,
       dBreakup: 0.022,
       dFinal: 0.01,
       scatter: 0.05,
       density: 0.88,
       jitter: 0.08,
+      angularSpread: 0.9,
+      tauMean: tau,
+      wander: 0.12,
+      landY: lowerDishY,
     })
   }
 
   // ── THE ARCING JET SETS. ─────────────────────────────────────────────────
   for (const set of [JETS_INWARD, JETS_OUTWARD]) {
     const inward = set === JETS_INWARD
-    const drop = set.nozzleY - WATER_Y
-    const { vy, time } = ballistic(set.apexRise, drop)
-    const span = Math.abs(set.landR - set.nozzleR)
-    const vh = (span / time) * (inward ? -1 : 1)
+    // The solve owns the mouth AND the cant (see `jetSolve`), so the water
+    // starts exactly at the opening the bronze is drawn around.
+    const arc = jetSolve(set)
+    const tau = arc.tau
+    const vh = arc.vh * (inward ? -1 : 1)
     const core = emptyAttributes()
     for (let i = 0; i < set.count; i++) {
       const theta = (i / set.count) * TAU + set.phase
       const outward = new Vector3(Math.cos(theta), 0, Math.sin(theta))
+      const launch = inward ? outward.clone().negate() : outward
+      // The core starts 30 mm INSIDE the mouth ring so the column emerges
+      // from the bronze instead of beginning on its lip with a visible seam.
+      const bury = 0.03
       coherentJet(
         core,
         new Vector3(
-          center.x + outward.x * set.nozzleR,
-          center.y + set.nozzleY,
-          center.z + outward.z * set.nozzleR,
+          center.x + outward.x * arc.mouthRadius - launch.x * Math.cos(arc.cant) * bury,
+          center.y + arc.mouthY - Math.sin(arc.cant) * bury,
+          center.z + outward.z * arc.mouthRadius - launch.z * Math.cos(arc.cant) * bury,
         ),
-        inward ? outward.clone().negate() : outward,
-        { vy, vh: Math.abs(vh), length: 0.55, radius: 0.028 },
+        launch,
+        { vy: arc.vy, vh: arc.vh, length: 0.55 + bury, radius: 0.028 },
       )
       impacts.push({
         x: center.x + Math.cos(theta) * set.landR,
@@ -391,14 +597,14 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
 
     emitters.push({
       name: inward ? 'jets-inward' : 'jets-outward',
-      ringRadius: set.nozzleR,
-      launchY: set.nozzleY,
+      ringRadius: arc.mouthRadius,
+      launchY: arc.mouthY,
       sites: set.count,
       ringPhase: set.phase,
       vRadial: vh,
-      vVertical: vy,
+      vVertical: arc.vy,
       coherentLength: 0.55,
-      flightTime: time,
+      flightTime: arc.time,
       // 46 parcels over a 1.4 s flight: at 2-3 m/s their motion streaks are
       // 8-12 cm and the spacing is 6-9 cm, so an arc reads as a continuous
       // thread near the nozzle and visibly beads apart toward its landing.
@@ -408,13 +614,17 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       scatter: 0.075,
       density: 0.95,
       jitter: 0.12,
+      angularSpread: 0.05,
+      tauMean: tau,
+      wander: 1,
+      landY: WATER_Y,
     })
     splashes.push({
       name: inward ? 'splash-inward' : 'splash-outward',
       radius: set.landR,
       points: set.count,
       ringPhase: set.phase + (inward ? Math.PI : 0),
-      up: [0.9, 2.35],
+      up: [arc.impactSpeed * 0.3, arc.impactSpeed * 0.72],
       out: [0.2, 0.95],
       size: [0.013, 0.042],
       count: inward ? 190 : 110,
@@ -423,12 +633,26 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       y: WATER_Y + 0.01,
       life: 1.4,
     })
+    sources.push({
+      kind: 'points',
+      count: set.count,
+      phase: set.phase,
+      radius: set.landR,
+      span: arc.span,
+      inward,
+      perStep: inward ? 5 : 2.6,
+      dropRadius: 0.082,
+      dropDepth: 0.0066,
+      wander: 1,
+      flightTime: arc.time,
+      spread: 0.08,
+    })
   }
 
   // ── THE CROWN: one vertical column and a bell of eight canted jets. ──────
   {
-    const bell = ballistic(CROWN.bellRise, FINIAL_Y - lowerDishY)
-    const bellVh = CROWN.bellLandR / bell.time
+    const bellTau = dragTau(DROP_D.bell, 3.4)
+    const bell = dragArc(CROWN.bellRise, FINIAL_Y - lowerDishY, CROWN.bellLandR, bellTau)
     const core = emptyAttributes()
     for (let i = 0; i < CROWN.bellCount; i++) {
       const theta = (i / CROWN.bellCount) * TAU + 0.2
@@ -436,20 +660,21 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
         core,
         new Vector3(center.x, center.y + FINIAL_Y, center.z),
         new Vector3(Math.cos(theta), 0, Math.sin(theta)),
-        { vy: bell.vy, vh: bellVh, length: 0.42, radius: 0.02 },
+        { vy: bell.vy, vh: bell.vh, length: 0.42, radius: 0.02 },
       )
     }
-    // The vertical column: no horizontal run, so it is authored directly as a
-    // taper. It is deliberately SHORT-LIVED as coherent water — a real crown
-    // jet gives up well before its ideal apex and becomes a bell of spray.
-    const rise = CROWN.riseY
-    const vy = Math.sqrt(2 * MARS_G * rise)
-    const columnTime = vy / MARS_G
+    // The vertical column. Fine crown spray fights the most drag in the whole
+    // piece — reaching a 2.55 m apex through the air takes a launch speed a
+    // vacuum solve would put at 4.4 m/s and the real one puts near 5.7. It is
+    // deliberately SHORT-LIVED as coherent water: a real crown jet gives up
+    // well before its ideal apex and becomes a bell of spray.
+    const columnTau = dragTau(DROP_D.column, 4.5)
+    const column = dragArc(CROWN.riseY, FINIAL_Y - upperDishY, 0.001, columnTau)
     coherentJet(
       core,
       new Vector3(center.x, center.y + FINIAL_Y, center.z),
       new Vector3(1, 0, 0),
-      { vy, vh: 0.001, length: 0.75, radius: 0.026 },
+      { vy: column.vy, vh: 0.001, length: 0.75, radius: 0.026 },
     )
     const mesh = new Mesh(toGeometry(core), coherentWaterMaterial())
     mesh.name = 'fountain-crown-core'
@@ -461,7 +686,7 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       launchY: FINIAL_Y,
       sites: CROWN.bellCount,
       ringPhase: 0.2,
-      vRadial: bellVh,
+      vRadial: bell.vh,
       vVertical: bell.vy,
       coherentLength: 0.42,
       flightTime: bell.time,
@@ -471,6 +696,10 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       scatter: 0.09,
       density: 0.86,
       jitter: 0.1,
+      angularSpread: 0.08,
+      tauMean: bellTau,
+      wander: 1.3,
+      landY: lowerDishY,
     })
     // The column's own water, thrown up and falling back around the finial.
     emitters.push({
@@ -480,23 +709,27 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
       sites: 9,
       ringPhase: 0,
       vRadial: 0.11,
-      vVertical: vy,
+      vVertical: column.vy,
       coherentLength: 0.75,
-      flightTime: columnTime * 2.15,
+      flightTime: column.time,
       perSite: 26,
       dBreakup: 0.018,
       dFinal: 0.007,
       scatter: 0.16,
       density: 0.7,
       jitter: 0.35,
+      angularSpread: 0.9,
+      tauMean: columnTau,
+      wander: 1.4,
+      landY: upperDishY,
     })
   }
 
   // ── The hanging veil over the basin. ─────────────────────────────────────
   splashes.push({
-    // In 600 Pa of CO₂ a fine droplet's terminal velocity is high but the air
-    // it entrains barely damps, so the veil this fountain throws is thin, tall
-    // and slow rather than a low fog bank.
+    // The finest spray is drag-dominated in the habitat's air: its terminal
+    // fall is under a metre a second, so a slow haze genuinely hangs over the
+    // basin — the veil every big fountain wears just above its water.
     name: 'basin-veil',
     radius: (MAIN_CURTAIN_LAND_R + JETS_INWARD.landR) * 0.5,
     points: 0,
@@ -513,5 +746,5 @@ export function buildFountainStreams(center: Vector3): StreamMeshes {
 
   for (const spec of emitters) meshes.push(dropletMesh(center, spec))
   for (const spec of splashes) meshes.push(splashMesh(center, spec))
-  return { meshes, impacts }
+  return { meshes, impacts, sources }
 }
