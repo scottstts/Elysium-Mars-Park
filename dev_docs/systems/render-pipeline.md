@@ -2,21 +2,23 @@
 
 Single `RenderPipeline` (three r185 name for the post graph) owns the final
 image; `pipeline.outputColorTransform = false` and the one output transform is
-the explicit `renderOutput(exposed, AgX, sRGB)` in the graph. Renderer never
+the explicit `renderOutput(exposed, Neutral, sRGB)` in the graph. Renderer never
 tone-maps (side targets stay linear HDR).
 
 Signal order: scene MRT (color + normal/aoReceiver-alpha, MSAA 4×) → GTAO
-(half-res) → full-res bilateral reconstruction → hdrTransform hook → bloom →
-fixed EV exposure → AgX → 32³ Mars LUT + vignette.
+(half-res R16F six-slice gather → separable bilateral denoise) → full-res joint
+bilateral reconstruction → hdrTransform hook → bloom → fixed EV exposure →
+Neutral → 32³ Mars LUT + vignette.
 
 Choices beyond the code:
 
-- **GTAO reconstruction is copied from SeaPark deliberately** (same three
-  version): r185 GTAO emits raw magic-square noise, no denoise. The bilateral
-  needs all three guards (distance-scaled depth sigma, weak-support fallback
-  to box mean, epsilon-guarded normal renormalization) or thin members strobe
-  at walking speed. The dome lattice makes this defect class fatal here — do
-  not simplify the filter.
+- **GTAO is project-owned, not Three's stock `GTAONode`.** The gather keeps
+  the cosine-weighted Activision integral, but distributes the same 36 depth
+  taps over six slices instead of three, uses non-repeating IGN rotation,
+  writes scalar visibility to R16F, and denoises it with a separable 5-tap
+  depth/normal bilateral before a four-neighbour joint bilateral upsample.
+  Reversed-Z guards, epsilon-safe normalisation, off-viewport rejection and
+  receiver-alpha are part of the contract; do not simplify them independently.
 - **AO receiver mask** rides the normal MRT alpha — and since the
   moving-rectangle fix (2026-08-11) that alpha is also the WRITE AUTHORITY.
   r185 gives non-`output` MRT attachments NO blend state (material blending
@@ -43,10 +45,52 @@ Choices beyond the code:
   boost so scarce vegetation pops (design pillar "green is currency").
 - `compileAsync()` adapter reaches into `RenderPipeline._quadMesh` (guarded,
   throws on upgrade) because r185 lacks a public async compile for it.
-- `?pass=` views: final · nopost · ao · bloom · depth · normal · shafts ·
-  shadows (last two filled by S4 via `pipeline.debugNodes`).
+- `?pass=` views: final · nopost · ao · aoraw · aodenoised · aoradius ·
+  aoshare · aoapplied · bloom · depth · normal · shafts · shadows (last two
+  filled by S4 via `pipeline.debugNodes`). `aoradius` is projected gather
+  radius divided by 16: white means the AO gather is fully competent.
 - Gallery scene (`?view=gallery`) is the standing calibration set: PBR
   sweeps, emissive bloom bar, thin-member AO sentinel, contact boxes.
+
+## AO barcode correction (2026-08-12)
+
+The dark vertical bars visible on broad surfaces when looking toward the sun
+were AO sampling structure, not a material texture, shadow-map cascade, haze,
+or output quantisation. Three r185's stock node combined four properties that
+made the error coherent:
+
+1. `samples = 16` selects only **three angular slices** (six radial steps on
+   each side, 36 depth reads total), so the missing directions form long
+   screen-aligned lobes rather than isotropic noise.
+2. The per-pixel rotation repeats a 5×5 magic-square texture.
+3. The default `RedFormat` target is `R8Unorm`, quantising visibility before
+   reconstruction.
+4. The node exposes the raw gather; the old full-resolution 3×3 fallback could
+   organise that coherent error into bands instead of removing it.
+
+Looking toward the sun exposes the defect because camera-facing surfaces are
+often back-lit: the indirect-share composite gives AO much more authority when
+`N·L` is small. The analytic lattice visibility can reduce the local direct
+term further. This changes contrast, not the spatial frequency, which is why
+the bars follow the screen and shift slightly with camera movement.
+
+`GtaoVisibilityNode` fixes each cause while preserving existing lighting
+ownership. It uses six angular slices × three radial steps × two sides, so the
+raw horizon budget remains 36 depth reads. Stable interleaved-gradient noise
+rotates the slices without a repeating tile. Raw and filtered visibility live
+in filterable `R16F` targets. A separable binomial bilateral removes gather
+noise at half resolution, followed by a four-tap full-resolution joint
+bilateral that preserves geometry edges. There is deliberately no temporal
+history: robots, tram cars, foliage and transparent effects have no velocity
+buffer, so temporal AO would trade the bars for ghosting.
+
+The old fixed 28→70 m retirement was a symptom mask and is gone. Competence is
+now derived from the 0.9 m world radius projected into AO-buffer pixels, so it
+self-adjusts to viewport size, dynamic render scale, FOV, and quality divisor.
+AO reaches full authority at 16 projected pixels and retires below 8. The
+receiver mask, indirect-only share, radius, thickness, power, and distance
+spacing are otherwise unchanged, containing regression risk to AO sampling
+and reconstruction.
 
 ---
 
@@ -152,8 +196,8 @@ white = pure ambient) and `?pass=aoapplied` (the term actually multiplied in).
 `SkySystem`, precisely because the PMREM bake and this reconstruction must
 read one number.
 
-Stock r185 GTAO has no bent-normal output, so the reference's bent-tint stage
-is not implemented. Set: `thickness` 0.35 m (the named halo fix), `scale` 2.0,
+The project GTAO has no bent-normal output, so the reference's bent-tint stage
+is not implemented. Set: `thickness` 0.35 m (the named halo fix), `power` 2.0,
 `distanceExponent` 2.0, `radius` 0.9 m (up from 0.3). Radius and exponent are
 a pair: the reference image's grounding comes from 0.3–0.8 m features — kerb
 noses, planter walls, bench legs, building bases — and a 0.3 m gather never
@@ -218,9 +262,9 @@ program in the park.
 
 `?pass=aoshare` · `?pass=aoapplied` (the AO split, read in that order when
 contact grounding looks wrong) and `?pass=nograde` (tone-mapped, pre-LUT — the
-honest baseline for any palette argument). These are read straight off the
-query string in `pipeline.ts` rather than through `core/debug.ts`'s `PassName`
-union; promoting them there is a pending request.
+honest baseline for any palette argument). Raw and filtered AO diagnostics are
+also available as `?pass=aoraw`, `?pass=aodenoised`, and `?pass=aoradius`; all
+are registered in `core/debug.ts`.
 
 ## Verified (2026-08-10, tier 2, 2176×1224, ~4.5 M tris, 766 draws)
 

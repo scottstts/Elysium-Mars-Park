@@ -179,6 +179,17 @@
   an unchanged signature, so all 6 placements picked it up with no edits.
 
 ## Overhaul W1-light (lighting/grade/AO) — lessons
+- **Screen-space “barcode” bars were stock GTAO structure, revealed by the
+  sun-facing composite.** r185's nominal 16-sample mode is actually three
+  angular slices × six steps × two sides (36 depth taps), rotated by a repeating
+  5×5 texture and quantised to R8 before any denoise. Back-lit surfaces give AO
+  more indirect-light authority, making that pattern look sun-dependent. The
+  permanent fix keeps 36 gather taps but redistributes them over six slices,
+  uses non-repeating IGN, R16F visibility, separable half-res depth/normal
+  denoise and four-tap joint upsampling (`render/gtaoVisibility.ts`). Do not add
+  temporal accumulation without motion vectors; moving park systems would
+  ghost. Diagnose in order with `?pass=aoraw`, `aodenoised`, `ao`, `aoradius`,
+  then `aoshare`/`aoapplied`.
 - **AgX was a first-order cause of the "flat tan wash".** On a palette that
   is already one hue family, an operator that desaturates the whole mid-range
   collapses rust paving, ochre regolith, warm steel and butterscotch sky onto

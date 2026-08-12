@@ -12,12 +12,11 @@ import type { Node, PassNode } from 'three/webgpu'
 import {
   Fn,
   If,
-  dFdx,
-  dFdy,
   dot,
   exp,
   exp2,
   float,
+  fract,
   getViewPosition,
   inverseSqrt,
   luminance,
@@ -36,13 +35,13 @@ import {
   vec3,
   vec4,
 } from 'three/tsl'
-import { ao } from 'three/addons/tsl/display/GTAONode.js'
 import { bloom } from 'three/addons/tsl/display/BloomNode.js'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import { latticeSunVisibility } from '../dome/latticeField'
 import { marsAmbientIrradiance } from '../sky/skyRadiance'
 import { ENVIRONMENT_INTENSITY, SUN_LIGHT_INTENSITY, sunColor, sunDirectionUniform } from '../sky/sun'
+import { gtaoVisibility, type GtaoVisibilityNode } from './gtaoVisibility'
 import { gradeParams, marsGrade } from './grade'
 import { recommendedPixelRatio } from './renderer'
 
@@ -62,7 +61,7 @@ const AO_THICKNESS = 0.35
 /** Visibility power: >1 deepens creases without touching open surfaces. */
 const AO_POWER = 2.0
 /**
- * Sample spacing bias. Three spaces taps as `((j+1)/steps)^distanceExponent`,
+ * Sample spacing bias. The gather spaces taps as `((j+1)/steps)^distanceExponent`,
  * so >1 crowds them toward the centre: with the wide 0.9 m radius above we
  * still get a tight contact line at a kerb nose AND reach the far wall of a
  * planter. Radius alone would trade one for the other.
@@ -106,6 +105,7 @@ export class RenderPipelineSystem implements GameSystem {
   private appliedScale = 1
   private basePixelRatio = recommendedPixelRatio()
   private context: GameContext | null = null
+  private gtaoNode: GtaoVisibilityNode | null = null
 
   /**
    * The scene pass — exposed so loading-time warmup precompiles materials
@@ -178,28 +178,26 @@ export class RenderPipelineSystem implements GameSystem {
     const sceneNormal = scenePass.getTextureNode('normal')
     const sceneDepth = scenePass.getTextureNode('depth')
 
-    const aoNode = ao(sceneDepth, sceneNormal, camera)
+    const projectionInverse = uniform(camera.projectionMatrixInverse)
+    const cameraWorld = uniform(camera.matrixWorld)
+    const aoNode = gtaoVisibility(sceneDepth, sceneNormal, camera)
     aoNode.resolutionScale = 1 / ctx.quality.params.aoDivisor
     aoNode.radius.value = AO_WORLD_RADIUS
     aoNode.thickness.value = AO_THICKNESS
-    aoNode.scale.value = AO_POWER
+    aoNode.power.value = AO_POWER
     aoNode.distanceExponent.value = AO_DISTANCE_EXPONENT
     const aoTexture = aoNode.getTextureNode()
+    const rawAoTexture = aoNode.getRawTextureNode()
     const aoResolution = aoNode.resolution as unknown as Node<'vec2'>
+    this.gtaoNode = aoNode
 
-    // Three r185 GTAO emits raw half-resolution magic-square noise with no
-    // denoise. Reconstruct at full resolution with an eight-neighbour
-    // bilateral: depth similarity (distance-scaled tolerance) rejects
-    // fore/background bleeding, normal similarity preserves edges, and weak
-    // bilateral support falls back to the nine-tap mean — never the raw
-    // centre sample, which strobes on thin members (dome lattice!) at
-    // walking speed. MSAA-resolved normals can cancel to zero length at
-    // silhouettes; epsilon-guarded inverse sqrt avoids WGSL fast-math NaN.
-    // r185 WebGPU renders REVERSED-Z: the cleared background is depth 0
-    // (sky/glass write no depth). Guard BOTH ends everywhere.
-    const projectionInverse = uniform(camera.projectionMatrixInverse)
-    const cameraWorld = uniform(camera.matrixWorld)
-    const filteredAo = Fn(() => {
+    // The custom node has already removed gather noise at half resolution.
+    // Reconstruct that scalar visibility at full resolution with the four
+    // actual bilinear neighbours, then replace the hardware bilinear weights
+    // with depth/normal-aware weights. This avoids both 2:1 resample beating
+    // and visibility leaking across silhouettes while keeping the upsample
+    // bounded to four reads. r185 WebGPU is reversed-Z: depth 0 is sky.
+    const reconstructedAo = Fn(() => {
       const centerUv = uv()
       const centerDepth = sceneDepth.sample(centerUv).r
       const result = float(1).toVar()
@@ -207,88 +205,78 @@ export class RenderPipelineSystem implements GameSystem {
         const centerView = getViewPosition(centerUv, centerDepth, projectionInverse)
         const centerRaw = sceneNormal.sample(centerUv).rgb
         const centerNormal = centerRaw.mul(inverseSqrt(max(dot(centerRaw, centerRaw), 1e-8)))
-        // EVERY read of the half-res AO buffer snaps to that buffer's own
-        // texel centres. The AO target is renderer-size × ½ with its own
-        // rounding, so full-res UVs drift a fractional texel against it and
-        // the 2:1 resample BEATS — coherent full-width horizontal stripes
-        // ("barcode" bands, owner report from the Freedom Tower's aerial
-        // vantages; provable in ?pass=ao). Texel-centred reads make the row
-        // beat impossible by construction at any viewport size, which is
-        // the permanent fix — the fades below are only the retirement of a
-        // sub-pixel contact effect, not the defence.
-        const aoTexelUv = (sourceUv: Node<'vec2'>) =>
-          (sourceUv as unknown as ReturnType<typeof vec2>)
-            .mul(aoResolution)
-            .floor()
-            .add(0.5)
-            .div(aoResolution)
-        const centerVisibility = aoTexture.sample(aoTexelUv(centerUv)).r
-        const texel = vec2(1).div(aoResolution)
-        const depthSigma = max(float(0.08), centerView.z.abs().mul(0.04))
-        const weightedSum = centerVisibility.toVar()
-        const weightSum = float(1).toVar()
-        const boxSum = centerVisibility.toVar()
-        const offsets = [
-          [-1, -1], [0, -1], [1, -1],
-          [-1, 0], [1, 0],
-          [-1, 1], [0, 1], [1, 1],
-        ] as const
+        const aoPixel = centerUv.mul(aoResolution).sub(0.5)
+        const basePixel = aoPixel.floor()
+        const subpixel = fract(aoPixel)
+        const weightedSum = float(0).toVar()
+        const weightSum = float(0).toVar()
 
-        for (const [x, y] of offsets) {
-          const sampleUv = aoTexelUv(centerUv).add(texel.mul(vec2(x, y)))
-          const sampleDepth = sceneDepth.sample(sampleUv).r
-          const sampleView = getViewPosition(sampleUv, sampleDepth, projectionInverse)
-          const sampleRaw = sceneNormal.sample(sampleUv).rgb
-          const sampleNormal = sampleRaw.mul(inverseSqrt(max(dot(sampleRaw, sampleRaw), 1e-8)))
-          const visibility = aoTexture.sample(aoTexelUv(sampleUv)).r
-          const depthWeight = exp(sampleView.z.sub(centerView.z).abs().div(depthSigma).negate())
-          const normalWeight = pow(max(dot(centerNormal, sampleNormal), 0), 12)
-          const spatialWeight = x !== 0 && y !== 0 ? 0.70710678 : 1
-          const weight = depthWeight.mul(normalWeight).mul(spatialWeight)
-          weightedSum.addAssign(visibility.mul(weight))
-          weightSum.addAssign(weight)
-          boxSum.addAssign(visibility)
+        for (const y of [0, 1] as const) {
+          for (const x of [0, 1] as const) {
+            const sampleUv = basePixel
+              .add(vec2(x, y))
+              .add(0.5)
+              .div(aoResolution)
+              .clamp(
+                vec2(0.5).div(aoResolution),
+                vec2(1).sub(vec2(0.5).div(aoResolution)),
+              )
+            const sampleDepth = sceneDepth.sample(sampleUv).r
+            const sampleValid = sampleDepth
+              .greaterThan(1e-7)
+              .and(sampleDepth.lessThan(0.999999))
+            const sampleView = getViewPosition(
+              sampleUv,
+              sampleDepth.clamp(1e-7, 0.999999),
+              projectionInverse,
+            )
+            const sampleRaw = sceneNormal.sample(sampleUv).rgb
+            const sampleNormal = sampleRaw.mul(
+              inverseSqrt(max(dot(sampleRaw, sampleRaw), 1e-8)),
+            )
+            const visibility = aoTexture.sample(sampleUv).r
+            const xWeight = x === 0 ? float(1).sub(subpixel.x) : subpixel.x
+            const yWeight = y === 0 ? float(1).sub(subpixel.y) : subpixel.y
+            const bilinearWeight = xWeight.mul(yWeight)
+            const depthSigma = max(float(0.04), centerView.z.abs().mul(0.002))
+            const depthWeight = exp(
+              sampleView.z.sub(centerView.z).abs().div(depthSigma).negate(),
+            )
+            const normalWeight = pow(max(dot(centerNormal, sampleNormal), 0), 16)
+            const validWeight = sampleValid.select(float(1), float(0))
+            const weight = bilinearWeight
+              .mul(depthWeight)
+              .mul(normalWeight)
+              .mul(validWeight)
+            weightedSum.addAssign(visibility.mul(weight))
+            weightSum.addAssign(weight)
+          }
         }
 
-        const support = smoothstep(0.35, 1.6, weightSum.sub(1))
-        result.assign(mix(boxSum.div(9), weightedSum.div(weightSum), support))
+        const centerAoUv = centerUv
+          .mul(aoResolution)
+          .floor()
+          .add(0.5)
+          .div(aoResolution)
+        result.assign(
+          weightSum
+            .greaterThan(0.0001)
+            .select(weightedSum.div(weightSum), aoTexture.sample(centerAoUv).r),
+        )
       })
       return result
     })()
 
-    // AO is a contact effect: fade it out where the half-res gather texel
-    // approaches the world radius (grazing regolith at range would otherwise
-    // quantize into false-occlusion rows) and beyond hero distance entirely.
-    // Under r185's reversed-z, getViewZNode() mislinearizes at range — every
-    // distance consumer derives from the RECONSTRUCTED view position instead
-    // (getViewPosition uses the true projection inverse, convention-proof).
+    // Retire AO only when its world radius no longer spans enough AO texels
+    // to resolve a horizon. The projected-radius criterion adapts to FOV,
+    // viewport resolution, render scale, and AO divisor; it replaces the old
+    // fixed 28→70 m workaround and does not hide a near/mid-field defect.
     const footprintDepth = sceneDepth.sample(uv()).r.clamp(1e-7, 0.999999)
     const footprintView = getViewPosition(uv(), footprintDepth, projectionInverse)
     const viewZNode = footprintView.z
-    const aoDistance = (viewZNode as unknown as ReturnType<typeof float>).negate()
-    const aoGatherFootprint = max(dFdx(footprintView).length(), dFdy(footprintView).length()).mul(2.0)
-    // Competence fade (the GTAO skill's failure condition: "AO remains
-    // strong at distances where its world radius is subpixel"). The horizon
-    // march needs the world radius to span ~8 gather texels to integrate
-    // anything; below that it emits sampling garbage that the bilateral
-    // organizes into full-width iso-depth ROWS (the "barcode" bands, owner
-    // report). Fade out between radius/8 and radius/3.3 of footprint — a
-    // ratio, so it self-adapts to any resolution, FOV, zoom or divisor
-    // instead of pinning the artifact to one window. The old end point at
-    // 1.0 × radius completed EIGHT TIMES past the competence limit.
-    const aoFootprintFade = smoothstep(AO_WORLD_RADIUS * 0.125, AO_WORLD_RADIUS * 0.3, aoGatherFootprint)
-    // 28→70, not the old 60→160: the half-res gather quantizes into
-    // full-width FALSE-OCCLUSION ROWS ("barcode" streaks, owner report from
-    // the Freedom Tower gallery) on open regolith seen FACE-ON from height —
-    // a regime the footprint fade cannot catch, because looking down keeps
-    // the pixel footprint small at ranges where the grazing ground-level
-    // view has long since faded. At 0.9 m radius the AO is a sub-pixel
-    // contact effect past ~50 m from ANY angle, so retiring it by 70 m
-    // costs nothing the eye can resolve and removes the whole banding
-    // window for aerial views.
-    const aoDistanceFade = smoothstep(28.0, 70.0, aoDistance)
-    const aoReliabilityFade = max(aoDistanceFade, aoFootprintFade)
-    const distanceFilteredAo = mix(filteredAo, float(1), aoReliabilityFade)
+    const projectedAoRadius = aoNode.projectedRadiusPixels(viewZNode)
+    const aoCompetence = smoothstep(8, 16, projectedAoRadius)
+    const distanceFilteredAo = mix(float(1), reconstructedAo, aoCompetence)
     const aoReceiver = sceneNormal.a.clamp(0, 1)
     const aoAmount = mix(float(1), distanceFilteredAo, aoReceiver)
 
@@ -361,18 +349,30 @@ export class RenderPipelineSystem implements GameSystem {
     const mapped = renderOutput(exposed, NeutralToneMapping, SRGBColorSpace)
     const graded = marsGrade(mapped)
 
-    // Diagnostic taps. `flags.pass` carries the shipped PassName union;
-    // `albedo`/`indirect`/`direct`/`nograde` are pipeline-local isolation
-    // views for the AO reconstruction and the grade, read straight off the
-    // query so they need no change to the shared PassName type. (A request
-    // to promote them into core/debug.ts is in the W1-light report.)
+    // Diagnostic taps. AO's raw gather, denoised half-res visibility,
+    // full-res reconstruction, projected-radius competence, indirect share,
+    // and applied term are all independently isolatable through PassName.
     const passName =
       new URLSearchParams(window.location.search).get('pass') ?? (flags.pass as string)
+    const aoDebugUv = uv()
+      .mul(aoResolution)
+      .floor()
+      .add(0.5)
+      .div(aoResolution)
 
     let outputNode
     switch (passName) {
       case 'ao':
-        outputNode = vec4(vec3(filteredAo), 1.0)
+        outputNode = vec4(vec3(reconstructedAo), 1.0)
+        break
+      case 'aoraw':
+        outputNode = vec4(vec3(rawAoTexture.sample(aoDebugUv).r), 1.0)
+        break
+      case 'aodenoised':
+        outputNode = vec4(vec3(aoTexture.sample(aoDebugUv).r), 1.0)
+        break
+      case 'aoradius':
+        outputNode = vec4(vec3(projectedAoRadius.div(16).clamp(0, 1)), 1.0)
         break
       case 'bloom':
         outputNode = renderOutput(bloomNode, NeutralToneMapping, SRGBColorSpace)
@@ -476,6 +476,8 @@ export class RenderPipelineSystem implements GameSystem {
   }
 
   dispose(): void {
+    this.gtaoNode?.dispose()
+    this.gtaoNode = null
     this.pipeline?.dispose()
     this.pipeline = null
     this.context = null
