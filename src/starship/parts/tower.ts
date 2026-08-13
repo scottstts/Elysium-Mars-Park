@@ -263,7 +263,7 @@ function build_crown(mb: MB, m_col: number, m_beam: number, m_diag: number, m_gr
           { up: [0, 1, 0], mat: m_dark, smooth: false });
 }
 
-function chopstick(mb: MB, pivot: Pt3, yaw_deg: number, len: number, m_col: number, m_beam: number, m_diag: number, m_grate: number, m_dark: number): void {
+export function chopstick(mb: MB, pivot: Pt3, yaw_deg: number, len: number, m_col: number, m_beam: number, m_diag: number, m_grate: number, m_dark: number): void {
   const d_root = TW.ARM_D_ROOT, d_tip = TW.ARM_D_TIP, w_root = TW.ARM_W_ROOT, w_tip = TW.ARM_W_TIP;
   const o = V(pivot);
   const a = radians(yaw_deg);
@@ -327,7 +327,7 @@ function chopstick(mb: MB, pivot: Pt3, yaw_deg: number, len: number, m_col: numb
         { up: u, mat: m_col, smooth: false });
 }
 
-function carriage(mb: MB, z: number, m_col: number, m_beam: number, m_diag: number, _m_grate: number): void {
+export function carriage(mb: MB, z: number, m_col: number, m_beam: number, m_diag: number, _m_grate: number): void {
   const xf = TW.HW, y0 = 6.30, d = 5.40;
   for (const y of [y0, -y0])
     prism(mb, [xf + 0.4, y, z - d * 0.75], [xf + 0.4, y, z + d * 0.75], sec_box(1.30, 1.40),

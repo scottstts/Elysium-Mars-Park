@@ -2,7 +2,11 @@
 
 A full-scale stack on its tower and launch mount, standing on graded ground
 west of the arrival tunnel, ~215 m out from the park centre. 147 m tall, a
-68.6 × 62.6 m concrete platform, 352,746 triangles in 17 parts.
+68.6 × 62.6 m concrete platform, 352,746 triangles in 19 parts.
+
+**It flies** — see §8, added 2026-08-13. The demo's 17 objects became 19 when
+the fused chopsticks mesh was split so the catch arms can retract; the triangle
+count is unchanged and parity is unaffected.
 
 Ported from `ref_images/starship.html` under a hard requirement: **100 %
 geometry and material parity**. Everything below is what that requirement, and
@@ -14,6 +18,10 @@ the site it landed on, forced.
 - `tools/starship-gen.mjs` — emits the port
 - `tools/starship-parity.mjs` — proves it is the demo's mesh
 - `tools/starship-site-audit.mjs` — proves the site works
+- `tools/starship-split-audit.mjs` — proves splitting the chopsticks is free
+- `tools/starship-clearance-audit.mjs` — proves the retraction clears
+
+Run all four after any edit to the generator or the retraction angles.
 
 ---
 
@@ -300,7 +308,321 @@ the defect; overlapping on one is.
 
 ---
 
-## 8. Open items
+## 8. IT FLIES (2026-08-13)
+
+A ~3½ minute loop that never stops. `starshipFlight.ts` owns the profile,
+`starshipRig.ts` owns what moves, `starshipSystem.ts` owns the wiring.
+
+```
+parked  30 s   the owner's dwell
+prep    11 s   the QD arm folds. THE CATCH ARMS DO NOT MOVE
+ignition 2.6 s spool against the hold-downs, arms still closed
+ascent  63 s   integrated thrust to 10.4 km, 4.0 km downrange SE
+               — arms spread as it climbs out through them, T+1.5 s to T+4 s
+away    30 s   the owner's gap
+entry   36 s   free fall from 10.4 km, 32° off vertical, aimed at the pad
+burn    20 s   13 engines, ZEM/ZEV, then 3 for the last 60 m
+               — arms close back around it over the last 36 m
+touchdown 14 s engines out, the QD arm re-mates → parked
+```
+
+Owner's calls, for the record: the stack flies **whole** (no hot-stage
+separation), the gravity turn goes **south-east**, and the whole thing is
+**silent** — nothing was added to the audio engine.
+
+### 8.1 Integrated, not keyframed — and the guidance is real
+
+Position falls out of `a = T/m·axis − g` at the fixed 60 Hz step. Only throttle
+and attitude are authored. A launch read off a curve moves like an elevator;
+the tell is that its speed at any height is whatever the curve says instead of
+whatever the last few seconds of thrust earned.
+
+Ascent is a gravity turn (vertical to 220 m, then `pitch^0.7` to 42°). TWR runs
+2.2 → 3.4 as propellant burns off. **2.2, not the ~1.5 a Starship leaves Earth
+with**: in a third of the gravity 1.5 gives 1.9 m/s² and the stack crawls. 2.2
+puts the initial 4.5 m/s² and the ~7 s tower-clear where a real launch's are,
+which is the cadence the eye recognises.
+
+The landing is **ZEM/ZEV terminal guidance**. With `r_f = 0`, `v_f = 0` the
+standard law collapses to a closed form worth writing down, because getting it
+wrong is invisible until it isn't:
+
+```
+a_thrust = −6·r/t_go²  −  4·v/t_go  +  g_up
+```
+
+Two things about it are load-bearing and were both got wrong first time:
+
+- **`t_go` is recomputed every step** as `2z / descentRate`. Fixing it at
+  ignition and counting down is the classic way to detonate this law — the
+  `6/t²` gain diverges while the vehicle is still hundreds of metres up. The
+  first build flew the stack to **344 km**.
+- **Thrust is clamped** (20 m/s², ~5.4 g_mars) and the axis is never allowed
+  below 8.6° above horizontal. Unbounded, the law will ask for any acceleration
+  the geometry implies; asked to null 3.2 km of crossrange in 17 s it inverted
+  the vehicle and demanded 7 700 g.
+
+That crossrange was the actual bug. The entry point is now **back-solved**
+(`entryGroundRange`) from the closed-form fall so the free fall carries the
+vehicle most of the way home and the guidance is only ever trimming — the
+regime the law is well behaved in. Put the entry anywhere else and you are
+asking a booster to do something a booster cannot do.
+
+Below 60 m ZEM/ZEV hands over to a constant-deceleration settle. That is not a
+shape picked to look nice: feed `t_go = √(2z/a)` back into the law and it
+returns `a + g` exactly, so the settle **is** ZEM/ZEV's own profile, solved
+instead of integrated. Same deceleration, same throttle, no step at handover —
+and contact is exact rather than nearly. Residual at touchdown is `(0, 0, 0)`.
+
+Three continuity traps found by simulating the profile headlessly, all of which
+would have shipped:
+
+- The settle's **attitude** snapped from the burn's ~13° lean to vertical in one
+  frame. On a 147 m vehicle that throws the nose 25 m. Now interpolated to
+  vertical over the remaining height — which is also what a booster does.
+- The settle's **crossrange** was nulled on a time constant, eating ~20 m in a
+  second and reading as a sidestep. Now walked out in proportion to remaining
+  height, so it reaches zero exactly when the altitude does.
+- The **re-entry is a teleport**, so it happens at `FADE_END_ALT` — the exact
+  altitude the ascent vanished at, where visibility is already 0. There is no
+  frame in which the vehicle appears.
+
+No drag, and that is physics rather than a shortcut: at the 292 m/s peak the
+Mars column gives ~30 kN against a vehicle in the 10⁶ kg class, four orders of
+magnitude under gravity.
+
+### 8.2 The frame is ENU, for free
+
+The demo's Blender group sits at yaw 0, so it is already **+X east, +Y north,
++Z up**. Every flight calculation happens there and nothing in it knows about
+the site transform. World mapping is one line: `(bx, by, bz) → (site.x + bx,
+site.y + bz, site.z − by)`.
+
+The vehicle turns about its **engine exit plane**, not the assembly datum
+(which is the tower's, 5.36 m away in plan and on the ground). Two nested
+groups do it and stay exactly identity when parked. That point is also where
+the plume attaches and the one place the guidance must be exact.
+
+**Nothing is ever baked into vertices.** Four of the twenty materials read
+`positionLocal` as Blender's Texture Coordinate > Object; animating a parent
+leaves geometry coordinates alone, while baking motion in would slide the noise
+across the tower steel and engine metal every frame.
+
+### 8.3 The chopsticks had to be split, and the split is free
+
+The demo fuses the carriage and both catch arms into one `Tower_Chopsticks`
+mesh, parked closed with the pads under the ship's forward flaps. **Measured,
+the vehicle's swept silhouette passes 44.7 m of itself through each arm** — the
+grid fins stand directly beneath them. Nothing can launch through that.
+
+`MB.add_v` **never welds**: every `prism()`/`lathe()` appends a fresh vertex
+island, so the carriage and the arms share no vertex, no edge and no smoothing
+group even fused. Rebuilding them into three MBs therefore cannot change a
+normal — `buildGeometry`'s edge map is keyed on indices that were never shared,
+and its duplicate-poly pass can only fire within one primitive.
+
+So the generator gained exactly **two `export` patches** (patch kind 1, already
+sanctioned) on `carriage()` and `chopstick()`, and `starshipBuild.ts` — which
+is hand-written, not generated — swaps the fused object for three. **The fused
+object is still built and dropped**, one MB of waste on a worker thread, so
+`tools/starship-parity.mjs` goes on comparing the demo's own `Tower_Chopsticks`
+vertex for vertex. `tools/starship-split-audit.mjs` proves the three meshes are
+that mesh, triangle for triangle, bucketed by material.
+
+### 8.4 Retraction angles are measured, not reasoned
+
+`tools/starship-clearance-audit.mjs`. The test that matters is exact, and
+setting it up correctly is the whole trick: **the vehicle leaves vertically and
+does not roll**, so it sweeps its own plan silhouette extruded upward — not a
+disc of its maximum radius. Hand arithmetic using a disc gives 10.75 m (the
+ship's flaps) where the real footprint is a 4.5 m hull with four flaps and four
+fins at fixed azimuths, and condemns members nothing passes near. The audit
+rasterises the vehicle into a plan grid holding the **lowest geometry per
+cell**; a member is fouled exactly when something stands over its cell at or
+below its height.
+
+| | measured |
+|---|---|
+| catch arms parked | swept by 44.7 m at (−2.2, ±5.7, 130.2) |
+| catch arms +25° | nothing on the vehicle stands over them at all |
+| QD arm parked | **never swept** — nothing over it, ever |
+| arm hinge in tower/carriage at rest | 1.27 m³ (the demo's own construction) |
+| added by +25° | 0.22 m³ (0.54 at 30°, 0.75 at 34°) |
+| QD fold 55° | +0.32 m³; yawing it aside 60° instead costs 1.96 m³ |
+
+Two consequences worth keeping:
+
+- **25°, not more.** Past the measured floor, opening buys nothing and costs
+  tower.
+- **The QD arm retracts for honesty alone.** It could legally stay put; a mated
+  umbilical on a launching rocket is simply wrong. That makes its cost pure,
+  which is what picks the axis: its root sits 0.5 m east of the tower face with
+  a 3.9 m section, so *every* retraction drives some hinge into the face rails.
+  Down is six times cheaper than aside, and 55° reads as retracted without the
+  extra intersection 80° would buy nothing with.
+
+### 8.4b The arms are driven by ALTITUDE, and that is what makes it provable
+
+Owner's note, and it is how the real pad works: the chopsticks are still around
+the vehicle at ignition and **spread as it rises through them**; on the way in
+they **close back around it in the last moments before contact**. They are never
+opened during a hold.
+
+So `armOpen = smoothstep(0, ARM_OPEN_ALTITUDE, altitude)` — one function, every
+phase, both directions. Three things fall out:
+
+- **The descent cannot drift from the ascent**, because it is not a second
+  schedule. It is the same one read backwards. Nothing is tuned twice.
+- **Parked is exactly 0**, so they are mated at ignition with no special case.
+- **Clearance becomes provable.** Because the angle depends only on altitude,
+  "do they ever touch?" is a question about a one-parameter family of poses
+  rather than about timing, and the audit can simply walk it.
+
+The walk is the part worth having. It is a solid-vs-solid voxel test at every
+height — the swept-silhouette test in §8.4 cannot answer this, because it asks
+whether anything EVER passes over a member, which for a member that moves out
+of the way is the wrong question.
+
+| | measured |
+|---|---|
+| window a **never-moving** arm is ploughed through | ascent 20.5 → 44.5 m |
+| what does the ploughing | grid fins, then chines |
+| schedule clean up to | `ARM_OPEN_ALTITUDE` 44 m |
+| first failing value | 46 m — fouls at 24–25 m of ascent, arms half spread |
+| chosen | **36 m** — 28 % margin, full spread ~4 s after liftoff |
+
+Contact at ascent 0 is excluded and is not a defect: in the parked pose the
+catch pads are **seated on the ship's forward flap undersides**, ~0.2 m³ of
+it — that is the demo's own mated geometry, and the vehicle is off the pads
+within the first half metre of ascent.
+
+This is a real constraint, not a formality: at the first tried value (60 m) the
+fins arrived while the arms were 12.5° open and put 0.42 m³ of truss through
+the vehicle.
+
+### 8.5 What the shadow cost
+
+**The vehicle can no longer be in the cached static bundle.** That bundle is
+sealed during the loading frame and immutable after, so a mesh that later moves
+leaves its shadow welded to the pad for the session. The eleven vehicle parts
+go to `DYNAMIC_SHADOW_LAYER`.
+
+That creates the second problem: the dynamic caster maps reached 90 m around
+the camera, and the pad is 93–340 m away with a light-space reach of ~298 m at
+27°. Without more, the tower would go on printing its 287 m shadow across the
+regolith while the 147 m rocket beside it printed nothing.
+
+So `skySystem` gained a **third dynamic caster rung at 440 m** — the static
+L4's number, chosen there against the same measured 298 m worst case. Cost is
+one more continuously refreshed map: the stack's 353 k triangles while it is
+low (frustum culling drops it once it climbs out of the box), plus the robots
+and the tram, which were already paying for two. Texel is 0.43 m at tier 0.
+Soft — but a soft 147 m streak on regolith reads as penumbra, and the
+alternative is no streak.
+
+**This rung is the whole revert if the frame budget says no**, exactly as
+`receiveShadow` on the valley mesh is for §6.
+
+### 8.6 The plume, and where it sits on the ladder
+
+`starshipPlume.ts`. A methalox plume is **not orange** — the orange in a launch
+photograph is recirculated pad debris and afterburning. Clean CH₄/O₂ is a
+blue-violet Mach-shocked core, and on Mars the nozzle is grossly
+**under-expanded** (exit pressure thousands of times ambient), so the flow
+blooms the moment it leaves the bell and keeps blooming as the vehicle climbs.
+Short white throat, diamond-shocked violet barrel, huge soft flare, orange only
+where it belongs — the cool entrained skirt. The owner asked for
+blue/purple/orange ionised air; this is that, with the orange put physically.
+
+**IT IS NOT A MESH, and the first version's mistake is worth keeping written
+down.** That build was three nested additive lathe shells, and it read as
+exactly what it was — a solid cone bolted to the tail (owner report). The
+reasoning behind it was sound and still wrong: a single shell cannot be shaded
+by radial position, so nesting shells was the cheap way to get brightness
+peaking on the axis. But what makes a plume look like gas is not its radial
+profile. It is that its edge is made of separate parcels moving at different
+speeds and dying at different distances — **a plume has no silhouette**, and
+any mesh has one.
+
+So it is a stream of ~360 additive camera-facing parcels flowing down the axis,
+one instanced draw, all placement in the vertex stage. Parcels grow as they mix
+outward, which is the single strongest cue that this is gas expanding rather
+than a shape being drawn.
+
+That also disposes of the reason the mesh existed in the first place. A cone
+survives being viewed along its own axis where an axis-aligned ribbon
+degenerates to a line — and from 215 m, most of an ascent is spent looking
+straight up the axis. Camera-facing parcels have no preferred direction, so the
+problem never arises.
+
+**The diamonds are stationary and the gas is not.** Shock cells stand still in
+space while flow passes through them, so the banding is keyed to axial distance
+and parcels brighten as they cross a node. Keying it to parcel age instead
+makes the whole plume strobe.
+
+HDR placement against `world/lightFixtures.ts`: bloom threshold 1.0, brightest
+authored fixture 5.0, sun disc 1800. The core sits at **80** — a rocket exhaust
+belongs between the lamps and the sun, not near the lamps. Exposure is authored
+and fixed, so nothing else in the frame is crushed when it lights.
+
+The engine count drives the root width, which is why the exhaust visibly steps
+down twice on the way in: **33 → 13 → 3**, Super Heavy's own sequence.
+
+One **real light** (`starship-plume`, 1 of 8) rides the engine plane. A plume
+that does not light the steel it is roaring past reads as a decal. It is
+registered at boot and driven to zero when cold — the rig's rule is that a
+Light's `visible` is never toggled and none are added after boot, because
+either rebuilds every lit program in the park.
+
+### 8.7 The pad blast
+
+`starshipPadBlast.ts`. 33 Raptors into a mount with a 4.86 m throat, over
+graded regolith. Two things happen, and both are visible from the park: a
+radial **sheet** that in 600 Pa outruns anything on Earth and crosses the 68 m
+slab in a couple of seconds, and a **column** that lifts off the ring and
+hangs — Mars dust is microns, with a tenth of the gravity and no rain.
+
+It emits at the **raft**, not the deck: the vehicle stands 19 m up on the table
+and the flow falls through the hole before it turns, so the cloud is seen
+boiling out from *under* the table. Emitting from a point would put its origin
+inside the launch table.
+
+One draw of 900 instanced quads with **no CPU-side particle state** — every
+instance derives its position from `instanceIndex`, a hash and two uniforms.
+The pad is 215 m away and usually off screen; a per-frame loop over a thousand
+particles would be paid whether or not anyone was looking.
+
+Emission strength is **held and bled off over 26 s**, not tracked live.
+`padBlast` is what the engines are doing to the pad and it stops when they do;
+the cloud they already threw does not. Multiplying the particles by the live
+value snapped a 60 m dust column out of existence at engine cut.
+
+`markParticle` is not optional here — a camera-facing quad rasterises as its
+full rectangle in any depth or shadow pass, and a thousand of them under a
+shadow-casting sun paint a moving grey slab across the valley. That is the
+project's own documented defect class, from the greenhouse spray.
+
+### 8.8 Why the vehicle cuts rather than fades
+
+Only the **meshes** cut, at `visibility ≤ 0.02`; the plume is a sibling under
+the same flight group and goes on fading smoothly after the hull is gone —
+which is what a real launch looks like from 10 km, where the flame is the last
+thing you lose. By then the vehicle is a ~1 px wide sliver at ~88 % haze
+extinction, so the cut lands where nothing can read it.
+
+Fading the meshes instead would mean cloning the shared 20-material array:
+`black`, `dark_metal` and `steel_dirty` are used by the tower and the mount as
+well, so there is no per-mesh opacity available without a second set of
+compiles and a transparent-pass sort for 353 k triangles.
+
+Fade window 6.8 → 10.4 km, and `PITCH_MAX_DEG` is **42, not 52**, for the same
+reason: at 52° the stack ran 6.3 km downrange and its slant range reached
+13.2 km — inside the 14 km far plane by less than the length of the vehicle.
+42° holds the worst case near 11.3 km from anywhere on the park floor.
+
+---
+
+## 9. Open items
 
 - **The WGSL is unverified on device.** `wgsl()`/`wgslFn()` compile only at
   render time and nothing here can be checked headlessly. Same three version as
@@ -311,15 +633,19 @@ the defect; overlapping on one is.
   `DoubleSide` materials go into the shadow map, and three renders DoubleSide
   casters from both faces. `normalBias` is scaled per level and should hold, but
   the TPS shell and the hot stage are thin and were never tested as casters.
-- **Static-bundle refresh cost.** All 17 parts join the cached shadow bundle,
-  which is recorded with `frustumCulled = false`, so a level recentre runs the
-  vertex stage over the stack's 1.06 M vertices whether it is in that level's
-  box or not — roughly doubling the bundle's vertex cost, at a budget of one
-  level per frame. If recentre hitches ever show up, the lever is a decimated
-  stand-in on `STATIC_SHADOW_PROXY_LAYER` (`procgen/blenderkit/decimate.ts`
-  already has the cluster decimator) — at the price of a second vertex buffer
-  and a slightly different self-shadow silhouette, which is the whole reason
-  the shadow exists here.
+- **Static-bundle refresh cost.** The eight parts that stay on the ground join
+  the cached shadow bundle, which is recorded with `frustumCulled = false`, so
+  a level recentre runs the vertex stage over them whether they are in that
+  level's box or not, at a budget of one level per frame. Much cheaper than it
+  was — §8.5 moved the eleven vehicle parts (the bulk of the 1.06 M vertices)
+  off the bundle entirely — but the OLIT is still 18 k triangles of lattice. If
+  recentre hitches ever show up, the lever is a decimated stand-in on
+  `STATIC_SHADOW_PROXY_LAYER` (`procgen/blenderkit/decimate.ts` already has the
+  cluster decimator).
+- **The plume and the pad blast are unvalidated on device**, like everything
+  else here. The plume's HDR core is authored at 80 against a 1.0 bloom
+  threshold; if it blows the frame out, that multiplier is the one dial, and
+  `?pass=bloom` isolates it.
 - The site has no approach road. The design notes describe a spaceport road
   continuing south past the tube; nothing here builds it, and the player can
   never walk out there anyway.

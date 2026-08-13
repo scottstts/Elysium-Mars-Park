@@ -718,8 +718,13 @@ interface TowerConfig {
       'function build_rails(mb: MB, m_col: number, m_beam: number, m_dark: number, face_x = 1): void {'],
     ['function build_crown(mb, m_col, m_beam, m_diag, m_grate, m_dark){',
       'function build_crown(mb: MB, m_col: number, m_beam: number, m_diag: number, m_grate: number, m_dark: number): void {'],
+    // EXPORTED (patch kind 1) so the runtime can build the carriage and each
+    // arm into their OWN MB and animate them apart — the demo fuses all three
+    // into one `Tower_Chopsticks` mesh, which cannot retract for a launch.
+    // `MB.add_v` never welds, so a per-primitive split is lossless; see
+    // starshipBuild.ts. The fused object is still emitted, for the parity harness.
     ['function chopstick(mb, pivot, yaw_deg, len, m_col, m_beam, m_diag, m_grate, m_dark){',
-      'function chopstick(mb: MB, pivot: Pt3, yaw_deg: number, len: number, m_col: number, m_beam: number, m_diag: number, m_grate: number, m_dark: number): void {'],
+      'export function chopstick(mb: MB, pivot: Pt3, yaw_deg: number, len: number, m_col: number, m_beam: number, m_diag: number, m_grate: number, m_dark: number): void {'],
     ['  const P = (t, sw, du) => {\n    const d = d_root + (d_tip - d_root) * t;',
       '  const P = (t: number, sw: number, du: number): Vec => {\n    const d = d_root + (d_tip - d_root) * t;'],
     ['  for (const sw of [-1, 1])\n    for (const du of [0, 1]){\n      const pts = [];',
@@ -727,7 +732,7 @@ interface TowerConfig {
     ['  const rows = [];\n  for (let i = 0; i <= NB_; i++){\n    const t = i / NB_;',
       '  const rows: number[][] = [];\n  for (let i = 0; i <= NB_; i++){\n    const t = i / NB_;'],
     ['function carriage(mb, z, m_col, m_beam, m_diag, m_grate){',
-      'function carriage(mb: MB, z: number, m_col: number, m_beam: number, m_diag: number, _m_grate: number): void {'],
+      'export function carriage(mb: MB, z: number, m_col: number, m_beam: number, m_diag: number, _m_grate: number): void {'],
     ['function qd_arm(mb, z, reach, m_col, m_beam, m_diag, m_grate, m_dark, depth = 2.6, wid = 2.4){',
       'function qd_arm(mb: MB, z: number, reach: number, m_col: number, m_beam: number, m_diag: number, m_grate: number, m_dark: number, depth = 2.6, wid = 2.4): void {'],
     ['  const P = (t, sw, du) => {\n    const w = wid * (1.0 - 0.15 * t);',

@@ -3452,3 +3452,108 @@ Fix is at the source: `targetSpeed / max(1, hypot(forward, strafe))`.
   height — 3.4 m tall so it cannot be jumped in 0.38 g, and absent past that
   sector, where the treads are genuinely overhead and you should be able to walk
   under them.
+
+## The Starship flies (2026-08-13)
+
+Full write-up: `dev_docs/systems/starship.md` §8. The lessons that generalise:
+
+- **A scripted flight path looks scripted; an integrated one does not.** The
+  give-away for a keyframed launch is that its speed at any height is whatever
+  the curve says, not what the last few seconds of thrust earned. Author the
+  two things the vehicle actually controls — throttle and where it points — and
+  let position fall out of `a = T/m·axis − g` at the fixed step. It is not more
+  code than a curve and it cannot look wrong.
+- **ZEM/ZEV terminal guidance is the right tool for "land on the exact spot",
+  and it has two teeth.** With `r_f = 0, v_f = 0` it collapses to
+  `a = −6r/t² − 4v/t + g_up`. (1) **Recompute `t_go` every step** (`2z/v_descent`);
+  counting a t_go fixed at ignition down to zero diverges the `6/t²` gain while
+  the vehicle is still hundreds of metres up — my first build flew the stack to
+  344 km. (2) **Clamp the thrust and the axis.** Unbounded, it will ask for any
+  acceleration the geometry implies: asked to null 3.2 km of crossrange in 17 s
+  it inverted the vehicle and demanded 7 700 g. Give it a problem it can fly —
+  back-solve the entry state so the free fall does the transport and guidance
+  only trims.
+- **Simulate the profile headlessly before wiring it to a scene.** ~40 lines of
+  node against the flight class printed the phase table and caught all of the
+  above, plus three continuity traps that would otherwise have shipped: an
+  attitude snapping 13° in one frame (25 m of nose travel on a 147 m vehicle),
+  a crossrange nulled on a time constant that read as a sidestep, and a
+  re-entry teleport landing where the vehicle was still a visible size. None of
+  these are visible in code review; all are obvious in a printed table.
+- **`MB.add_v` never welds.** Every `prism()`/`lathe()` in `procgen/sslib`
+  appends a fresh vertex island, so primitives in one MB share no vertex, edge
+  or smoothing group. That makes splitting a fused generated mesh into movable
+  pieces **provably lossless** — rebuild the sub-parts into their own MBs and
+  the union is the original, triangle for triangle. Prove it, don't assert it
+  (`tools/starship-split-audit.mjs`), and keep building the fused object so the
+  parity harness still has something to compare.
+- **Parity survives a movable asset if the split happens after the payload.**
+  Two `export` patches in the generator (kind 1, already sanctioned) plus a
+  swap in the hand-written `starshipBuild.ts`. The generated files still emit
+  exactly what they emitted.
+- **A swept-volume clearance test must use the plan SILHOUETTE, not a radius.**
+  My hand arithmetic used the vehicle's max radius and got 10.75 m, set by the
+  ship's flaps — where the real footprint is a 4.5 m hull with four flaps and
+  four fins at fixed azimuths (the vehicle does not roll). The disc test
+  condemned the QD arm, which nothing ever passes over. Rasterise the mover
+  into a plan grid holding the **lowest geometry per cell**; a static member is
+  fouled exactly when something stands over its cell at or below its height.
+  It is barely more code and it is exact.
+- **Measure retraction angles, don't reason them.** Every number I derived by
+  hand for the arms was wrong, in both directions — the parked fouling was 44.7 m
+  and not 0.7 m, and the tower contact I predicted at one angle appeared at
+  another. `tools/starship-clearance-audit.mjs` swept the angles in seconds.
+- **Anything that MOVES cannot be in the cached static shadow bundle** — it is
+  sealed during the loading frame and immutable after, so its shadow stays
+  welded where the object was. `markDynamic()` is the fix, and the cost is that
+  the dynamic caster maps are **camera-centred and short** (12/90 m): an object
+  200 m away lands in none of them and silently stops casting. If it matters,
+  add a rung sized to the object's LIGHT-space reach, not its distance.
+- **Emission strength and cloud lifetime are different things.** Multiplying
+  particles by a live "how hard is the pad being hit" value snaps the whole
+  dust column out of existence the instant the engines cut. Hold the strength
+  and bleed it over the particles' own lifetime.
+- **Methalox plumes are blue-violet, not orange.** The orange in launch footage
+  is recirculated pad debris and afterburning. And in a thin atmosphere the
+  nozzle is grossly under-expanded, so the plume blooms into a huge bell
+  immediately and keeps blooming with altitude — that flare is most of what
+  says "not Earth". Put orange only on the cool entrained skirt.
+- **Use a cone of revolution for a plume, not an axis-aligned billboard.** The
+  ribbon is cheaper and degenerates to a line exactly when the viewer is under
+  the vehicle looking up the axis — which is most of an ascent seen from 215 m.
+- **Hide the mesh, not the group, when an effect must outlive its object.** The
+  plume is a sibling under the flight transform; cutting the vehicle's meshes at
+  ~1 px lets the exhaust go on fading, which is what a distant launch actually
+  looks like. Fading the meshes themselves was not available — the port shares
+  one 20-material array between the vehicle, the tower and the mount.
+
+### Two corrections after owner review (2026-08-13)
+
+- **Drive a mechanism off the thing it has to avoid, not off a timer.** The
+  chopsticks were opened during a pre-launch hold on a phase timer. The owner's
+  correction — they should spread as the vehicle climbs out through them, and
+  close as it comes back down — is not just more real, it is *cheaper to get
+  right*: `armOpen = smoothstep(0, H, altitude)` is one function for both
+  directions, so the descent cannot drift out of step with the ascent because
+  it is the same schedule read backwards. And because the pose then depends on
+  a single parameter, "do they ever touch?" stops being a question about timing
+  and becomes a walk over a one-parameter family that a tool can just check.
+  It has a real ceiling — measured, a never-moving arm is ploughed from 20.5 to
+  44.5 m of ascent, the schedule is clean to H=44 and fouls at H=46 — and my
+  first guess (60 m) put 0.42 m³ of truss through the vehicle.
+- **A plume must not have a silhouette.** Nested additive lathe shells read as
+  "a solid cone bolted to the tail" (owner report) no matter how they are
+  shaded. The radial-brightness reasoning that justified the mesh was sound and
+  irrelevant: what makes exhaust look like gas is that its EDGE is made of
+  separate parcels moving at different speeds and dying at different distances.
+  Instanced camera-facing parcels flowing down the axis, growing as they go.
+  Bonus — it removes the reason the cone was chosen over a ribbon (a ribbon
+  degenerates to a line when viewed along the axis; billboards have no
+  preferred direction).
+- **Keyed to distance, not to age.** Shock diamonds stand still in space while
+  the gas flows through them. Modulate on axial position and parcels brighten
+  as they cross a node; modulate on parcel age and the whole plume strobes.
+- **Cache voxelisations by pose when sweeping a parameter.** The clearance walk
+  re-voxelised a 1 600-triangle arm thousands of times and ran for minutes;
+  memoising on the angle quantised to a quarter degree cut it to ~45 s, because
+  a few dozen distinct angles serve the whole sweep.

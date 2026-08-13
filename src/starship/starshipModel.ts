@@ -2,8 +2,10 @@ import { BufferAttribute, BufferGeometry, Group, Mesh } from 'three'
 import type { Material } from 'three'
 import { buildStarshipPayload } from './starshipBuild'
 import { buildStarshipMaterials } from './starshipMaterials'
+import { createStarshipRig } from './starshipRig'
 import { STARSHIP_SITE, STARSHIP_VEHICLE_OFFSET_X } from './starshipSite'
 import type { StarshipPayload } from './starshipBuild'
+import type { StarshipRigHandles } from './starshipRig'
 
 /**
  * Main-thread side of the launch site: worker payload -> a scene graph that
@@ -25,6 +27,8 @@ export interface StarshipAsset {
   meshes: Mesh[]
   triangles: number
   buildMs: number
+  /** The hinges and the free body — see `starshipRig.ts`. */
+  rig: StarshipRigHandles
 }
 
 export async function loadStarshipAsset(): Promise<StarshipAsset> {
@@ -92,7 +96,9 @@ export async function loadStarshipAsset(): Promise<StarshipAsset> {
     triangles += part.triangles
   }
 
-  return { group, materials, meshes, triangles, buildMs: payload.buildMs }
+  const rig = createStarshipRig(blender, meshes, payload.rig)
+
+  return { group, materials, meshes, triangles, buildMs: payload.buildMs, rig }
 }
 
 /**

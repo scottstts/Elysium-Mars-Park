@@ -162,8 +162,26 @@ export class SkySystem implements GameSystem {
       // Halved with the world: the tram car is the biggest moving caster and
       // it lives on a 97 m loop, so 90 m covers "everything moving that the
       // player can see move".
-      dynamicCasterHalfWidths: [12, 90],
-      dynamicCasterMapSizes: [tierSizes[0], tierSizes[0]],
+      //
+      // A THIRD RUNG AT 440 m EXISTS ONLY FOR THE STARSHIP. Once the vehicle
+      // flies it cannot be in the cached static bundle — that bundle is sealed
+      // during the loading frame and immutable after, so a moving mesh would
+      // leave its shadow welded to the pad forever. Moving it to this layer
+      // fixes that and creates a second problem: the pad is 93–340 m from the
+      // camera and the stack's LIGHT-space reach at 27° is ~298 m (measured,
+      // tools/starship-site-audit.mjs), all far outside 90 m. Without this rung
+      // the tower would go on printing its 287 m shadow across the regolith
+      // while the 147 m rocket standing beside it printed nothing.
+      //
+      // 440 m is the static L4's number, chosen there against the same measured
+      // 298 m worst case. The cost is one more continuously refreshed map: the
+      // stack's 353 k triangles while it is low (frustum culling drops it once
+      // it climbs out of the box), plus the robots and the tram, which were
+      // already paying for two. Texel is 0.43 m at tier 0 — soft, but a soft
+      // 147 m streak on regolith reads as penumbra, and the alternative is no
+      // streak at all.
+      dynamicCasterHalfWidths: [12, 90, 440],
+      dynamicCasterMapSizes: [tierSizes[0], tierSizes[0], tierSizes[0]],
     }).attach()
 
     // Fixed sky → bake the environment exactly once. The bake dome reuses
