@@ -31,6 +31,10 @@ import { heroGlass, signageMaterial } from '../../materials/library'
 import { interiorHeight } from '../interiorHeight'
 import { PAVE, pavedSignedDistance } from '../pavingPlan'
 import { AMPHITHEATER, FIRST_TREE, OVERLOOK_LOUNGE, PADS, PLAYGROUND } from '../parkPlan'
+import {
+  AMPHITHEATER_STAGE_SCALE,
+  buildAmphitheaterConcertStage,
+} from './amphitheaterStage'
 import type { DistrictServices } from './types'
 
 /**
@@ -739,9 +743,12 @@ function buildStage(services: DistrictServices): void {
     STAGE.z + sin * forward + cos * lateral,
   ]
   const deckTop = STAGE.y + 1.05
-  const halfWidth = 6.5
-  const front = 3.2
-  const back = -4.6
+  // Owner contract: retain the authored platform and enlarge its linear
+  // dimensions by 1.8×. Every dependent run below reads these dimensions;
+  // nothing is scaled after construction and no collider is left behind.
+  const halfWidth = 6.5 * AMPHITHEATER_STAGE_SCALE
+  const front = 3.2 * AMPHITHEATER_STAGE_SCALE
+  const back = -4.6 * AMPHITHEATER_STAGE_SCALE
 
   // 0.85 m corners: the perimeter beam is set back 0.38 and its section runs
   // 0.14 inward, so the corner radius has to stay above that or the swept
@@ -797,8 +804,9 @@ function buildStage(services: DistrictServices): void {
   ])
   // Piers butt the beam's outer face and stop 60 mm short of the deck's nose:
   // proud enough to catch the light, set back enough to keep the shadow line.
-  for (let p = 0; p < 8; p++) {
-    const lateral = -halfWidth + 0.9 + (p * (2 * halfWidth - 1.8)) / 7
+  const pierCount = 14
+  for (let p = 0; p < pierCount; p++) {
+    const lateral = -halfWidth + 0.9 + (p * (2 * halfWidth - 1.8)) / (pierCount - 1)
     const [px, pz] = local(front - 0.21, lateral)
     const pier = bevel(
       prism(roundedRect(0.3, 0.34, 0.05, 2), STAGE.y - 0.1, deckTop - 0.22),
@@ -818,15 +826,17 @@ function buildStage(services: DistrictServices): void {
   // front − 0.324, not − 0.45: the beam's own outer face is at
   // `front − 0.38 + 0.02` = front − 0.36 (see `beamPoly` below), so a 60 mm bar
   // centred 0.45 in was 60 mm INSIDE the beam, invisible and cross-slot.
-  for (let s = 0; s < 9; s++) {
-    const lateral = -4.6 + (s * 9.2) / 8
+  const frontLensCount = 17
+  const frontLensHalfRun = halfWidth - 1.9
+  for (let s = 0; s < frontLensCount; s++) {
+    const lateral = -frontLensHalfRun + (s * frontLensHalfRun * 2) / (frontLensCount - 1)
     const [lx, lz] = local(front - 0.324, lateral)
     lensBar(services, [lx, lz, deckTop - 0.44], [0.06, 1.0, 0.06], facing)
   }
 
   // Acoustic shell: an arc wall behind the stage, with vertical diffuser ribs.
-  const shellRadius = 7.4
-  const shellCenter = local(1.4, 0)
+  const shellRadius = 7.4 * AMPHITHEATER_STAGE_SCALE
+  const shellCenter = local(1.4 * AMPHITHEATER_STAGE_SCALE, 0)
   const shellBase = STAGE.y - 0.35
   const shellTop = deckTop + 2.05
   const shellA0 = facing + Math.PI - 0.75
@@ -850,7 +860,7 @@ function buildStage(services: DistrictServices): void {
       { endInset: 0.03 },
     ),
   ])
-  const ribCount = 22
+  const ribCount = 38
   for (let r = 0; r < ribCount; r++) {
     const angle = shellA0 + 0.06 + ((shellA1 - shellA0 - 0.12) * r) / (ribCount - 1)
     const depth = 0.1 + 0.09 * (0.5 + 0.5 * Math.sin(r * 2.3))
@@ -874,7 +884,7 @@ function buildStage(services: DistrictServices): void {
 
   // Equipment alcove: three walls as ONE U-shaped prism (no boolean, no
   // overlapping wall runs), a roof slab, a dark rear panel and a work lamp.
-  const alcoveCenter = local(-6.4, -6.9)
+  const alcoveCenter = local(back - 1.8, -(halfWidth + 0.4))
   const alcoveYaw = facing
   const alcoveGround = interiorHeight(alcoveCenter[0], alcoveCenter[1])
   const uPoly: Vec2[] = [
@@ -961,12 +971,14 @@ function buildStage(services: DistrictServices): void {
     // inside the 0.42 autostep — climb with the visual slabs.
     for (let k = 0; k < 7; k++) {
       const lat = side * (halfWidth + 2.35 - k * 0.3 - 0.15)
-      const [kx, kz] = local((front - 0.4 + back + 1.1) / 2, lat)
+      const runFront = front - 0.4
+      const runBack = back + 1.1
+      const [kx, kz] = local((runFront + runBack) / 2, lat)
       const top = STAGE.y + (k + 1) * 0.15
       alignedBox(
         services,
         new Vector3(kx, (top + STAGE.y - 0.1) / 2, kz),
-        new Vector3(6.3, top - (STAGE.y - 0.1), 0.3),
+        new Vector3(runFront - runBack, top - (STAGE.y - 0.1), 0.3),
         facing,
       )
     }
@@ -975,20 +987,48 @@ function buildStage(services: DistrictServices): void {
   // Height 1.1, centred 0.55 under deckTop → collider TOP lands exactly on
   // the deck plane. The old 1.6 overshot by 0.25 and the player floated a
   // hand's width above the boards.
+  const deckMid = (front + back) / 2
+  const [deckColliderX, deckColliderZ] = local(deckMid, 0)
   alignedBox(
     services,
-    new Vector3(STAGE.x, deckTop - 0.55, STAGE.z),
-    new Vector3(7.9, 1.1, 13),
+    new Vector3(deckColliderX, deckTop - 0.55, deckColliderZ),
+    new Vector3(front - back + 0.1, 1.1, halfWidth * 2),
     facing,
   )
-  alignedBox(
-    services,
-    new Vector3(shellCenter[0], deckTop + 1, shellCenter[1]),
-    new Vector3(0.5, 2.4, 12),
-    facing,
-  )
+  // The shell is an ARC at the rear of the platform, so its physics must be
+  // the same arc. A single box centred on `shellCenter` creates a phantom wall
+  // across the front working area (and is nowhere near most of the concrete).
+  // Short tangent chords keep the collision skin within 6 mm of the visual arc
+  // while the 40 mm end allowance closes numerical seams between neighbours.
+  const shellArcLength = shellRadius * (shellA1 - shellA0)
+  const shellColliderSegments = Math.ceil(shellArcLength / 0.8)
+  const shellColliderHeight = shellTop - shellBase
+  for (let segment = 0; segment < shellColliderSegments; segment++) {
+    const a0 = shellA0 + ((shellA1 - shellA0) * segment) / shellColliderSegments
+    const a1 = shellA0 + ((shellA1 - shellA0) * (segment + 1)) / shellColliderSegments
+    const mid = (a0 + a1) / 2
+    const chord = 2 * shellRadius * Math.sin((a1 - a0) / 2)
+    alignedBox(
+      services,
+      new Vector3(
+        shellCenter[0] + Math.cos(mid) * shellRadius,
+        (shellBase + shellTop) / 2,
+        shellCenter[1] + Math.sin(mid) * shellRadius,
+      ),
+      new Vector3(chord + 0.04, shellColliderHeight, 0.42),
+      mid + Math.PI / 2,
+    )
+  }
 
   emit(services, parts)
+  buildAmphitheaterConcertStage(services, {
+    center: { x: STAGE.x, z: STAGE.z },
+    facing,
+    deckTop,
+    halfWidth,
+    front,
+    back,
+  })
 
   // Arrival totem at the head of the vomitory ramp.
   const totemAngle = ARC_CENTER - 0.3

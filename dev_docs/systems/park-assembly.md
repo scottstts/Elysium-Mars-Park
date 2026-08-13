@@ -444,7 +444,33 @@ STEPPED aisles are authored on top of that at 0.2 / 0.6 / 0.8 of the arc.
   60 × 14 mm light rebate in every tread) swept along a short arc, so the treads
   are concentric with the terraces and the aisle is an authentic radial wedge.
 - **The stage shell is capped at 2.05 m above the deck ON PURPOSE** — from row
-  A's eye (+0.15 m) the mountains have to clear it.
+  A's eye (+0.15 m) the mountains have to clear it. The concert canopy now
+  rises separately on an open truss frame; the low shell remains the opaque
+  horizon blocker and acoustic surface.
+- **The Bowl stage keeps its original cast construction at 1.8× linear size.**
+  The bullnose deck, set-back perimeter beam, founded side flights and acoustic
+  shell are still the same authored lofts/sweeps, now **23.40 × 14.04 m**.
+  Pier rhythm, front lenses, shell ribs and every collider are re-derived from
+  the enlarged contract; there is no late object scale and no old-size physics
+  box hidden under the deck.
+- **The concert kit is a separate deterministic assembly** in
+  `districts/amphitheaterStage.ts`: four 380 mm aluminum box-truss towers on
+  bolted feet, five bowed roof trusses, two longitudinal edge trusses and a
+  65 mm closed fabric canopy whose crown is 7.01 m above the deck. The truss
+  web terminates on chord centrelines and is batched into the shared aluminum
+  slot; the membrane is one watertight grid shell, not overlapping roof strips.
+- **The stage equipment has a front and a signal path.** A quarter-sawn walnut
+  lectern stands on the audience axis near the apron, with a tapered one-piece
+  carcass, canted reading top, raised/brass-trimmed front panel and swept
+  gooseneck microphone. At the rear are matched dual-driver subwoofer cabinets,
+  three-module line arrays per side, a six-unit amplifier rack, two canted
+  floor monitors and a raised cable bridge. Drivers are revolved cones and
+  surrounds rather than dark discs; horn mouths are real open flares.
+- **Stage materials own physical roles.** `stageWood`, `stageBrass`,
+  `stageBlack`, `stageCone` and `stageCanopy` are procedural TSL materials in
+  the shared library. Their UV/world-space fields preserve metre-scale walnut
+  figure, brushed brass, touring-case pebble, graphite fibre and technical
+  weave while specular AA keeps grazing highlights stable.
 - **The Overlook Lounge is an ELLIPSE** (5.35 × 9.55), which fills parkPlan's
   20 × 11 footprint, curves continuously from every bearing, and gives
   design.md's "long window" on the west flank. 32 arc-length-equal bays.
@@ -463,6 +489,13 @@ STEPPED aisles are authored on top of that at 0.2 / 0.6 / 0.8 of the arc.
   at `plaza + 0.5` and contact is a sink, not a rest.
 
 ### Verification
+
+`tools/amphitheater-stage-audit.mjs` compiles the concert kit headlessly through
+the shipping `PartWriter`. It asserts the 1.8× envelope, eight material roles,
+12 owned colliders (including three silhouette-fitted lectern volumes),
+573 deterministic authored parts, 43,648 triangles, zero
+degenerate/non-finite records and zero cross-slot coplanar pairs. It starts no
+renderer or browser.
 
 `zfight 0` for every part of this district, confirmed two ways: a headless
 per-part audit (every `writer` call in its own mesh, 1 251 parts) and the

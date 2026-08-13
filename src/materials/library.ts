@@ -12,6 +12,7 @@ import {
   normalWorld,
   positionWorld,
   smoothstep,
+  uv,
   vec2,
   vec3,
   vec4,
@@ -349,6 +350,62 @@ export function fabric(color: Color): MeshStandardNodeMaterial {
   return material
 }
 
+/**
+ * Quarter-sawn walnut for the Bowl's lectern. The dominant-face UVs emitted by
+ * archkit are measured in world metres, so the long grain retains one physical
+ * scale across the body, mouldings and reading top instead of restarting per
+ * triangle. Broad figure controls the colour; fine pores only perturb gloss.
+ */
+export function stageWalnut(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const p = uv()
+  const warp = mx_noise_float(p.mul(vec2(0.42, 1.35)).add(vec2(17.2, 6.4))).mul(1.4)
+  const figure = p.y.mul(8.5).add(warp).sin().abs()
+  const cathedral = smoothstep(0.08, 0.86, figure)
+  const pores = mx_noise_float(p.mul(vec2(76, 18)).add(vec2(3.7, 21.4))).mul(0.5).add(0.5)
+  const honey = mix(vec3(0.19, 0.082, 0.026), vec3(0.39, 0.19, 0.065), cathedral)
+  material.colorNode = honey.mul(pores.mul(0.08).add(0.94))
+  material.roughnessNode = float(0.29).add(pores.mul(0.13)).add(figure.mul(0.035))
+  material.metalness = 0
+  applySpecularAA(material)
+  return material
+}
+
+/** Satin brass: lectern edge furniture, microphone collars and PA fasteners. */
+export function stageBrass(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const brushing = mx_noise_float(uv().mul(vec2(8, 170)).add(vec2(29.1, 4.8))).mul(0.5).add(0.5)
+  material.colorNode = mix(vec3(0.39, 0.19, 0.045), vec3(0.62, 0.36, 0.105), brushing.mul(0.42))
+  material.roughnessNode = float(0.24).add(brushing.mul(0.12))
+  material.metalness = 0.88
+  applySpecularAA(material)
+  return material
+}
+
+/** Powder-coated birch speaker cabinet and touring-case finish. */
+export function stageBlackPaint(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const pebble = mx_noise_float(positionWorld.mul(38).add(vec3(8.2, 31.7, 12.4))).mul(0.5).add(0.5)
+  const broad = worldNoise(1.2, 52.8)
+  material.colorNode = mix(vec3(0.018, 0.019, 0.021), vec3(0.045, 0.046, 0.05), broad.mul(0.7))
+    .mul(pebble.mul(0.08).add(0.94))
+  material.roughnessNode = float(0.72).add(pebble.mul(0.12))
+  material.metalness = 0.04
+  applySpecularAA(material)
+  return material
+}
+
+/** Graphite-loaded paper and rubber used by all PA driver diaphragms. */
+export function speakerCone(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const fibre = mx_noise_float(positionWorld.mul(92).add(vec3(7.1, 14.8, 3.6))).mul(0.5).add(0.5)
+  material.colorNode = mix(vec3(0.012, 0.012, 0.014), vec3(0.058, 0.055, 0.052), fibre.mul(0.68))
+  material.roughnessNode = float(0.78).add(fibre.mul(0.13))
+  material.metalness = 0
+  applySpecularAA(material)
+  return material
+}
+
 /** Bright play-equipment paint. */
 export function playPaint(color: Color): MeshStandardNodeMaterial {
   const material = new MeshStandardNodeMaterial()
@@ -448,6 +505,11 @@ export function kitMaterials(): KitMaterials {
       fabricRust: fabric(new Color(0.5, 0.26, 0.16)),
       fabricBlue: fabric(new Color(0.24, 0.32, 0.42)),
       fabricSand: fabric(new Color(0.6, 0.52, 0.42)),
+      stageWood: stageWalnut(),
+      stageBrass: stageBrass(),
+      stageBlack: stageBlackPaint(),
+      stageCone: speakerCone(),
+      stageCanopy: fabric(new Color(0.022, 0.024, 0.028)),
       soil: soilBed(),
       tubeWall: tubeWall(),
       runningLight: runningLight(),

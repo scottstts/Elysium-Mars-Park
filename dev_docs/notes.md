@@ -3691,3 +3691,29 @@ knowing generally:
   That is what caught the tight one here: 216 mm to a flue guy stay, which no
   screenshot would have shown. Report the max per-station turn angle too — it
   is the single number that says whether the tube will frame cleanly.
+
+## Bowl concert stage augmentation (2026-08-13)
+
+- The old cast platform was already the correct asset; enlarging it means
+  re-solving its dimension contract, not scaling its emitted vertices. The
+  deck is now 23.40 × 14.04 m (1.8× linear), and pier/lens/rib cadence, stairs,
+  alcove placement and all physics boxes derive from those same bounds.
+- Author stage equipment in one local frame: +X audience, +Y across stage, +Z
+  up. A single final yaw/translation keeps canopy, PA fronts, lectern and
+  colliders aligned with the Bowl axis and makes the headless envelope test
+  meaningful.
+- Box trusses tolerate member penetration only inside the ONE aluminum slot.
+  The merged audit reports one same-slot coplanar cluster where roof webs land
+  on tower chords; the actionable gate is cross-slot coplanarity, which is zero.
+- Dark stage hardware needs separate surface causes even when the palette is
+  nearly black: touring-case pebble, graphite driver fibre and woven canopy
+  carry different roughness responses. Albedo differences alone disappear in
+  the Bowl's raking light.
+- **A curved wall cannot own one centre-box collider.** The acoustic shell's
+  old ~19 m box was centred on the arc origin rather than the rear concrete,
+  producing a phantom barrier across the working stage. Its physics now follows
+  the shell with sub-0.8 m tangent chords; the lectern separately owns three
+  silhouette-fitted boxes for its plinth, tapered carcass and reading top.
+- The lectern frame is +X toward the audience, so a speaker-facing microphone
+  must finish at a *smaller* forward coordinate than its socket. Keep this
+  directional assertion in the headless stage audit when adjusting the sweep.

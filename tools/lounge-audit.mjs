@@ -37,8 +37,10 @@ globalThis.window = globalThis
 
 const { PartWriter } = await import('../src/archkit/writer.ts')
 const { Rng } = await import('../src/core/prng.ts')
+const { AMPHITHEATER_STAGE_SCALE } = await import('../src/world/districts/amphitheaterStage.ts')
 const leisure = await import('../src/world/districts/leisure.ts')
 const lounge = await import('../src/world/districts/loungeInterior.ts')
+const { AMPHITHEATER, PADS } = await import('../src/world/parkPlan.ts')
 
 const shell = leisure.loungeShell()
 const MATERIALS = new Proxy({}, { get: () => ({ isMaterial: true }) })
@@ -399,6 +401,66 @@ let failures = 0
       `flight 2 rise ${flightB ? flightB.rise.toFixed(3) : '?'})` : `FAIL (${problems.length})`}`,
   )
   for (const line of problems.slice(0, 8)) console.log('   ', line)
+  failures += problems.length
+}
+
+// ---- 5. Bowl shell collision follows the rear arc -------------------------
+//
+// The acoustic shell used to own one broad box at the arc ORIGIN. That box
+// crossed the usable stage behind the lectern, while the visible shell stood
+// several metres aft on the circumference. Regress both sides of the contract:
+// the former stripe is traversable and the rear shell itself still blocks.
+{
+  const stage = PADS.find((pad) => pad.id === 'amphitheater')
+  const sx = stage?.x ?? -64
+  const sz = stage?.z ?? 39
+  const sy = stage?.y ?? -1.8
+  const facing = Math.atan2(AMPHITHEATER.z - sz, AMPHITHEATER.x - sx)
+  const cos = Math.cos(facing)
+  const sin = Math.sin(facing)
+  const local = (forward, lateral) => ({
+    x: sx + cos * forward - sin * lateral,
+    z: sz + sin * forward + cos * lateral,
+  })
+  const deckTop = sy + 1.05
+  const boxes = services.colliders.filter((collider) => collider.kind === 'box')
+  const overlapsStandingCapsule = (collider, point, radius = 0.35) => {
+    const top = collider.center.y + collider.size.y / 2
+    const bottom = collider.center.y - collider.size.y / 2
+    if (top <= deckTop + 0.42 || bottom >= deckTop + 1.8) return false
+    const dx = point.x - collider.center.x
+    const dz = point.z - collider.center.z
+    const yaw = collider.yaw ?? 0
+    const lx = dx * Math.cos(yaw) - dz * Math.sin(yaw)
+    const lz = dx * Math.sin(yaw) + dz * Math.cos(yaw)
+    return Math.abs(lx) <= collider.size.x / 2 + radius && Math.abs(lz) <= collider.size.z / 2 + radius
+  }
+
+  const oldStripeForward = 1.4 * AMPHITHEATER_STAGE_SCALE
+  const blockedSamples = []
+  for (let lateral = -8; lateral <= 8; lateral += 0.25) {
+    const point = local(oldStripeForward, lateral)
+    if (boxes.some((collider) => overlapsStandingCapsule(collider, point))) {
+      blockedSamples.push(lateral)
+    }
+  }
+
+  const shellRadius = 7.4 * AMPHITHEATER_STAGE_SCALE
+  const rearShellPoint = local(oldStripeForward - shellRadius, 0)
+  const rearShellBlocks = boxes.some((collider) => overlapsStandingCapsule(collider, rearShellPoint, 0.05))
+  const problems = []
+  if (blockedSamples.length > 0) {
+    problems.push(
+      `former front stripe still blocks ${blockedSamples.length}/65 samples ` +
+        `(${Math.min(...blockedSamples).toFixed(2)}…${Math.max(...blockedSamples).toFixed(2)} m lateral)`,
+    )
+  }
+  if (!rearShellBlocks) problems.push('rear acoustic shell has no collision at its centre arc')
+
+  console.log(
+    `bowl shell        ${problems.length === 0 ? 'OK (front clear, rear arc blocked)' : `FAIL (${problems.length})`}`,
+  )
+  for (const line of problems) console.log('   ', line)
   failures += problems.length
 }
 
