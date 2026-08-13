@@ -1,7 +1,5 @@
 # Elysium Planitia — Mars Park
 
-![Elysium](assets/Elysium.jpeg)
-
 Step off the tram into the first park on another world. Under a 260-metre glass
 dome on the Elysium Planitia flats, five hectares of paved plaza, working
 farm and quiet terrace sit inside a ring of red mountains you can see from
@@ -11,6 +9,9 @@ by code: the gridshell overhead, the regolith underfoot, the lettuce on the
 greenhouse benches, the dust the washer robot has not reached yet. There are no
 menus, no meters and no monsters. There is a low frozen sun, a tram that comes
 round every few minutes, and a planet on the other side of the glass.
+
+![Elysium](assets/Elysium.jpeg)
+***Play live at https://mars.scottsun.io***
 
 ---
 
