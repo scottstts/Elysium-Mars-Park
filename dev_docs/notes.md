@@ -3656,3 +3656,38 @@ code cannot say for itself:
   each other at their true widths and are both drawn short, and Gate S's
   annotation had to move out over the exterior sky because the airspace it
   used to land in (z 44…70 above the deck) is the tower's now.
+
+## `writer.tube` cannot survive a fold-back (2026-08-13)
+
+The reclaimer's two tie-in pipes (`works.ts`, "Pipe bridge back to the hall's
+gable") rendered as pinched, self-intersecting elbows. The cause is worth
+knowing generally:
+
+- **`writer.tube` frames every ring on a CENTRAL-DIFFERENCE tangent**
+  (`path[i+1] - path[i-1]`). At a vertex whose turn approaches 180 deg that
+  difference nearly cancels, so the ring degenerates and the surrounding
+  quads tear. The old path turned **129 deg** at its middle station — it left
+  the skid's -X flank, ran 1.9 m FURTHER from the hall, then folded back
+  across its own footprint to reach the gable. Any run over roughly 60 deg
+  per station needs `filletPath` (house radius: **1.5 diameters** = `r * 3`),
+  which spreads a 90 deg corner over 4 stations at ~28 deg apiece.
+- **A fold-back is a routing bug, not a smoothing bug.** Filleting the old
+  path would have hidden the tear and kept a pipe that runs away from the
+  thing it connects to. Route first, fillet second.
+- **Route pipes on the TARGET's normal, in the target's own frame.** The fix
+  puts both runs on one plan line — hall `c = 2.4`, the gable normal through
+  the escutcheon — so each stabs the plate square and the pair stacks
+  vertically over a single route. That constant-`c` line only crosses the
+  skid's two END walls (the -Z one is solid access panels) and neither flank,
+  which is *why* no flank take-off can reach the plate without doubling back.
+  The tie-ins therefore stand on the skid ROOF, where a process module's
+  penetrations belong anyway; the two risers sit at different `a` so the
+  upper run clears the lower one's elbow by 120 mm.
+- **Verify a reroute analytically, not by eye.** `interiorHeight` and
+  `parkPlan` are pure and import no three.js, so a scratch
+  `node --experimental-strip-types` probe can re-derive `FLOOR`/`padTop`,
+  rebuild the candidate path through a copy of `filletPath`, and run
+  segment-to-segment distance against the roof furniture it has to thread.
+  That is what caught the tight one here: 216 mm to a flue guy stay, which no
+  screenshot would have shown. Report the max per-station turn angle too — it
+  is the single number that says whether the tube will frame cleanly.

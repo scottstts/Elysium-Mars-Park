@@ -2974,23 +2974,61 @@ export function buildReclaimer(services: DistrictServices): void {
   }
 
   // ---- Pipe bridge back to the hall's gable.
-  const gableFace = hv(HALF_A + 0.06, 2.4, 4.4)
-  for (const [dz, r] of [
-    [-0.5, 0.16],
-    [0.5, 0.12],
+  //
+  // Both runs share ONE plan line: the gable's own outward normal through the
+  // escutcheon, which in hall coordinates is simply the constant c below. So
+  // each pipe stabs the plate SQUARE, and the pair stacks vertically over a
+  // single route instead of crossing in plan.
+  //
+  // The tie-ins stand on the skid ROOF, which is the only face that line can
+  // leave from: c = 2.4 crosses the module's two END walls (the -Z one is
+  // solid access panels) and neither flank, so a flank take-off cannot reach
+  // the plate without doubling back. That is precisely what the run used to
+  // do — it left the -X flank, ran 1.9 m FURTHER from the hall, then folded
+  // 129 deg back across its own footprint. `writer.tube` frames each ring on
+  // a central-difference tangent, which very nearly cancels at a fold-back,
+  // so the vertex ring collapsed and the elbow read as pinched, torn pipe.
+  //
+  // Roof penetrations are where a process module's tie-ins belong anyway. The
+  // two risers stand at different `a` so the upper run passes 120 mm over the
+  // lower one's elbow, and both clear the flues' guy stays by 230 mm or more.
+  const BRIDGE_C = 2.4
+  const bridgeAt = (a: number, y: number): Vector3 => {
+    const [x, z] = hallPlan(a, BRIDGE_C)
+    return new Vector3(x, y, z)
+  }
+  const roofTop = padTop + 3.12
+  for (const [riserA, dh, r] of [
+    [15.6, -0.2, 0.16],
+    [16.4, 0.2, 0.12],
   ] as const) {
+    const runY = FLOOR + 4.4 + dh
     writer.tube({
-      path: [
-        new Vector3(skidX - 2.3, padTop + 2.2 + dz * 0.4, skidZ + dz),
-        new Vector3(skidX - 4.2, padTop + 2.6 + dz * 0.4, skidZ + dz * 1.4),
-        new Vector3(gableFace.x, gableFace.y + dz * 0.4, gableFace.z),
-      ],
+      // 1.5-diameter bends. The riser foot stops 60 mm INSIDE the roof plate
+      // and the run ends on the escutcheon's mid-plane, so neither flat cap
+      // is ever a visible disc.
+      path: filletPath(
+        [bridgeAt(riserA, roofTop - 0.06), bridgeAt(riserA, runY), bridgeAt(HALF_A + 0.085, runY)],
+        r * 3,
+        4,
+      ),
       radius: r,
       slot: 'steel',
-      radialSegments: 12,
+      radialSegments: 14,
       capStart: true,
       capEnd: true,
     })
+    // Roof penetration collar (welds into the roof plate, same slot) and the
+    // bolted joint just above it — both on the straight, below the bend.
+    writer.tube({
+      path: [bridgeAt(riserA, roofTop - 0.02), bridgeAt(riserA, roofTop + 0.1)],
+      radius: r + 0.05,
+      slot: 'steelEdge',
+      radialSegments: 14,
+      capStart: true,
+      capEnd: true,
+    })
+    flangePair(writer, bridgeAt(riserA, roofTop + 0.45), new Vector3(0, 1, 0), r, 'steelEdge')
   }
   // ONE escutcheon plate where both pipes land on the gable: the pipe ends
   // bury into it and it stands clear of the gable sheeting's crest face.
