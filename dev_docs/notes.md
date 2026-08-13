@@ -232,11 +232,17 @@
   now one march producing `density` + `lit` (their ratio is the shaft) and a
   `mix(scene, inscatter, amount)` with `amount` hard-capped at 0.18. Any
   volumetric that can paint the frame should be capped by construction.
-- **Do not use TSL's implicit `cameraWorldMatrix`/`cameraPosition` for new
-  work inside the fullscreen post pass** — pass `uniform(camera.matrixWorld)`
-  explicitly like `projectionInverse` already does. (The existing haze code
-  uses the implicit nodes and works, but the explicit form removes a class of
-  "which camera is this?" doubt for free.)
+- **Never use TSL's implicit `cameraWorldMatrix`/`cameraPosition` inside the
+  fullscreen post pass.** `RenderPipeline` evaluates the final graph with its
+  own identity/origin orthographic quad camera, not the player camera. The old
+  interior haze mixed the player projection with that quad transform: its
+  pseudo-world Y changed sign at NDC Y=0 and the ground/height gates drew the
+  exact screen-midpoint light/dark split reported on 2026-08-13. The aerial
+  medium carried the same latent error. `RenderPipelineSystem` now owns one
+  explicit `HdrTransformContext` (view position/Z, scene-camera world origin
+  and ray, surface world position); post effects consume it rather than
+  reconstructing camera coordinates independently. `?pass=worldray` is the
+  sentinel: it must rotate with the player camera, never stay screen-fixed.
 - **8-bit banding is a real risk on the Mars sky** (a huge smooth gradient
   filling most outward frames, plus a contrast-adding LUT). `marsGrade` now
   adds 1 LSB of triangular-PDF interleaved-gradient dither after the vignette.

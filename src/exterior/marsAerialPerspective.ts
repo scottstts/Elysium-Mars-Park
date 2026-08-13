@@ -1,15 +1,11 @@
 import {
-  cameraWorldMatrix,
   exp,
   float,
-  getViewPosition,
   mix,
   oneMinus,
   step,
   uniform,
-  uv,
   vec3,
-  vec4,
 } from 'three/tsl'
 import type { Node } from 'three/webgpu'
 import { marsSkyRadiance } from '../sky/skyRadiance'
@@ -76,7 +72,7 @@ export function applyMarsAerialPerspective(
   scene: Node<'vec3'>,
   viewZ: Node<'float'>,
   sceneDepth: Node<'float'>,
-  projectionInverse: Node<'mat4'>,
+  worldDirection: Node<'vec3'>,
 ): MarsAerialPerspective {
   const distanceThroughHaze = viewZ.negate().sub(FOG_START_METERS).max(0)
   const opticalDepth = distanceThroughHaze
@@ -91,11 +87,9 @@ export function applyMarsAerialPerspective(
     .mul(step(BACKGROUND_NEAR_EPSILON, sceneDepth))
   const throughput = mix(vec3(1), transmittance, surfaceMask)
 
-  // Reconstruct the world-space view ray: the medium's source function is the
-  // sky radiance in the direction we are looking, which carries the sunward
-  // forward-scatter lobe for free (dust reading as dust, not as gray fog).
-  const viewPosition = getViewPosition(uv(), sceneDepth.min(0.9999), projectionInverse)
-  const worldDirection = cameraWorldMatrix.mul(vec4(viewPosition.normalize(), 0)).xyz.normalize()
+  // The pipeline reconstructs this ray from the scene camera. Do not use
+  // TSL's implicit camera nodes here: the final graph is rendered with the
+  // RenderPipeline fullscreen camera, not the player camera.
   const inscatter = marsSkyRadiance(worldDirection, float(0)).min(MAX_INSCATTER)
 
   const veil = oneMinus(throughput)

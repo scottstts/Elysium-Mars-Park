@@ -1,12 +1,9 @@
 import {
   Fn,
-  cameraPosition,
-  cameraWorldMatrix,
   clamp,
   exp,
   float,
   fract,
-  getViewPosition,
   Loop,
   max,
   min,
@@ -19,7 +16,7 @@ import {
   vec4,
 } from 'three/tsl'
 import type { Node } from 'three/webgpu'
-import type { RenderPipelineSystem } from '../render/pipeline'
+import type { HdrTransformContext, RenderPipelineSystem } from '../render/pipeline'
 import { sunColorUniform, sunDirectionUniform } from '../sky/sun'
 import { DOME_BASE_RADIUS, latticeSunVisibility } from './latticeField'
 
@@ -80,27 +77,15 @@ export const interiorHazeStrength = /*@__PURE__*/ uniform(1)
 
 export function attachInteriorShafts(
   pipeline: RenderPipelineSystem,
-  projectionInverse: Node<'mat4'>,
   steps: number,
 ): void {
   const previous = pipeline.hdrTransform
 
   /** Marches the medium once; returns the veil colour and its weight. */
-  const mediumFor = (
-    viewZNode: Node<'float'>,
-    sceneDepthNode: Node<'float'>,
-  ): Node<'vec4'> =>
+  const mediumFor = (extras: HdrTransformContext): Node<'vec4'> =>
     Fn(() => {
-      const viewPosition = getViewPosition(
-        uv(),
-        (sceneDepthNode as unknown as ReturnType<typeof float>).clamp(1e-7, 0.9999),
-        projectionInverse,
-      )
-      const worldDirection = cameraWorldMatrix
-        .mul(vec4(viewPosition.normalize(), 0))
-        .xyz.normalize()
-        .toVar()
-      const surfaceDistance = (viewZNode as unknown as ReturnType<typeof float>)
+      const worldDirection = extras.worldDirectionNode.toVar()
+      const surfaceDistance = extras.viewZNode
         .negate()
         .toVar()
 
@@ -116,7 +101,7 @@ export function attachInteriorShafts(
 
       const density = float(0).toVar()
       const lit = float(0).toVar()
-      const position = cameraPosition
+      const position = extras.cameraWorldPositionNode
         .add(worldDirection.mul(stepLength.mul(jitter.add(0.5))))
         .toVar()
 
@@ -158,10 +143,7 @@ export function attachInteriorShafts(
 
   pipeline.hdrTransform = (hdrColor, extras) => {
     const base = previous(hdrColor, extras) as Node<'vec4'>
-    const medium = mediumFor(
-      extras.viewZNode as Node<'float'>,
-      extras.sceneDepthNode as Node<'float'>,
-    )
+    const medium = mediumFor(extras)
     const inscatter = medium.xyz
     const amount = medium.w
 
@@ -169,13 +151,7 @@ export function attachInteriorShafts(
     pipeline.debugNodes.shafts = vec4(inscatter.mul(amount).mul(8), 1)
     // ?pass=shadows: the analytic net evaluated at the RECONSTRUCTED surface
     // position (positionWorld would be the fullscreen quad's own geometry).
-    const depth = (extras.sceneDepthNode as unknown as ReturnType<typeof float>).clamp(
-      1e-7,
-      0.9999,
-    )
-    const viewPosition = getViewPosition(uv(), depth, projectionInverse)
-    const surfaceWorld = cameraWorldMatrix.mul(vec4(viewPosition, 1)).xyz
-    pipeline.debugNodes.shadows = latticeSunVisibility(surfaceWorld)
+    pipeline.debugNodes.shadows = latticeSunVisibility(extras.surfaceWorldNode)
 
     return vec4(mix(base.rgb, inscatter, amount), base.a)
   }

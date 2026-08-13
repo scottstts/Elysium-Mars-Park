@@ -20,6 +20,10 @@
 - ONE continuous dust medium, applied screen-space in `pipeline.hdrTransform`
   (SeaPark pattern), start 55 m. Interior sightlines (≤500 m) get a
   just-perceptible cue from the same function — deliberate.
+- Its source direction comes from `HdrTransformContext.worldDirectionNode`,
+  reconstructed once from the explicit scene camera by the render pipeline.
+  Do not import TSL's implicit camera nodes here: during the final post graph
+  they describe the fullscreen quad camera, not the player camera.
 - **Rewritten from a fog lerp to the real two-term form**:
   `L = L_surface·T + L_sky(dir)·(1−T)`, `T = exp(−σ·d)`, and both halves matter:
   - **σ is a vec3** — base 1/5200 m on green, ×(0.78, 1.0, 1.28) per channel.

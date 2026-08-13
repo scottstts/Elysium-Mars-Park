@@ -26,7 +26,6 @@ import {
   positionWorld,
   sin,
   smoothstep,
-  uniform,
   vec2,
   vec3,
   vec4,
@@ -74,17 +73,16 @@ export class ExteriorSystem implements GameSystem {
   }
 
   init(ctx: GameContext): void {
-    const { scene, camera } = ctx
+    const { scene } = ctx
 
     // ---- Aerial medium: one continuous dust atmosphere, screen-space.
-    const projectionInverse = uniform(camera.projectionMatrixInverse)
     this.pipeline.hdrTransform = (hdrColor, extras) => {
       const input = hdrColor as Node<'vec4'>
       const { color, amount } = applyMarsAerialPerspective(
         input.rgb,
-        extras.viewZNode as Node<'float'>,
-        extras.sceneDepthNode as Node<'float'>,
-        projectionInverse as unknown as Node<'mat4'>,
+        extras.viewZNode,
+        extras.sceneDepthNode,
+        extras.worldDirectionNode,
       )
       // ?pass=haze: raw fog amount (red = negative, green = 0..1 scale).
       this.pipeline.debugNodes.haze = vec4(

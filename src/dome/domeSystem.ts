@@ -1,6 +1,4 @@
 import { Group } from 'three'
-import { uniform } from 'three/tsl'
-import type { Node } from 'three/webgpu'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import type { RenderPipelineSystem } from '../render/pipeline'
@@ -27,7 +25,7 @@ export class DomeSystem implements GameSystem {
   }
 
   init(ctx: GameContext): void {
-    const { scene, camera, quality } = ctx
+    const { scene, quality } = ctx
     const materials = domeMaterials()
 
     this.group.add(buildDomeStructure(materials))
@@ -42,12 +40,7 @@ export class DomeSystem implements GameSystem {
 
     // Interior shafts splice into the hdrTransform chain after the aerial
     // medium (ExteriorSystem registered it first).
-    const projectionInverse = uniform(camera.projectionMatrixInverse)
-    attachInteriorShafts(
-      this.pipeline,
-      projectionInverse as unknown as Node<'mat4'>,
-      quality.params.shaftSteps,
-    )
+    attachInteriorShafts(this.pipeline, quality.params.shaftSteps)
   }
 
   dispose(ctx: GameContext): void {

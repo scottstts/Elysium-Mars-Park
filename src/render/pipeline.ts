@@ -46,6 +46,23 @@ import { gradeParams, marsGrade } from './grade'
 import { recommendedPixelRatio } from './renderer'
 
 /**
+ * Scene-camera coordinates reconstructed once for fullscreen HDR effects.
+ *
+ * A RenderPipeline draws its final graph with an internal orthographic quad
+ * camera, so TSL's implicit camera nodes do not describe the player camera in
+ * this part of the graph. Effect owners must consume this explicit context
+ * instead of importing cameraPosition/cameraWorldMatrix themselves.
+ */
+export interface HdrTransformContext {
+  sceneDepthNode: Node<'float'>
+  viewPositionNode: Node<'vec3'>
+  viewZNode: Node<'float'>
+  cameraWorldPositionNode: Node<'vec3'>
+  worldDirectionNode: Node<'vec3'>
+  surfaceWorldNode: Node<'vec3'>
+}
+
+/**
  * Contact-AO world radius. Raised from the S4 value of 0.3 m for the rebuilt
  * park: the reference image's grounding comes from 0.3–0.8 m features —
  * kerb noses, planter walls, bench legs, building bases, the reveal under a
@@ -119,7 +136,7 @@ export class RenderPipelineSystem implements GameSystem {
    */
   hdrTransform: (
     hdrColor: object,
-    extras: { viewZNode: object; sceneDepthNode: object },
+    extras: HdrTransformContext,
   ) => object = (c) => c
 
   init(ctx: GameContext): void {
@@ -271,9 +288,19 @@ export class RenderPipelineSystem implements GameSystem {
     // to resolve a horizon. The projected-radius criterion adapts to FOV,
     // viewport resolution, render scale, and AO divisor; it replaces the old
     // fixed 28→70 m workaround and does not hide a near/mid-field defect.
-    const footprintDepth = sceneDepth.sample(uv()).r.clamp(1e-7, 0.999999)
+    const sceneDepthNode = sceneDepth.sample(uv()).r
+    const footprintDepth = sceneDepthNode.clamp(1e-7, 0.999999)
     const footprintView = getViewPosition(uv(), footprintDepth, projectionInverse)
     const viewZNode = footprintView.z
+    // These are deliberately derived from the explicit SCENE camera uniform.
+    // The final graph itself is rendered by RenderPipeline's orthographic
+    // fullscreen camera; implicit TSL camera nodes would bind to that camera
+    // and make world-space effects screen-fixed.
+    const cameraWorldPositionNode = cameraWorld.mul(vec4(0, 0, 0, 1)).xyz
+    const worldDirectionNode = cameraWorld
+      .mul(vec4(footprintView.normalize(), 0))
+      .xyz.normalize()
+    const surfaceWorld = cameraWorld.mul(vec4(footprintView, 1)).xyz
     const projectedAoRadius = aoNode.projectedRadiusPixels(viewZNode)
     const aoCompetence = smoothstep(8, 16, projectedAoRadius)
     const distanceFilteredAo = mix(float(1), reconstructedAo, aoCompetence)
@@ -315,7 +342,6 @@ export class RenderPipelineSystem implements GameSystem {
     // into NaN — which then rides `indirectFraction` into the composite as
     // undefined-colour pixels on some drivers.
     const worldNormal = cameraWorld.mul(vec4(normalUnit, 0)).xyz
-    const surfaceWorld = cameraWorld.mul(vec4(footprintView, 1)).xyz
     const ambientTerm = luminance(marsAmbientIrradiance(worldNormal)).mul(ENVIRONMENT_INTENSITY)
     const sunTerm = max(dot(worldNormal, sunDirectionUniform), 0)
       .mul(SUN_LIGHT_INTENSITY * (0.2126 + 0.7152 * sunColor.g + 0.0722 * sunColor.b))
@@ -331,7 +357,11 @@ export class RenderPipelineSystem implements GameSystem {
 
     const withMedium = this.hdrTransform(occluded, {
       viewZNode,
-      sceneDepthNode: sceneDepth.sample(uv()).r,
+      sceneDepthNode,
+      viewPositionNode: footprintView,
+      cameraWorldPositionNode,
+      worldDirectionNode,
+      surfaceWorldNode: surfaceWorld,
     }) as typeof occluded
 
     const bloomNode = bloom(withMedium, BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD)
@@ -393,6 +423,12 @@ export class RenderPipelineSystem implements GameSystem {
       }
       case 'normal':
         outputNode = vec4(sceneNormal.rgb.mul(0.5).add(0.5), 1.0)
+        break
+      // Scene-camera world ray encoded from [-1, 1] to [0, 1]. This must
+      // rotate when the player camera rotates; a screen-fixed result means a
+      // fullscreen effect has accidentally rebound to the pipeline quad.
+      case 'worldray':
+        outputNode = vec4(worldDirectionNode.mul(0.5).add(0.5), 1.0)
         break
       case 'shafts':
         outputNode = renderOutput(

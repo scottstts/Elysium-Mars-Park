@@ -36,8 +36,14 @@ Choices beyond the code:
   forcing receiver 0 — AO seen through glass is the background's own, which
   is the physically right answer. Any future transparent/additive billboard
   MUST carry the `vec4(0)` override; the pass default writes alpha 1.
-- **`hdrTransform` hook** is where S4's interior haze + shafts transform the
-  HDR image (depth-aware), keeping the pipeline file effect-agnostic.
+- **`hdrTransform` hook** is where aerial perspective and S4's interior haze
+  + shafts transform the HDR image (depth-aware), keeping the pipeline file
+  effect-agnostic. Its `HdrTransformContext` is the single owner of post-pass
+  scene-camera reconstruction: depth, view position/Z, camera world origin,
+  world ray, and surface world position all come from the explicit player
+  camera uniforms in `pipeline.ts`. A `RenderPipeline` draws the final graph
+  with its own orthographic quad camera, so fullscreen effects must never use
+  TSL's implicit `cameraPosition` or `cameraWorldMatrix`.
 - **Fixed authored exposure** (`gradeParams.exposureEV`) — no meter, no
   adaptation; the frozen afternoon makes metering pointless (plan §0).
 - **Mars grade**: warm shadow lift (Mars skylight is butterscotch — shadows
@@ -46,11 +52,31 @@ Choices beyond the code:
 - `compileAsync()` adapter reaches into `RenderPipeline._quadMesh` (guarded,
   throws on upgrade) because r185 lacks a public async compile for it.
 - `?pass=` views: final · nopost · ao · aoraw · aodenoised · aoradius ·
-  aoshare · aoapplied · bloom · depth · normal · shafts · shadows (last two
-  filled by S4 via `pipeline.debugNodes`). `aoradius` is projected gather
-  radius divided by 16: white means the AO gather is fully competent.
+  aoshare · aoapplied · bloom · depth · normal · worldray · shafts · shadows
+  (last two filled by S4 via `pipeline.debugNodes`). `worldray` encodes the
+  scene-camera world ray from [-1,1] to [0,1] and must rotate with the player
+  camera. `aoradius` is projected gather radius divided by 16: white means the
+  AO gather is fully competent.
 - Gallery scene (`?view=gallery`) is the standing calibration set: PBR
   sweeps, emissive bloom bar, thin-member AO sentinel, contact boxes.
+
+## Fullscreen scene-camera ownership (2026-08-13)
+
+The horizontal light/dark split seen while looking up was not a sky gradient
+or dome-glass layer. `interiorHaze.ts` reconstructed view position with the
+player projection but transformed and marched it with TSL's implicit
+`cameraWorldMatrix` and `cameraPosition`. Inside the final fullscreen graph
+those nodes bind to `RenderPipeline`'s identity/origin orthographic quad
+camera. The resulting pseudo-world Y changes sign at NDC Y=0, so the medium's
+ground/height gates produced a boundary at the exact screen midpoint that did
+not move with camera pitch. The aerial medium had the same latent camera
+binding error in its sky-source direction.
+
+`RenderPipelineSystem` now reconstructs the post coordinate bundle once from
+`uniform(camera.projectionMatrixInverse)` and `uniform(camera.matrixWorld)`.
+Both media consume that shared context, as does the analytic-shadow debug tap.
+This is an ownership rule, not a visual compensation: no haze, grading, AO,
+bloom, glass, or shadow constants changed.
 
 ## AO barcode correction (2026-08-12)
 
