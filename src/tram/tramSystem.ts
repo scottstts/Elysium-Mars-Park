@@ -7,7 +7,6 @@ import type { PlayerSystem } from '../player/playerSystem'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import { markDynamic } from '../render/layers'
-import { interiorHeight } from '../world/interiorHeight'
 import { LOOP } from '../world/parkPlan'
 import { buildPortalGate } from './portalGate'
 import type { PortalGate } from './portalGate'
@@ -264,11 +263,11 @@ export class TramSystem implements GameSystem {
       .set(1, 0, 0)
       .applyQuaternion(car.group.getWorldQuaternion(this.rotationScratch))
     const door = this.colliderCentre.copy(car.group.position).addScaledVector(left, 2.4)
-    door.y = interiorHeight(door.x, door.z) + 0.02
-    // Every platform decks at the cabin floor less the 20 mm step.
-    if (Math.abs(Math.hypot(door.x, door.z) - LOOP.radius) < 8) {
-      door.y = carFloorY(door.x, door.z) - 0.02
-    }
+    // carFloorY is a guideway datum, so sample it on the Loop rather than at
+    // the inboard stand point. Sampling at the door made the exit start above
+    // the real platform and gravity visibly settled the player afterward.
+    const radialScale = LOOP.radius / Math.hypot(door.x, door.z)
+    door.y = carFloorY(door.x * radialScale, door.z * radialScale) - 0.02
     player.standAt(door)
   }
 
