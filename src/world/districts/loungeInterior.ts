@@ -330,6 +330,49 @@ function lowTable(x: number, y: number, z: number, radius: number): Part[] {
   ]
 }
 
+// --------------------------------------------------------------- stairs ----
+
+interface FlightSpec {
+  origin: Vector3
+  yaw: number
+  steps: number
+  width: number
+  rise: number
+  run: number
+}
+
+/**
+ * Collide a flight TREAD BY TREAD, so it can actually be walked.
+ *
+ * Both flights used to be covered by one solid box spanning the whole rise:
+ * the geometry was there, the guardrails were there, and the player simply hit
+ * a wall (owner report). One box per going — top face exactly on the tread,
+ * carried down to the flight's foot so there is no way to fall between them —
+ * gives the character controller a 0.17 m step against a 0.42 m autostep, and
+ * the stair reads to physics exactly as it reads to the eye.
+ */
+function stairColliders(services: DistrictServices, spec: FlightSpec): void {
+  const sin = Math.sin(spec.yaw)
+  const cos = Math.cos(spec.yaw)
+  for (let i = 0; i < spec.steps; i++) {
+    const top = spec.origin.y + (i + 1) * spec.rise
+    const centreAlong = (i + 0.5) * spec.run
+    const height = top - (spec.origin.y - 0.25)
+    services.colliders.push({
+      kind: 'box',
+      center: new Vector3(
+        spec.origin.x + sin * centreAlong,
+        top - height / 2,
+        spec.origin.z + cos * centreAlong,
+      ),
+      size: new Vector3(spec.width, height, spec.run),
+      // `ColliderSpec.yaw` rotates the box about +Y, and the flight's LENGTH is
+      // its local z — the same convention `stairFlight` uses for its treads.
+      yaw: spec.yaw,
+    })
+  }
+}
+
 // -------------------------------------------------------------- fit-out ----
 
 export function buildLoungeInterior(services: DistrictServices): void {
@@ -397,9 +440,16 @@ export function buildLoungeInterior(services: DistrictServices): void {
 
   // ---- mezzanine: a chord-cut plate over the north third.
   const mezzOuterAx = shell.ax - 0.5
-  const mezzOuterAz = shell.az - 0.5
   const chordV = -2.2
-  const tCut = Math.asin(Math.max(-1, Math.min(1, chordV / mezzOuterAz)))
+  // The arc is the part of the ellipse NORTH of the chord: `az·sin t ≤ chordV`
+  // gives `t ∈ [−π + tCut, −tCut]`, which is symmetric about −π/2.
+  //
+  // It used to sweep `[−(π − asin(chordV/az)), … ]` over a span of `π + 2·asin`,
+  // which is neither symmetric nor the right length: the plate came out as a
+  // lopsided crescent running from v = +2.25 on the west flank to v = −6.18 on
+  // the east, so the "chord" was a slanted line 8.4 m out of true and flight 1
+  // aimed at an edge that was not there.
+  const tCut = Math.asin(Math.max(-1, Math.min(1, -chordV / shell.az)))
   // The slab stops 30 mm inside the ring beam's inner face. Flush is not an
   // option: the beam's inner edge is a swept chord-normal offset and this is a
   // scaled ellipse, and the two curves cross each other all the way round.
@@ -407,7 +457,7 @@ export function buildLoungeInterior(services: DistrictServices): void {
   const arcSteps = 40
   const mezzInset = 0.53
   for (let i = 0; i <= arcSteps; i++) {
-    const t = -(Math.PI - tCut) + ((Math.PI + 2 * tCut) * i) / arcSteps
+    const t = -Math.PI + tCut + ((Math.PI - 2 * tCut) * i) / arcSteps
     const ct = Math.cos(t)
     const st = Math.sin(t)
     const nl = Math.hypot(shell.az * ct, shell.ax * st) || 1
@@ -417,6 +467,10 @@ export function buildLoungeInterior(services: DistrictServices): void {
     ])
   }
   parts.push(['cast', bevel(prism(ccw(mezzPoly), shell.mezzBottom, shell.mezzTop), BEVEL.carcass, 2)])
+  // The slab's real south edge, which is where flight 1 has to land. It is NOT
+  // `chordV`: the poly's arc ends are pulled 45 mm further north by the
+  // true-normal inset, and a flight aimed at `chordV` stops that far short.
+  const mezzEdgeV = Math.max(...mezzPoly.map((p) => p[1])) - shell.z
 
   // Edge beam UNDER the slab's chord, plus a guardrail broken where the stair
   // lands. Inside the slab's own depth it would simply z-fight its top face.
@@ -473,43 +527,80 @@ export function buildLoungeInterior(services: DistrictServices): void {
       parts.push(['orange', smoothShade(post, SMOOTH.moulded)])
     }
   }
+  const mezzNorthV = -(shell.az - mezzInset)
   services.colliders.push({
     kind: 'box',
-    center: new Vector3(shell.x, (shell.mezzBottom + shell.mezzTop) / 2, vz((chordV - shell.az) / 2)),
-    size: new Vector3(2 * mezzOuterAx, shell.mezzTop - shell.mezzBottom, shell.az - 0.5 + chordV),
+    center: new Vector3(
+      shell.x,
+      (shell.mezzBottom + shell.mezzTop) / 2,
+      vz((mezzEdgeV + mezzNorthV) / 2),
+    ),
+    size: new Vector3(2 * mezzOuterAx, shell.mezzTop - shell.mezzBottom, mezzEdgeV - mezzNorthV),
   })
+  // Guardrail along the mezzanine's open chord, broken where the flight lands
+  // — a floor you can now walk on needs an edge you cannot walk off.
+  for (const [u0, u1] of [
+    [-chordHalf + 0.2, 1.7],
+    [3.5, chordHalf - 0.2],
+  ]) {
+    services.colliders.push({
+      kind: 'box',
+      center: new Vector3(ux((u0 + u1) / 2), shell.mezzTop + 0.55, vz(chordV - 0.09)),
+      size: new Vector3(u1 - u0, 1.1, 0.24),
+    })
+  }
 
-  // ---- stairs. Flight 1 runs north to the mezzanine, flight 2 east across it
-  // to the roof opening. Both are authored ONE RISER SHORT: the floor they
-  // arrive at IS the top nosing, which is how a real flight meets a slab and
-  // the only way the last tread does not end up buried in it.
+  // ---- stairs. Flight 1 runs north to the mezzanine, flight 2 north again
+  // across it to the roof opening. Both are authored ONE RISER SHORT: the
+  // floor they arrive at IS the top nosing, which is how a real flight meets a
+  // slab and the only way the last tread does not end up buried in it —
+  // which is why each origin is `steps · run` back from the slab edge it lands
+  // on, not `(steps + 1) · run`. At 23 the top tread finished 0.34 m short of
+  // the mezzanine and left a gap the capsule had to bridge.
+  const RUN = 0.29
   const riseA = (shell.mezzTop - shell.floor) / 23
-  stairFlight(services.writer, {
-    origin: new Vector3(ux(2.6), shell.floor, vz(chordV + 23 * 0.29)),
+  const flightA = {
+    origin: new Vector3(ux(2.6), shell.floor, vz(mezzEdgeV + 22 * RUN)),
     yaw: Math.PI,
     steps: 22,
     width: 1.5,
     rise: riseA,
-    run: 0.29,
-  })
-  services.colliders.push({
-    kind: 'box',
-    center: new Vector3(ux(2.6), shell.floor + (shell.mezzTop - shell.floor) / 2 - 0.4, vz(chordV + 3.4)),
-    size: new Vector3(1.7, shell.mezzTop - shell.floor, 6.9),
-  })
-  const opening = shell.roofOpening
+    run: RUN,
+  }
+  stairFlight(services.writer, flightA)
+  stairColliders(services, flightA)
+
+  // Flight 2 climbs SOUTH along the drum's long axis, from the mezzanine's
+  // north end out into the middle of the roof terrace.
+  //
+  // It used to run east–west and climb toward the penthouse's blank wall: the
+  // U-shaped penthouse opens WEST and the flight arrived at its EAST end, so
+  // the head of the stair faced a wall with the stairwell behind it. Running
+  // it along v also solves the headroom, which is what really sets the roof
+  // opening's length — the soffit is 2.88 m over the mezzanine and a climber
+  // needs 1.8 m of it, so every tread above `mezzTop + 1.08` must be under
+  // open sky. That is treads 6 upward, i.e. the last 4.0 m of a 5.51 m run,
+  // and no 2.7 m hole can cover it.
   const riseB = (shell.roofTop - shell.mezzTop) / 20
-  stairFlight(services.writer, {
-    origin: new Vector3(ux(opening.u1 - 20 * 0.29), shell.mezzTop, vz((opening.v0 + opening.v1) / 2)),
-    yaw: Math.PI / 2,
+  const opening = shell.roofOpening
+  const flightB = {
+    // 19 goings back from the well's south edge, so the top nosing IS that
+    // edge and the climber steps straight off onto the terrace deck.
+    origin: new Vector3(ux((opening.u0 + opening.u1) / 2), shell.mezzTop, vz(opening.v1 - 19 * RUN)),
+    yaw: 0,
     steps: 19,
     width: 1.4,
     rise: riseB,
-    run: 0.29,
-  })
+    run: RUN,
+  }
+  stairFlight(services.writer, flightB)
+  stairColliders(services, flightB)
 
   // Roof penthouse over the opening: three cast walls as one U prism, a lid,
   // and a warm lens so the head of the stair reads at dusk from the terrace.
+  // Its open side is the SOUTH one, which is the direction the flight climbs —
+  // a stair house has its door at the head of its own stair, and this one used
+  // to open west while the flight arrived from the east.
   const pu = (opening.u0 + opening.u1) / 2
   const pv = (opening.v0 + opening.v1) / 2
   const hu = (opening.u1 - opening.u0) / 2 + 0.22
@@ -522,11 +613,11 @@ export function buildLoungeInterior(services: DistrictServices): void {
           [ux(pu - hu), vz(pv - hv)],
           [ux(pu + hu), vz(pv - hv)],
           [ux(pu + hu), vz(pv + hv)],
-          [ux(pu - hu), vz(pv + hv)],
-          [ux(pu - hu), vz(pv + hv - 0.22)],
-          [ux(pu + hu - 0.22), vz(pv + hv - 0.22)],
+          [ux(pu + hu - 0.22), vz(pv + hv)],
           [ux(pu + hu - 0.22), vz(pv - hv + 0.22)],
-          [ux(pu - hu), vz(pv - hv + 0.22)],
+          [ux(pu - hu + 0.22), vz(pv - hv + 0.22)],
+          [ux(pu - hu + 0.22), vz(pv + hv)],
+          [ux(pu - hu), vz(pv + hv)],
         ] as Vec2[]),
         shell.roofTop,
         shell.roofTop + 2.24,
@@ -550,12 +641,11 @@ export function buildLoungeInterior(services: DistrictServices): void {
     ),
   ])
   // The lens is recessed into the LID's soffit (2.24), 4 mm clear of it, just
-  // inboard of the opening's head. The penthouse is a U — its fourth side is
-  // the doorway — so at z 2.06…2.12 on the `pu − hu` line there was no wall
-  // behind this strip at all: it hung in the middle of the opening.
+  // inboard of the doorway head. It has to sit over a WALL line: the penthouse
+  // is a U, so a strip on the open side hangs in mid-air over the stairwell.
   const lamp = bevel(
     prism(
-      roundedRect(0.09, 0.5, 0.02, 2).map(([x, z]) => [ux(pu - hu + 0.14) + x, vz(pv) + z] as Vec2),
+      roundedRect(0.5, 0.09, 0.02, 2).map(([x, z]) => [ux(pu) + x, vz(pv + hv - 0.14) + z] as Vec2),
       shell.roofTop + 2.176,
       shell.roofTop + 2.236,
     ),
@@ -563,11 +653,19 @@ export function buildLoungeInterior(services: DistrictServices): void {
     1,
   )
   parts.push(['utilityLight', smoothShade(lamp, SMOOTH.tight)])
-  services.colliders.push({
-    kind: 'box',
-    center: new Vector3(ux(pu + 0.11), shell.roofTop + 1.2, vz(pv)),
-    size: new Vector3(2 * hu - 0.22, 2.4, 2 * hv),
-  })
+  // Penthouse WALLS, not a solid block. The old box filled the whole house and
+  // sealed the head of the stair off from the terrace it exists to reach.
+  for (const [cu, cv, su, sv] of [
+    [pu, pv - hv + 0.11, 2 * hu, 0.22],
+    [pu - hu + 0.11, pv, 0.22, 2 * hv],
+    [pu + hu - 0.11, pv, 0.22, 2 * hv],
+  ]) {
+    services.colliders.push({
+      kind: 'box',
+      center: new Vector3(ux(cu), shell.roofTop + 1.2, vz(cv)),
+      size: new Vector3(su, 2.4, sv),
+    })
+  }
 
   // ---- the seating. Everything on the ground floor is aimed west, at the
   // plain: design.md's "chairs aimed at nothing but Mars".
@@ -593,6 +691,19 @@ export function buildLoungeInterior(services: DistrictServices): void {
   placeChair(services, parts, ux(0.9), shell.floor, vz(4.9), 0.2, -1)
   placeChair(services, parts, ux(0.4), shell.floor, vz(2.9), -0.2, 1)
   for (const part of lowTable(ux(0.65), shell.floor, vz(3.9), 0.3)) parts.push(part)
+
+  // Roof terrace seating. The terrace is a place now that the flight up to it
+  // works, and an empty deck with a 4.9 m stair house on it reads as plant, not
+  // as a room. Kept on the west flank, well inboard of the guardrail, aimed at
+  // the plain like everything else in this building.
+  for (const [u, v, fan] of [
+    [-3.3, -0.9, 0.06],
+    [-3.25, 1.5, -0.1],
+    [-2.95, 3.9, -0.26],
+  ]) {
+    placeChair(services, parts, ux(u), shell.roofTop, vz(v), -Math.cos(fan), Math.sin(fan))
+  }
+  for (const part of lowTable(ux(-2.1), shell.roofTop, vz(0.3), 0.32)) parts.push(part)
 
   // Mezzanine seating, visible through the upper glazing from the rim walk.
   // Kept off v = −4.8 … −6.2, which the flight to the roof runs through.

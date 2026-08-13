@@ -3383,3 +3383,72 @@ Fix is at the source: `targetSpeed / max(1, hypot(forward, strafe))`.
   `tools/crop-audit.mjs`, `tools/farm-layout-audit.mjs`. The lounge one's
   "floating part" test — a part whose inflated box touches nothing else and
   reaches no floor level — is generic and worth porting to other interiors.
+
+## Owner fix session (2026-08-13, evening)
+
+- **A bogied vehicle is placed by its BOGIES, not by a point on the alignment.**
+  `tramSystem.placeCars` used to set each car's position to a curve sample and
+  its heading to a ±0.75 m chord. On the arrival spur's hook that threw the
+  car's own bogies **0.82 m off the guideway** they run on, and blew the
+  coupler-face span out to 1.97 m. Chording between the two bogie centres
+  (±2.45 m) is one line of change and brings the worst wheel error over the
+  whole park to 66 mm and the span to 1.24 m. Anything else carried on a pair
+  of trucks should be placed the same way. `tools/tram-alignment-probe.mjs`
+  prints both models side by side.
+- **The arrival spur's hook is a 5.3 m radius.** `ARRIVAL_SPINE` runs dead
+  straight down x = 0 to the portal and then has to meet the loop tangentially
+  at (0, 97), which is a ~85° reverse curve inside 11 m. Two rigid 8 m cars on
+  that sit **53° apart while docked** — the pose guests stand next to for 22
+  seconds — with 1.45 m between their coupler faces against 0.58 m on plain
+  track. Every choice in `tramCoupling` follows from that measured range. If the
+  alignment is ever revisited, that hook is the thing to fix; nothing
+  downstream of it can be made to look like real hardware for free.
+- **A joint's TYPE is set by the worst angle it sees, not by the nominal one.**
+  A spherical seat closes over its ball at ~66°, so it cannot pass a bar leaving
+  at 95° — which is what the rear car asks for at the stop. A vertical KINGPIN
+  in an open fork has no yaw limit at all, and pitch/roll on a 4 % grade is a
+  bush's job. Check the extreme before choosing the mechanism.
+- **Absorb a stroke by TRANSLATING parts, never by scaling one.** The old draw
+  gear stretched a ribbed bellows over 0.06 → 0.61 m; past about double, a
+  bellows reads as a lumpy sausage. Four nested 0.44 m tubes cover 0.58 → 1.45 m
+  with 135 mm of overlap in hand and no part is ever distorted.
+- **A flexible part has to be REBUILT, not posed.** The jumper hoses are a
+  fixed-topology tube whose positions and normals are recomputed each fixed step
+  from a Hermite between the two glands (22 × 8 verts; free at 60 Hz). Two
+  things it taught: the arriving tangent's rise is NEGATIVE (it is a direction
+  of travel, not an offset), and the glands must be CANTED outboard and up —
+  aimed along their own car's axis they aim across the *other* car's nose on the
+  hook, and the hose's first third runs through it.
+- **Colliders are a separate model and they rot separately.** The Overlook
+  Lounge had correct stair geometry with ONE SOLID BOX over each flight, drum
+  walls that stopped 0.54 m above the mezzanine floor, and no roof deck at all —
+  so two of its three storeys were unreachable and the third was fall-through.
+  If a building has floors, gate the WALK, not the parts: `tools/lounge-audit.mjs`
+  now climbs both flights against the collider set with the real capsule and
+  autostep, and checks headroom, landing heights and edge protection.
+- **Quantised colliders cut apertures in the wrong place.** Tiling the roof
+  terrace on a fixed 1.35 m grid and dropping any cell that touched the stair
+  well moved the well's edge outward by up to 0.77 m — the head of the flight
+  came out over open air. Tile each band around the aperture with cells sized to
+  divide it exactly instead.
+- **`asin` gives you an angle, not an arc.** The mezzanine's chord-cut plate
+  swept `[−(π − tCut), … ]` over `π + 2·tCut`, which is neither symmetric about
+  the drum's axis nor the right length: the plate shipped as a lopsided crescent
+  running from v = +2.25 on one flank to −6.18 on the other, 8.4 m out of true.
+  For `az·sin t ≤ chordV` the arc is `[−π + asin(−chordV/az), −asin(−chordV/az)]`.
+  Derive the limits from the inequality you actually mean.
+- **Bury a rim inside solid material rather than landing it on a face.** The
+  portal hood's two bad seams were a sheet landing tangentially on the bulkhead's
+  flange plane: every meridian's last half metre sat within its own 55 mm wall of
+  that plane, and at the two meridians where the glass aperture crosses z =
+  127.10 the WHOLE meridian did. Moving the rim to (r 9.52, z 127.90) — inside
+  the casting, between the flange and the petal slot — makes every meridian
+  PIERCE the face at 24…58° instead, and trimming the hood to the arc where it
+  genuinely stands clear removes the buried lower half entirely.
+  `tools/portal-audit.mjs` gates the crossing angle and the coplanar band width.
+- **A stair you do not want climbed still has to STOP you.** The hydro tower's
+  spiral only collided its newel, so guests walked through the flight. It is
+  now a flat-topped barrier over the sector where the treads are below head
+  height — 3.4 m tall so it cannot be jumped in 0.38 g, and absent past that
+  sector, where the treads are genuinely overhead and you should be able to walk
+  under them.

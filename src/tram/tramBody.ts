@@ -24,7 +24,7 @@ import {
   sectionAt,
   taperApply,
 } from './tramShape'
-import { COUPLER_HEAD_Z } from './tramCoupling'
+import { COUPLER_HEAD_Z, PIN_Y } from './tramCoupling'
 import type { TramMaterials } from './tramMaterials'
 
 /**
@@ -457,17 +457,17 @@ export function buildEnd(slots: SlotMesh, end: -1 | 1): void {
     18,
   )
   slots.add(setSlot(hazard, 'orange'), 'orange')
-  // Coupler head pocket. It finishes at `COUPLER_HEAD_Z` on every end, which
-  // is the datum `tramCoupling` mounts the articulated draw gear on: the
-  // socket housing plugs into this section at the rear car's nose and the bar
-  // is pinned in it at the front car's tail. It used to run out to 4.24, which
-  // left only 0.22 m of free span between the two heads — not enough to model
-  // a real joint in.
+  // Draft housing. It finishes at `COUPLER_HEAD_Z`, which is where
+  // `tramCoupling` roots its kingpin fork — the fork's jaws lap 80 mm back
+  // into this block, so the two are plugged together rather than butted.
+  // It sits at the coupler's own datum (y = `PIN_Y`, below the bumper): the
+  // bar swings to 95 deg in yaw on the platform hook, and anything on the
+  // car's face at the bar's height would be inside that sweep.
   const coupler = prism(
-    roundedRect(0.3, 0.2, 0.05, 3),
+    roundedRect(0.46, 0.34, 0.06, 3).map(([x, y]) => [x, y + PIN_Y] as Vec2),
     'z',
-    end > 0 ? 4.0 : -COUPLER_HEAD_Z,
-    end > 0 ? COUPLER_HEAD_Z : -4.0,
+    end > 0 ? 3.62 : -COUPLER_HEAD_Z,
+    end > 0 ? COUPLER_HEAD_Z : -3.62,
     22,
   )
   slots.add(setSlot(coupler, 'dark'), 'dark')

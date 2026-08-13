@@ -241,8 +241,26 @@ function buildPortalCollar(writer: PartWriter): void {
  *    instead of butting it at an angle.
  */
 const SKIRT_RINGS = 12
-const SKIRT_SEGMENTS = 96
-const SKIRT_WALL = 0.11
+const SKIRT_SEGMENTS = 72
+const SKIRT_WALL = 0.07
+/**
+ * The rim ring is BURIED in the collar: 100 mm inside the drum and 0.80 m
+ * outboard of the flange face, between it and the petal slot at 128.10.
+ *
+ * That one move is what removed the two seams the owner reported. A rim landing
+ * ON the flange (r 9.70, z 127.10) has to approach that plane tangentially, and
+ * every meridian's last half metre then lies within the sheet's own 55 mm wall
+ * of the flange face — a near-coplanar ring all the way round. Worse, at the
+ * two meridians where the glass aperture crosses z = 127.10 (10.5 deg below the
+ * axis, left and right) the WHOLE meridian lies in that plane, which is the
+ * pair of lens-shaped patches on the hood. A rim inside the casting is reached
+ * by a meridian that PIERCES the flange face at 34…56 deg, so the sheet meets
+ * it transversally and the rest of it is hidden inside solid metal.
+ */
+const SKIRT_RIM_R = 9.52
+const SKIRT_RIM_Z = 127.9
+/** How far in front of the flange face the hood's two ends must still stand. */
+const SKIRT_CLEAR = 0.9
 
 /** Sphere z of the glass aperture on this meridian. */
 function apertureZ(cos: number, sin: number): number {
@@ -251,43 +269,65 @@ function apertureZ(cos: number, sin: number): number {
   return Math.sqrt(Math.max(1, DOME_SPHERE_RADIUS * DOME_SPHERE_RADIUS - x * x - dy * dy))
 }
 
-/** The flare's mid-surface: `t` 0 at the glass aperture, 1 at the flange. */
+/**
+ * The flare's mid-surface: `t` 0 at the glass aperture, 1 at the buried rim.
+ *
+ * The meridian is a cubic Hermite with end slopes 3.0 and 1.5 — steep off the
+ * glass so the hood clears it at once (a symmetric ease left 50 mm at the
+ * springing), flatter through the middle, and still moving when it reaches the
+ * casting so it cuts the flange face instead of grazing it.
+ */
 function skirtPoint(cos: number, sin: number, t: number): Vector3 {
-  const r = PORTAL_BORE + (COLLAR_OUTER - PORTAL_BORE) * t
+  const r = PORTAL_BORE + (SKIRT_RIM_R - PORTAL_BORE) * t
   const az = apertureZ(cos, sin)
-  const ease = 1 - (1 - t) * (1 - t)
-  return new Vector3(
-    cos * r,
-    PORTAL_AXIS_Y + sin * r,
-    az + (COLLAR_INBOARD_Z - az) * ease,
-  )
+  const h = t * (2 + t * (-2 + t))
+  return new Vector3(cos * r, PORTAL_AXIS_Y + sin * r, az + (SKIRT_RIM_Z - az) * h)
+}
+
+/** Meridian angle at which the aperture is `SKIRT_CLEAR` in front of the flange. */
+function skirtBandEnd(): number {
+  const target = COLLAR_INBOARD_Z - SKIRT_CLEAR
+  let lo = -Math.PI / 2
+  let hi = Math.PI / 2
+  for (let i = 0; i < 48; i++) {
+    const mid = (lo + hi) / 2
+    if (apertureZ(Math.cos(mid), Math.sin(mid)) > target) lo = mid
+    else hi = mid
+  }
+  return (lo + hi) / 2
 }
 
 function buildPortalSkirt(writer: PartWriter): void {
-  // Mid-surface grid, angle-major. The ring is closed, so the seam column is
-  // not duplicated and the normals wrap without a shading break.
+  // The hood is an ARC, not a ring: below `skirtBandEnd` the glass aperture is
+  // level with, or outboard of, the bulkhead face, so there is nothing for a
+  // transition piece to span — the glass runs straight into the casting and the
+  // tube shell covers the rest. The old full ring buried its whole lower half
+  // inside the collar, which is where the two bad seams lived.
+  const a0 = skirtBandEnd()
+  const a1 = Math.PI - a0
+
   const grid: Vector3[][] = []
   for (let i = 0; i <= SKIRT_RINGS; i++) {
     const t = i / SKIRT_RINGS
     const ring: Vector3[] = []
-    for (let s = 0; s < SKIRT_SEGMENTS; s++) {
-      const angle = (s / SKIRT_SEGMENTS) * Math.PI * 2
+    for (let s = 0; s <= SKIRT_SEGMENTS; s++) {
+      const angle = a0 + ((a1 - a0) * s) / SKIRT_SEGMENTS
       ring.push(skirtPoint(Math.cos(angle), Math.sin(angle), t))
     }
     grid.push(ring)
   }
 
   // Per-vertex normals by central differences over that grid — smooth in both
-  // directions, which is the whole point of subdividing the meridian.
+  // directions, which is the whole point of subdividing the meridian. The arc
+  // is open now, so both ends take a one-sided difference.
+  const last = SKIRT_SEGMENTS
   const normals: Vector3[][] = grid.map((ring, i) =>
     ring.map((p, s) => {
-      const prevS = ring[(s - 1 + SKIRT_SEGMENTS) % SKIRT_SEGMENTS]
-      const nextS = ring[(s + 1) % SKIRT_SEGMENTS]
       const along = new Vector3().subVectors(
         grid[Math.min(SKIRT_RINGS, i + 1)][s],
         grid[Math.max(0, i - 1)][s],
       )
-      const across = new Vector3().subVectors(nextS, prevS)
+      const across = new Vector3().subVectors(ring[Math.min(last, s + 1)], ring[Math.max(0, s - 1)])
       void p
       // `across × along` faces the park — the side seen through the bore.
       return new Vector3().crossVectors(across, along).normalize()
@@ -302,12 +342,12 @@ function buildPortalSkirt(writer: PartWriter): void {
   )
 
   const sheet = new SmoothSoup()
-  const arc = (s: number): number => (s / SKIRT_SEGMENTS) * Math.PI * 2 * COLLAR_OUTER
-  const span = (i: number): number => (i / SKIRT_RINGS) * (COLLAR_OUTER - PORTAL_BORE)
+  const arc = (s: number): number => (s / SKIRT_SEGMENTS) * (a1 - a0) * COLLAR_OUTER
+  const span = (i: number): number => (i / SKIRT_RINGS) * (SKIRT_RIM_R - PORTAL_BORE)
   const flip = (n: Vector3): Vector3 => n.clone().negate()
   for (let i = 0; i < SKIRT_RINGS; i++) {
     for (let s = 0; s < SKIRT_SEGMENTS; s++) {
-      const s2 = (s + 1) % SKIRT_SEGMENTS
+      const s2 = s + 1
       // Wound so the face is CCW seen from `normals`, which points at the park.
       sheet.tri(
         [park[i][s], park[i + 1][s2], park[i + 1][s]],
@@ -333,8 +373,9 @@ function buildPortalSkirt(writer: PartWriter): void {
   }
   sheet.emit(writer, 'duct')
 
-  // Rim bands: the 110 mm sheet edge at the aperture and at the flange, each
-  // with its own edge normal so the arris creases instead of smearing.
+  // Rim band: the 110 mm sheet edge at the aperture, with its own edge normal
+  // so the arris creases instead of smearing. The OUTER edge needs none — it
+  // finishes inside the collar casting, where nothing can see it.
   const rim = (ringIndex: number, neighbour: number, slot: DomeSlot): void => {
     const band = new SmoothSoup()
     const edgeNormal = (s: number): Vector3 =>
@@ -344,7 +385,7 @@ function buildPortalSkirt(writer: PartWriter): void {
     // down the meridian — takes the reversed order.
     const forward = ringIndex > neighbour
     for (let s = 0; s < SKIRT_SEGMENTS; s++) {
-      const s2 = (s + 1) % SKIRT_SEGMENTS
+      const s2 = s + 1
       const na = edgeNormal(s)
       const nb = edgeNormal(s2)
       const loop: Array<[Vector3, Vector3, [number, number]]> = [
@@ -367,8 +408,41 @@ function buildPortalSkirt(writer: PartWriter): void {
     }
     band.emit(writer, slot)
   }
-  rim(SKIRT_RINGS, SKIRT_RINGS - 1, 'node')
   rim(0, 1, 'duct')
+
+  // Cheek plates closing the hood's two cut ends. Only the first ~0.7 m of each
+  // edge is in open air — past that the meridian has already dived through the
+  // flange face — but a sheet that simply stops reads as torn metal.
+  const cheek = (s: number, neighbour: number): void => {
+    const plate = new SmoothSoup()
+    const edgeNormal = (i: number): Vector3 =>
+      new Vector3().subVectors(grid[i][s], grid[i][neighbour]).normalize()
+    const forward = s > neighbour
+    for (let i = 0; i < SKIRT_RINGS; i++) {
+      const na = edgeNormal(i)
+      const nb = edgeNormal(i + 1)
+      const loop: Array<[Vector3, Vector3, [number, number]]> = [
+        [park[i][s], na, [span(i), 0]],
+        [park[i + 1][s], nb, [span(i + 1), 0]],
+        [valley[i + 1][s], nb, [span(i + 1), SKIRT_WALL]],
+        [valley[i][s], na, [span(i), SKIRT_WALL]],
+      ]
+      if (!forward) loop.reverse()
+      for (const [a, b, c] of [
+        [0, 1, 2],
+        [0, 2, 3],
+      ]) {
+        plate.tri(
+          [loop[a][0], loop[b][0], loop[c][0]],
+          [loop[a][1], loop[b][1], loop[c][1]],
+          [loop[a][2], loop[b][2], loop[c][2]],
+        )
+      }
+    }
+    plate.emit(writer, 'duct')
+  }
+  cheek(0, 1)
+  cheek(SKIRT_SEGMENTS, SKIRT_SEGMENTS - 1)
 }
 
 /** Tube axis: concentric with the iris at the portal, on the spur beyond. */
@@ -555,4 +629,18 @@ export function buildConnectorTube(materials: Record<DomeSlot, Material>): Group
   group.name = 'dome:connector-tube'
   group.add(writer.build(materials, { castShadow: true }))
   return group
+}
+
+/** Datums and generators `tools/portal-audit.mjs` gates. Not used at runtime. */
+export const __portalProbe = {
+  COLLAR_BORE,
+  COLLAR_OUTER,
+  COLLAR_INBOARD_Z,
+  COLLAR_OUTBOARD_Z,
+  SKIRT_RIM_R,
+  SKIRT_RIM_Z,
+  SKIRT_WALL,
+  apertureZ,
+  skirtPoint,
+  skirtBandEnd,
 }

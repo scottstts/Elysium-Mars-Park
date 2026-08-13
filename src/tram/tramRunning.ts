@@ -25,7 +25,8 @@ import { BEAM_HALF_W, RUNNING_Y } from './tramShape'
  * (experience-craft §5.2.10).
  */
 
-const BOGIE_Z = 2.45
+/** Bogie centre pitch, ±2.45 m. `tramSystem` places each car by this chord. */
+export const BOGIE_Z = 2.45
 const TYRE_R = 0.238
 const AXLE_Y = RUNNING_Y + TYRE_R - 0.003
 const TYRE_X = 0.42

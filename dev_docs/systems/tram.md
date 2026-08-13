@@ -486,47 +486,93 @@ the beam top, inside the guideway channel) and the 52 mm door-bay scallop,
 which is what we want: the doorway must block as solidly as the wall.
 `placeCars` records the true yaw in `carYaw[]` for `nudgeOutOfBox`, which is
 still an OBB because it is a safety shove, not the barrier.
+`placeCars` records the true yaw in `carYaw[]` for `nudgeOutOfBox`, which is
+still an OBB because it is a safety shove, not the barrier.
 
-## Placement heading is a CENTRED chord
+## Placement is the chord between the BOGIES
 
-`placeCars` used to take its heading from a point 1.5 m ahead. A forward-only
-chord lags the true tangent by half its length: every car yawed 0.44° outward
-of the alignment, and — because the bias is a rotation about each car's own
-centre — it pulled the two coupler faces 13 mm apart on the Loop. Sampling
-`s ± 0.75` makes the pair symmetric about the coupling and fixes the pitch term
-for free.
+A car is carried by two trucks, so it is placed by them: `placeCars` samples the
+alignment at `s ± BOGIE_Z` (±2.45 m), sets the body's position to the midpoint
+of those two points and its heading to their chord.
+
+It used to take the position from a curve sample at `s` and the heading from a
+±0.75 m chord about it. On plain track the difference is millimetres; on the
+arrival spur's hook it is not. Measured over the whole park
+(`tools/tram-alignment-probe.mjs`):
+
+| | tangent placement | bogie chord |
+|---|---|---|
+| bogies off the guideway, Loop | 31 mm | **2 mm** |
+| bogies off the guideway, spur | 781 mm | **66 mm** |
+| coupler-face span, spur | ≤ 1.97 m | **≤ 1.24 m** |
+
+The old model was literally running the car beside its own beam through the
+hook. Anything else in the park carried on a pair of trucks should be placed the
+same way.
+
+## The alignment's terminal hook — read this before touching the coupling
+
+`ARRIVAL_SPINE` runs dead straight down x = 0 through the portal (the car has to
+thread the bulkhead dead-centre) and then has to meet the loop **tangentially**
+at (0, 97). That is an ~85° reverse curve inside 11 m, and the osculating radius
+falls to **5.3 m** at the very end. Consequences, all measured, none of them
+fixable downstream:
+
+- the two cars sit **53° apart while DOCKED** — the pose a guest on the platform
+  stands next to for the whole 22 s dwell;
+- their coupler faces are **1.45 m** apart there, against 0.58 m on plain track;
+- the bar leaves the rear car's head at **95°** to that car's own axis.
+
+The car bodies themselves stay 1.15 m apart, so nothing interpenetrates. But no
+coupling that reads as real hardware can look relaxed at 53°; if the arrival is
+ever revisited, easing this hook is the fix.
 
 ## The coupling (`tram/tramCoupling.ts`)
 
-A bar coupler on TWO spherical joints:
+A four-stage telescopic drawbar hung between two VERTICAL KINGPINS.
 
-- `socket` — one lathed casting (barrel, mouth lip and spherical seat in a
-  single closed profile) plugged 30 mm into the rear car's nose head pocket. A
-  rigid child of that car; add once.
-- `group` — TWO aimed runs from the same origin (the front car's head tip),
-  re-aimed every fixed step. They need different targets: the bar ends on the
-  socket's SEAT, the jumper hoses on the rear car's head TIP, and those two
-  points are 0.16 m apart along the rear car's own axis — up to 4° off the
-  bar's. Aiming the hoses with the bar left their far ends 139 mm short on the
-  Loop. Roll for both comes from the MEAN of the two cars' local up, built
+- `forkFront` / `forkRear` — a fork on each car's coupler head: two jaw plates
+  rooted 80 mm inside the head casting, a turned pin through both, and the two
+  jumper glands outboard of them. Each is a CHILD of its own car; add once.
+  Anything that bolts to a car and is not that car's child stands proud of it
+  the moment the pair kinks — the old root flange lived in the aimed group and
+  at 22° stood a 27 mm wedge out of the casting it was bolted to, which is the
+  "broken at this angle" report.
+- `group` — the bar, the two eyes and the two hoses, in world space, rebuilt
+  every fixed step. Roll comes from the MEAN of the two cars' local up, built
   through `Matrix4.makeBasis`, not from a look-at (whose arbitrary roll would
   flip the hoses through a grade change).
 
-**Why two joints, and why it telescopes.** A single-ball bar has to be rigid
-with one car, and its ball then only lands in the seat when the two cars sit
-symmetrically about the joint. That is exact on a constant-radius arc and only
-approximate through the spur's transitions. Worse, the placement model holds
-each car at a fixed ARC offset, so the straight-line distance between the
-coupler faces genuinely breathes: **0.226 → 0.350 m on the Loop and up to
-0.773 m through the spur's terminal hook** (measured, `tools/tram-coupling-
-audit.mjs`). The bar therefore has a fixed root, a fixed ball head placed at
-the measured length, and a scaled run (shaft + bellows) between them — real
-draw gear absorbs exactly that, and the seat error is 0.000 mm everywhere.
-Only the run scales, so no flange or ball is ever distorted.
+**Kingpins, not ball seats.** A spherical seat closes over its ball at ~66° and
+cannot pass a bar leaving at 95°. A vertical pin in an open fork has no yaw
+limit at all; pitch and roll on a 4 % grade are a bush's job. The forks sit at
+`PIN_Y = −0.12`, below the bumper, so nothing on the car's face is inside the
+shank's sweep at any angle.
 
-`buildEnd`'s coupler head pocket now finishes at `COUPLER_HEAD_Z = 4.16`
-(it ran to 4.24), which is what opens the 0.38 m of free span the joint needs.
+**The stroke is TRANSLATED, never stretched.** 0.58 → 1.45 m is a 2.5:1 range.
+Four 0.44 m stages, each nested in the last, cover it with 135 mm of overlap
+still in hand at full draw; `update` only sets `position.z` on each stage, so no
+part of the assembly is ever scaled. The previous gear scaled a ribbed bellows
+over 0.06 → 0.61 m, which past about double reads as a lumpy sausage.
+
+**The hoses are rebuilt, not posed.** `FlexHose` owns a fixed-topology tube
+(22 stations × 8 sides) whose positions and normals are recomputed each step
+from a cubic Hermite between the two glands — the one part of the gear that
+genuinely has to change shape. Two traps it cost:
+
+- the ARRIVING tangent's rise is negative. It is a direction of travel, not an
+  offset; sharing the sign with the leaving tangent sank the far control point
+  113 mm under its gland and swung the hose into the rear car's nose;
+- the glands are CANTED outboard and up (`hoseAxis`). Aimed along their own
+  car's axis they aim across the *other* car's nose at 53° of kink, and the
+  hose's first third runs through it.
+
+`buildEnd`'s draft housing finishes at `COUPLER_HEAD_Z = 4.06` at the coupler's
+own datum (y = `PIN_Y`), and the fork's jaws lap 80 mm back into it.
 
 Gate: `node --experimental-strip-types tools/tram-coupling-audit.mjs` — hull
-extents, seat error and stroke swept over the real loop and spur curves, bar
-clearance against both bodies, and the triangle budget.
+extents, bogie tracking error, telescope reach and nesting, gland accuracy, and
+the depth of any bar or hose intrusion into either car's TRUE cross-section
+(not a box of its widest half-width — the coupling all lives at y ≈ 0 where the
+car is a 1.16 m bumper), swept over the real loop and spur curves including the
+docked pose.

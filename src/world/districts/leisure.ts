@@ -1086,9 +1086,14 @@ export function loungeShell(): LoungeShell {
       mezzTop: apron + 3.865,
       head: apron + 6.745,
       roofTop: apron + 7.185,
-      // Wide enough for the flight AND its handrails: the rail runs 1.02 m
-      // above the treads, so it breaks the roof plane 0.85 m before they do.
-      roofOpening: { u0: 0.3, u1: 3.0, v0: -6.4, v1: -4.6 },
+      // The roof stair's well, on the drum's LONG axis. Width is set by the
+      // flight and its handrails (the rail runs 1.02 m above the treads, so it
+      // breaks the roof plane 0.85 m before they do); LENGTH is set by
+      // headroom. The soffit is 2.88 m over the mezzanine and a climber needs
+      // 1.8 m of it, so every tread above `mezzTop + 1.08` — treads 6 up, the
+      // last 4.0 m of a 5.51 m run — has to be under open sky. The old
+      // 2.7 m × 1.8 m hole ran east–west and covered barely half of that.
+      roofOpening: { u0: -0.9, u1: 0.9, v0: -7.5, v1: -2.89 },
     }
   }
   return loungeCache
@@ -1465,18 +1470,70 @@ function buildOverlook(services: DistrictServices): void {
 
   emit(services, parts)
 
-  // ---- shell colliders: the drum wall, open only at the door bay.
+  // ---- shell colliders. The drum wall runs the FULL height of the building,
+  // open only at the door bay: it used to stop at apron + 4.4, which is 0.54 m
+  // above the mezzanine floor, so anyone who reached the mezzanine could walk
+  // straight out through the upper glazing. The roof parapet is a second, taller
+  // ring on the same stations.
   for (let b = 0; b < shell.bays; b++) {
     if (b === shell.doorBay) continue
     const s = stations[b]
     const n = stations[(b + 1) % shell.bays]
     const width = Math.hypot(n.x - s.x, n.z - s.z)
+    const yaw = crossYaw((n.z - s.z) / width, -(n.x - s.x) / width)
+    const height = shell.roofTop - shell.apron
     alignedBox(
       services,
-      new Vector3((s.x + n.x) / 2, shell.apron + 2.2, (s.z + n.z) / 2),
-      new Vector3(width + 0.08, 4.4, 0.4),
-      crossYaw((n.z - s.z) / width, -(n.x - s.x) / width),
+      new Vector3((s.x + n.x) / 2, shell.apron + height / 2, (s.z + n.z) / 2),
+      new Vector3(width + 0.08, height, 0.4),
+      yaw,
     )
+    // Parapet + guardrail on the terrace, 1.1 m of it.
+    alignedBox(
+      services,
+      new Vector3((s.x + n.x) / 2, shell.roofTop + 0.55, (s.z + n.z) / 2),
+      new Vector3(width + 0.08, 1.1, 0.5),
+      yaw,
+    )
+  }
+
+  // ---- roof terrace deck. Nothing stood on the roof at all before: the third
+  // storey was geometry the player could fall straight through. A cell grid
+  // rather than one slab, because the stair well has to be a real hole — the
+  // cheapest way to cut an aperture out of a collider set is not to emit the
+  // cells that cover it.
+  {
+    const opening = shell.roofOpening
+    const y = (shell.head + shell.roofTop) / 2
+    const thick = shell.roofTop - shell.head
+    // Tile a rectangle exactly — the cells are sized to divide it, never
+    // rounded off. A fixed grid quantised the well's edges outward by up to
+    // 0.77 m, and the head of the stair came out over open air.
+    const tile = (u0: number, u1: number, v0: number, v1: number): void => {
+      if (u1 - u0 < 0.02 || v1 - v0 < 0.02) return
+      const nu = Math.max(1, Math.ceil((u1 - u0) / 1.35))
+      const nv = Math.max(1, Math.ceil((v1 - v0) / 1.35))
+      const du = (u1 - u0) / nu
+      const dv = (v1 - v0) / nv
+      for (let i = 0; i < nu; i++) {
+        for (let j = 0; j < nv; j++) {
+          const u = u0 + du * (i + 0.5)
+          const v = v0 + dv * (j + 0.5)
+          const eu = u / (shell.ax - 0.3)
+          const ev = v / (shell.az - 0.3)
+          if (eu * eu + ev * ev > 1) continue
+          services.colliders.push({
+            kind: 'box',
+            center: new Vector3(shell.x + u, y, shell.z + v),
+            size: new Vector3(du, thick, dv),
+          })
+        }
+      }
+    }
+    tile(-shell.ax, shell.ax, -shell.az, opening.v0)
+    tile(-shell.ax, shell.ax, opening.v1, shell.az)
+    tile(-shell.ax, opening.u0, opening.v0, opening.v1)
+    tile(opening.u1, shell.ax, opening.v0, opening.v1)
   }
 
   // ---- rim benches flanking the drum, aimed at the plain.

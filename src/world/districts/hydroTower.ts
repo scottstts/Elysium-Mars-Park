@@ -932,6 +932,32 @@ function colliders(services: DistrictServices, world: (x: number, y: number, z: 
     halfHeight: (Z_ROOF + 0.96) / 2,
     radius: 0.46,
   })
+  // The helical flight itself. Only the newel was solid before, so guests
+  // walked straight through the stair (owner report). The flight is NOT meant
+  // to be climbable — the roof it serves is plant, not a place — so this is a
+  // barrier rather than a set of treads: one flat-topped wall, 3.4 m tall so
+  // it cannot be jumped onto in 0.38 g, over exactly the sector where the
+  // flight is low enough to be in a walker's way. Past that sector the treads
+  // are overhead and you can walk under them, which is what the geometry does.
+  const rise = (Z_ROOF + 0.016 - 0.02 - 0.042) / (STAIR_TREADS - 1)
+  const theta0 = STAIR_PHI + Math.PI - (STAIR_TREADS - 1) * STAIR_DTHETA
+  const BARRIER_TOP = 3.4
+  const HEAD = 2.4
+  for (let i = 0; i < STAIR_TREADS; i++) {
+    if (0.02 + i * rise > HEAD) break
+    // Two overlapping posts per tread cover the 0.26 → 1.9 m tread depth; a
+    // single cylinder cannot, and a rotated box would have to reproduce this
+    // module's authoring-to-world yaw by hand.
+    const a = theta0 + (i + 0.5) * STAIR_DTHETA
+    for (const r of [0.72, 1.5]) {
+      services.colliders.push({
+        kind: 'cylinder',
+        center: world(cx + Math.cos(a) * r, cy + Math.sin(a) * r, BARRIER_TOP / 2),
+        halfHeight: BARRIER_TOP / 2,
+        radius: 0.46,
+      })
+    }
+  }
   const bladePhi = (232 * Math.PI) / 180
   services.colliders.push({
     kind: 'box',

@@ -86,7 +86,7 @@ function collect(build) {
     doors: [],
   }
   build(services)
-  return { boxes, cloud }
+  return { boxes, cloud, colliders: services.colliders }
 }
 
 const house = collect(farmside.buildFarmside)
@@ -178,6 +178,60 @@ check(
   nearestLane > lane.width / 2,
   `${nearestLane.toFixed(2)} m to the lane centreline (half width ${(lane.width / 2).toFixed(2)})`,
 )
+
+// ---- the service stair actually stops you ----------------------------------
+//
+// Owner report: "this spiral stairs next to the seed farm right now has no
+// collision, player can walk right past it." Only the newel was solid. The
+// contract is the LOW part of the flight — the part a walker's body would hit —
+// against the collider set, plus proof that the barrier does not reach into the
+// farm lane's walking corridor.
+{
+  const CAPSULE_R = 0.35
+  const HEAD = 2.4
+  const posts = tower.colliders.filter((c) => c.kind === 'cylinder')
+  const site = plan.HYDRO_TOWER
+  const phi = Math.PI / 4
+  const cx = site.x + Math.cos(phi) * 9.4
+  const cz = site.z + Math.sin(phi) * 9.4
+  // The flight, re-derived from `hydroTower`'s own constants.
+  const treads = 70
+  const dtheta = 0.215
+  const rise = (12.4 + 0.016 - 0.02 - 0.042) / (treads - 1)
+  const theta0 = phi + Math.PI - (treads - 1) * dtheta
+  const covered = (px, pz) =>
+    posts.some((p) => Math.hypot(p.center.x - px, p.center.z - pz) < p.radius + CAPSULE_R * 0.6)
+
+  const holes = []
+  let sampled = 0
+  for (let i = 0; i < treads; i++) {
+    if (0.02 + i * rise > HEAD) break
+    for (let s = 0; s <= 4; s++) {
+      const a = theta0 + (i + s / 4) * dtheta
+      for (let r = 0.35; r <= 1.85; r += 0.25) {
+        // hydroTower maps authoring (x, y) to world (x + site.x, z + site.z).
+        const px = cx + Math.cos(a) * r
+        const pz = cz + Math.sin(a) * r
+        sampled++
+        if (!covered(px, pz)) holes.push([r.toFixed(2), i])
+      }
+    }
+  }
+  check(
+    'service stair barrier',
+    holes.length === 0,
+    `${posts.length} posts, ${sampled} tread samples, ${holes.length} walk-through gaps`,
+  )
+  let barrierLane = Infinity
+  for (const p of posts) {
+    barrierLane = Math.min(barrierLane, segDistance(p.center.x, p.center.z) - p.radius)
+  }
+  check(
+    'stair barrier off the lane',
+    barrierLane > lane.width / 2,
+    `${barrierLane.toFixed(2)} m to the lane centreline`,
+  )
+}
 
 console.log(failures === 0 ? '\nfarm layout PASS' : `\nfarm layout FAIL (${failures})`)
 process.exitCode = failures === 0 ? 0 : 1

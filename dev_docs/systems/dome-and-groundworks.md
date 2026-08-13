@@ -427,3 +427,43 @@ own pre-existing penetration near the springing, below the plinth top).
 `SmoothSoup` in that file is the shared sink for anything curved here; the
 connector duct's 44-segment barrel goes through it too, smooth around and sharp
 along so the rib shoulders stay creases.
+
+## The hood's two seams: a rim landing ON a face (2026-08-13, evening)
+
+Owner report: "two spots where the material seems different, like two meshes
+combined together in an unclean way", left and right of the bore, just below
+the axis.
+
+Both spots are the same defect, and its position is derivable. The glass
+aperture's z runs 120.97 m at the crown of the hole to 131.18 m at its invert
+(it is an oblique cut through a 164 m sphere), while the bulkhead's inboard
+flange is a PLANAR ring at 127.10 — so the aperture crosses that plane at the
+two meridians where `apertureZ = 127.10`, i.e. **10.5° below the axis, left and
+right**. With the rim landing on the flange at (r 9.70, z 127.10), those two
+meridians lie ENTIRELY in the flange plane: a 3.5 m × 1.5 m lens of sheet
+sitting inside its own 55 mm wall of the casting's face. Everywhere else the
+same tangential landing left a 0.4 m near-coplanar ring at the outer edge, and
+the whole LOWER half of the ring was buried inside the collar doing nothing.
+
+Three changes, each measured by `tools/portal-audit.mjs`:
+
+- **The rim is buried in solid metal** — (r 9.52, z 127.90), inside the drum and
+  between the flange face and the petal slot at 128.10. A meridian aimed there
+  PIERCES the flange plane at 24…58° instead of grazing it, so the sheet meets
+  the casting transversally and everything past the crossing is hidden inside
+  the casting. Widest band within a half wall of the face: **152 mm**, against
+  the whole meridian before.
+- **The hood is an ARC, not a ring** — emitted only where the aperture stands
+  0.9 m clear in front of the flange (180.5° of arc, ends just below the axis).
+  Past that the glass runs straight into the casting and the tube shell covers
+  the rest; there is nothing for a transition piece to span. The two cut ends
+  get cheek plates, because a sheet that simply stops reads as torn metal.
+- **The meridian is a cubic Hermite with end slopes 2.0 and 1.0** — steep off
+  the glass (0.71 m of clearance at quarter span, where the old symmetric ease
+  left 50 mm) and still moving when it reaches the casting, so it cuts the face
+  rather than settling onto it. Wall thinned 0.11 → 0.07 m, which halves the
+  coplanar band for free.
+
+Gate: `node --experimental-strip-types tools/portal-audit.mjs` — rim burial,
+shallowest flange crossing, widest coplanar band, and that the hood never
+re-enters the dome.

@@ -16,6 +16,7 @@ import { buildTramCoupling } from './tramCoupling'
 import type { TramCoupling } from './tramCoupling'
 import { tramMaterials } from './tramMaterials'
 import { hullCollisionPoints } from './tramShape'
+import { BOGIE_Z } from './tramRunning'
 import { buildGuideway, buildTrackData, buildTube, carFloorY } from './track'
 import type { TrackData } from './track'
 import { buildTramCar, CAR_LENGTH, CAR_WIDTH } from './vehicle'
@@ -128,10 +129,13 @@ export class TramSystem implements GameSystem {
       this.cars.push(car)
     }
 
-    // The articulated draw gear between the pair. The socket housing is rigid
-    // on the rear car's nose; the bar is re-aimed every fixed step.
+    // The articulated draw gear between the pair. BOTH socket castings are
+    // children of their own car — anything that bolts to a car and is not that
+    // car's child stands proud of it the moment the pair kinks (44 deg on the
+    // platform hook). Only the bar and the hoses live in world space.
     const coupling = buildTramCoupling(tramMaterials(0))
-    this.cars[1].group.add(coupling.socket)
+    this.cars[0].group.add(coupling.forkFront)
+    this.cars[1].group.add(coupling.forkRear)
     this.movingGroup.add(coupling.group)
     this.coupling = coupling
 
@@ -443,15 +447,20 @@ export class TramSystem implements GameSystem {
     }
     for (let i = 0; i < this.cars.length; i++) {
       const offset = (i === 0 ? 0.5 : -0.5) * spacing
-      const point = this.carPoint(trainS + offset, this.pathPoint)
-      // Heading from a CENTRED chord, not a forward-only lookahead. A forward
-      // chord lags the true tangent by half its length, which yaws every car
-      // 0.44 deg outward of the alignment — and, because the bias is a
-      // rotation about each car's own centre, it pulls the two cars' coupler
-      // faces 13 mm apart on the Loop. Centred, the pair is symmetric about
-      // the coupling and the draw bar spans a constant length by construction.
-      const back = this.carPoint(trainS + offset - 0.75, this.pathBehind)
-      const ahead = this.carPoint(trainS + offset + 0.75, this.pathAhead)
+      // A car is carried by its BOGIES, so it is placed by them: the body is
+      // the chord between the two bogie centres, not a point on the alignment
+      // with a tangent heading. On the platform hook (R ≈ 7.6 m) a
+      // tangent-placed body throws its own bogies 0.82 m off the guideway they
+      // are supposed to be running on, and the whole car visibly leaves the
+      // beam; chorded, the worst error over the Loop AND the spur is 68 mm.
+      // The coupler faces come with it — the pair's face-to-face span at the
+      // portal stop drops from 2.01 m to 1.45 m for free.
+      const back = this.carPoint(trainS + offset - BOGIE_Z, this.pathBehind)
+      const ahead = this.carPoint(trainS + offset + BOGIE_Z, this.pathAhead)
+      const point = this.pathPoint
+        .copy(back)
+        .add(ahead)
+        .multiplyScalar(0.5)
       const car = this.cars[i].group
       car.position.copy(point)
       car.position.y += 0.62
