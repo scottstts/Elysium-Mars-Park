@@ -29,6 +29,15 @@
  * The soul of the sheet is REV G. Tree 1 grew a metre past the planting
  * envelope it was drawn inside; the revision cloud is around the canopy and the
  * revision note says the drawing was amended to suit. The park won that one.
+ *
+ * REV H is the park catching up with itself: the FREEDOM TOWER (in the section,
+ * in chain line — it stands 33 m in front of the cut), THE FOUNTAIN and THE
+ * OPTIMUS COURT (a shared 1:150 cell, half section and elevation), and THE
+ * LAUNCH SITE (a 1:2500 comparative elevation whose whole argument is that the
+ * 147 m stack beyond the glass dwarfs the 64 m dome). The plotter's pen table
+ * and the standard-parts schedule gave up their cells for them and went to
+ * Sheet 05; the pens survive as a one-line legend under the section and the
+ * kit as balloon tags on the parts where they occur.
  */
 
 const CSS = `
@@ -99,6 +108,11 @@ const CSS = `
 #entry .s3 { stroke: var(--ink); stroke-width: 2.6; }
 #entry .sr { stroke: var(--rust); stroke-width: 1.5; }
 #entry .sp { stroke: var(--paper); stroke-width: 3.6; }
+/* Work standing IN FRONT of the cutting plane — long-dash-dot, the drafting
+   convention that keeps the Freedom Tower legible as "nearer than the cut"
+   without pretending it was sectioned. Its lattice is inked at .sf. */
+#entry .sk { stroke: var(--ink-2); stroke-width: 1.2; stroke-dasharray: 13 3 1.6 3; }
+#entry .sf { stroke: var(--ink-3); stroke-width: 0.85; }
 #entry .dash { stroke-dasharray: 7 4; }
 #entry .chain { stroke-dasharray: 15 3.5 2 3.5; }
 #entry .f1 { fill: rgba(42, 35, 27, 0.09); }
@@ -357,15 +371,19 @@ const LAYERS: ReadonlyArray<{ key: string; code: string; name: string }> = [
   { key: 'render-pipeline', code: 'X-PEN', name: 'Plotter pens · calibration' },
   { key: 'sky', code: 'E-SKY', name: 'Sky · butterscotch, held' },
   { key: 'exterior', code: 'C-SITE', name: 'Elysium Planitia · ground' },
+  { key: 'starship', code: 'S-PAD', name: 'Launch site · OLIT, stack' },
   { key: 'dome', code: 'A-SHEL', name: 'Dome One · shell, 13 rings' },
   { key: 'groundworks', code: 'C-DECK', name: 'Park deck · levels, plinth' },
   { key: 'player', code: 'G-FIG', name: 'Scale figure · 1.70 m eye' },
-  { key: 'archkit', code: 'A-KIT', name: 'Standard parts · printed' },
+  { key: 'archkit', code: 'A-KIT', name: 'Standard parts · tagged' },
   { key: 'interiors', code: 'A-INT', name: 'Interiors · rooms, notes' },
   { key: 'park', code: 'G-KEY', name: 'Key plan · districts' },
   { key: 'tram', code: 'T-LOOP', name: 'The Loop · track, Gate S' },
+  { key: 'freedomElevator', code: 'A-TWR', name: 'Freedom Tower · lift, deck' },
   { key: 'robots', code: 'M-GKR', name: 'Groundskeepers · GK series' },
+  { key: 'optimus-exhibit', code: 'M-OPT', name: 'Optimus court · the eight' },
   { key: 'vegetation', code: 'L-PLNT', name: 'Planting · Tree 1' },
+  { key: 'fountain', code: 'P-FTN', name: 'The Fountain · basin, jets' },
   { key: 'audio', code: 'M-AIR', name: 'Air handlers · runs, plant' },
   { key: 'prewarm', code: 'X-INK', name: 'Inking · dimensions' },
 ]
@@ -383,15 +401,19 @@ const CHECK_LABELS: Record<string, string> = {
   'render-pipeline': 'Calibrating pens',
   sky: 'Plotting the sky',
   exterior: 'Contouring the plain',
+  starship: 'Siting the launch pad',
   dome: 'Striking the shell',
   groundworks: 'Setting out levels',
   player: 'Adding the figure',
-  archkit: 'Listing the parts',
+  archkit: 'Tagging the parts',
   interiors: 'Fitting out interiors',
   park: 'Drawing the key plan',
   tram: 'Laying the Loop',
+  freedomElevator: 'Raising the tower',
   robots: 'Logging groundskeepers',
+  'optimus-exhibit': 'Ranking the eight',
   vegetation: 'Planting Tree 1',
+  fountain: 'Filling the basin',
   audio: 'Routing air handlers',
   prewarm: 'Pens down · inking',
   ready: 'Last layer · inking',
@@ -429,6 +451,105 @@ const W = {
   commons: { z: -54, r: 11.3, roof: 9.95, parapet: 10.55, lantern: 13.46, soffit: 4.4, l2: 5.05 },
   car: { halfWidth: 1.3, floor: 0.62, doorHead: 1.94, cant: 1.99, crown: 2.428, skirt: -0.4, seat: 0.456 },
   eye: 1.7,
+  /**
+   * FREEDOM TOWER (parkPlan + districts/freedomTower). Everything above the
+   * terrace is derived in the district from the dome sphere at the tower's own
+   * plan radius (65.86), which is why the tip sits 0.90 under a glass line
+   * 3.56 LOWER than the shell drawn on this section's own plane — see the
+   * phantom arc struck over the tower in A-TWR.
+   */
+  tower: {
+    x: 33,
+    z: 57,
+    terraceR: 12.76,
+    terraceY: 0.986,
+    padY: 0.55,
+    legBaseR: 7.8,
+    legTopR: 4.42,
+    legBaseY: 1.75,
+    legTopY: 37.946,
+    twist: 1.55,
+    legs: 16,
+    rings: [5.2, 13.6, 18.8, 22.8, 26.2, 29.3, 32.5, 35.7] as const,
+    deckY: 38.746,
+    deckR: 5.45,
+    wallHead: 2.78,
+    roof: [
+      [5.45, 3.05],
+      [3.9, 4.3],
+      [2.3, 5.45],
+      [0.78, 6.25],
+    ] as ReadonlyArray<readonly [number, number]>,
+    spireBase: 44.646,
+    tipY: 49.296,
+    glassY: 50.196,
+    glassR: 160.681,
+  },
+  /** THE FOUNTAIN (fountain/fountainPlan), heights local to its court. */
+  ftn: {
+    x: -38,
+    z: -40,
+    courtR: 12.6,
+    steps: [
+      [9.3, 0.155],
+      [8.62, 0.31],
+    ] as ReadonlyArray<readonly [number, number]>,
+    basinR: 6.98,
+    wall: 0.62,
+    copingY: 0.835,
+    waterY: 0.645,
+    floorY: 0.375,
+    plinth: [
+      [2.42, 0.79],
+      [2.08, 1.03],
+      [1.74, 1.27],
+    ] as ReadonlyArray<readonly [number, number]>,
+    pedR: 1.36,
+    pedY: 1.95,
+    lower: { core: 4.1, rimR: 2.68, rimY: 5.3 },
+    upper: { core: 6.06, rimR: 1.06, rimY: 6.72 },
+    finialY: 6.9,
+    crownJetY: 9.45,
+  },
+  /** THE OPTIMUS COURT (world/districts/optimusPlaza + optimusSign). */
+  opt: {
+    x: -28,
+    z: 70,
+    courtR: 9.4,
+    plinthR: 6,
+    deckY: 0.6,
+    riser: 0.15,
+    tread: 0.36,
+    steps: 3,
+    figure: 1.73,
+    rankPitch: 2.4,
+    signOffset: 5.35,
+    signClear: 2.25,
+    signPanel: 1.06,
+  },
+  /** THE LAUNCH SITE (starship/starshipSite + parts). Heights over park datum. */
+  ship: {
+    x: -83,
+    z: 200,
+    range: 215,
+    slabW: 68.6,
+    slabTop: 0.76,
+    padY: -0.44,
+    towerX: -100.5,
+    towerW: 12.2,
+    trussTop: 132.86,
+    crownTop: 138.96,
+    rodTop: 145.46,
+    armY: 125.46,
+    armLen: 26.5,
+    qdY: 94.06,
+    deckY: 20.06,
+    vehX: -77.6,
+    vehR: 4.5,
+    boosterTop: 91.06,
+    noseY: 141.3,
+    noseLen: 12.7,
+  },
 } as const
 
 const PLATE = { w: 1180, h: 812 }
@@ -443,15 +564,36 @@ const sy = (m: number): number => SEC.ground - m * SCALE_500
 const BOX = {
   keyPlan: { x: 0, y: 410, w: 404, h: 396 },
   detail: { x: 424, y: 410, w: 366, h: 218 },
-  pens: { x: 424, y: 646, w: 366, h: 160 },
-  parts: { x: 810, y: 410, w: 370, h: 146 },
-  notes: { x: 810, y: 574, w: 370, h: 232 },
+  mon: { x: 424, y: 646, w: 366, h: 160 },
+  launch: { x: 810, y: 410, w: 370, h: 176 },
+  notes: { x: 810, y: 604, w: 370, h: 202 },
 }
 
 /** DETAIL A, at 1:50 — ten times the section, where a body is worth drawing. */
 const DET = { k: 37.8, cx: 556, gy: 588 }
 const dx = (m: number): number => DET.cx + m * DET.k
 const dy = (m: number): number => DET.gy - m * DET.k
+
+/**
+ * THE MONUMENTS, at 1:125 — the two pieces that are too small to read at
+ * 1:500 and too large to draw at 1:50. The Fountain is a half section about
+ * its own axis (it is a solid of revolution; drawing both halves says
+ * nothing twice), the Optimus court a straight elevation from the spur.
+ */
+const MON = { k: 12.6, gy: 780, ftnCx: 436, optCx: 672 }
+const fx = (m: number): number => MON.ftnCx + m * MON.k
+const ox = (m: number): number => MON.optCx + m * MON.k
+const my = (m: number): number => MON.gy - m * MON.k
+
+/**
+ * THE LAUNCH SITE, at 1:2500 — the only scale that holds a 147 m stack and
+ * the dome it is seen over on one ground line. That comparison IS the
+ * drawing: the tallest thing in the world is not in the park.
+ */
+const LAU = { k: 0.756, gy: 564, domeCx: 921, shipCx: 1090 }
+const lx0 = (m: number): number => LAU.domeCx + m * LAU.k
+const lx1 = (m: number): number => LAU.shipCx + m * LAU.k
+const ly = (m: number): number => LAU.gy - m * LAU.k
 
 /* ----------------------------------------------------------- svg plumbing */
 
@@ -605,8 +747,8 @@ function sheetBase(): string {
     t3(
       frame(BOX.keyPlan, 'KEY PLAN · 1:2000') +
         frame(BOX.detail, 'DETAIL A · PLATFORM EDGE AT GATE S · 1:50') +
-        frame(BOX.pens, 'PEN TABLE') +
-        frame(BOX.parts, 'STANDARD PARTS · SCALES AS NOTED') +
+        frame(BOX.mon, 'THE MONUMENTS · 1:150') +
+        frame(BOX.launch, 'THE LAUNCH SITE · 1:2500') +
         frame(BOX.notes, 'GENERAL NOTES'),
     ),
   )
@@ -620,26 +762,29 @@ const layer = (key: string, body: string): string => `<g class="ly" data-layer="
 /** Tier-3 ink: accompaniment that must read as texture, never as content. */
 const t3 = (body: string): string => `<g class="t3">${body}</g>`
 
-/** X-PEN — the plotter's own pen table. The render pipeline, as a legend. */
+/**
+ * X-PEN — the plotter calibrating itself, still the first thing to ink, but
+ * now a single ruled strip under the section rather than a boxed table: the
+ * two new drawings (THE MONUMENTS, THE LAUNCH SITE) took the table's cell,
+ * and a pen legend only ever needed one line.
+ */
 function penTable(): string {
-  const b = BOX.pens
-  const rows: ReadonlyArray<readonly [string, string, string, string]> = [
-    ['1', '0.13', 'CONSTRUCTION, SETTING OUT', 's0'],
-    ['2', '0.25', 'DIMENSION, ANNOTATION', 's1'],
-    ['3', '0.35', 'HIDDEN, ENVELOPE', 's1 dash'],
-    ['4', '0.50', 'OBJECT, BEYOND THE CUT', 's2'],
-    ['5', '0.70', 'CUT PROFILE', 's3'],
-    ['R', '0.35', 'REVISION', 'sr'],
+  const y = 390
+  const cells: ReadonlyArray<readonly [string, string]> = [
+    ['0.13', 's0'],
+    ['0.25', 's1'],
+    ['0.35', 's1 dash'],
+    ['0.50', 's2'],
+    ['0.70', 's3'],
+    ['IFC', 'sk'],
+    ['REV', 'sr'],
   ]
-  const out: string[] = []
-  rows.forEach((row, i) => {
-    const y = b.y + 46 + i * 18
-    out.push(tx(b.x + 12, y + 3.4, row[0], 'tn'))
-    out.push(tx(b.x + 34, y + 3.4, row[1], 'tn'))
-    out.push(ln(b.x + 74, y, b.x + 128, y, row[3]))
-    out.push(tx(b.x + 138, y + 3.4, row[2], 'ts'))
+  const out: string[] = [tx(596, y + 3.4, 'PENS', 'ts')]
+  cells.forEach((cell, i) => {
+    const x = 640 + i * 66
+    out.push(ln(x, y, x + 36, y, cell[1]))
+    out.push(tx(x + 18, y + 12, cell[0], 'tn', 'middle'))
   })
-  out.push(tx(b.x + 12, b.y + b.h - 8, 'PLOTTED ON ISRU BOND · 841 × 1189', 'ts'))
   return layer('render-pipeline', t3(out.join('')))
 }
 
@@ -811,52 +956,29 @@ function figureLayer(): string {
   return layer('player', t3(out.join('')))
 }
 
-/** A-KIT — three parts of the kit the park is assembled from. */
+/**
+ * A-KIT — the kit, TAGGED rather than drawn. The standard-parts cell went to
+ * THE LAUNCH SITE, and a general-arrangement sheet is the wrong place to
+ * repeat a component schedule anyway: the section now carries balloon tags
+ * onto the parts where they actually occur, and note 5 sends the reader to
+ * the schedule sheet.
+ */
 function partsLayer(): string {
-  const b = BOX.parts
   const out: string[] = []
-  const base = b.y + 106
+  const tag = (x: number, y: number, tipX: number, tipY: number, id: string): string =>
+    ln(x, y, tipX, tipY, 's0') +
+    ci(tipX, tipY, 1.7, 'f2') +
+    ci(x, y, 12.5, 'fp') +
+    ci(x, y, 12.5, 's1') +
+    tx(x, y + 3.4, id, 'tn', 'middle')
 
-  // Station canopy bay, 1:100.
-  let k = SCALE_500 * 5
-  let cx = b.x + 62
-  out.push(rc(cx - 0.16 * k, base - W.canopyH * k, 0.32 * k, W.canopyH * k, 'f2'))
-  out.push(ln(cx - 2.6 * k, base - W.canopyH * k, cx + 2.6 * k, base - W.canopyH * k - 0.26 * k, 's2'))
-  out.push(ln(cx - 2.6 * k, base - (W.canopyH - 0.34) * k, cx + 2.6 * k, base - (W.canopyH - 0.6) * k, 's1'))
-  out.push(ln(cx - 2.6 * k, base, cx + 2.6 * k, base, 's3'))
-  out.push(tx(cx, base + 16, 'A-KIT/02 CANOPY BAY', 'ts', 'middle'))
-  out.push(tx(cx, base + 28, '3.60 CLEAR · 1:100', 'tn', 'middle'))
-
-  // Hab unit barrel, 1:200.
-  k = SCALE_500 * 2.5
-  cx = b.x + 190
-  const hw = 3.44 * k
-  out.push(
-    pa(
-      `M ${u(cx - hw)} ${u(base)} L ${u(cx - hw)} ${u(base - 1.36 * k)} ` +
-        `Q ${u(cx - hw)} ${u(base - 3.6 * k)} ${u(cx)} ${u(base - 3.6 * k)} ` +
-        `Q ${u(cx + hw)} ${u(base - 3.6 * k)} ${u(cx + hw)} ${u(base - 1.36 * k)} ` +
-        `L ${u(cx + hw)} ${u(base)} Z`,
-      's2',
-    ),
-  )
-  out.push(ln(cx - hw, base - 0.5 * k, cx + hw, base - 0.5 * k, 's1'))
-  out.push(ln(cx - hw - 7, base, cx + hw + 7, base, 's3'))
-  out.push(tx(cx, base + 16, 'A-KIT/07 HAB UNIT', 'ts', 'middle'))
-  out.push(tx(cx, base + 28, '6.88 × 3.60 · 1:200', 'tn', 'middle'))
-
-  // Planter kerb, 1:20.
-  k = SCALE_500 * 25
-  cx = b.x + 306
-  const wall = 0.2 * k
-  out.push(rc(cx - wall / 2, base - 0.52 * k, wall, 0.52 * k, 'fh'))
-  out.push(rc(cx - wall / 2, base - 0.52 * k, wall, 0.52 * k, 's3'))
-  out.push(rc(cx - wall / 2 - 0.035 * k, base - 0.52 * k, wall + 0.07 * k, 0.075 * k, 'f2'))
-  out.push(ln(cx + wall / 2, base - 0.38 * k, cx + wall / 2 + 24, base - 0.38 * k, 's1'))
-  out.push(tx(cx + wall / 2 + 28, base - 0.4 * k, 'SOIL', 'ts'))
-  out.push(ln(cx - 40, base, cx + 40, base, 's3'))
-  out.push(tx(cx, base + 16, 'A-KIT/11 PLANTER KERB', 'ts', 'middle'))
-  out.push(tx(cx, base + 28, 'RIM 0.520 · 1:20', 'tn', 'middle'))
+  // 02 — the canopy bay standing over Gate S.
+  out.push(tag(215, sy(24.9), sz(93), sy(W.canopyH), '02'))
+  // 11 — the planter kerb that rings Tree 1.
+  out.push(tag(640, sy(15.6), sz(-W.soilRing), sy(0.52), '11'))
+  // 07 — the hab barrel, off this cut but tagged where its lane leaves.
+  out.push(tag(880, sy(10.6), sz(-104), sy(0.2), '07'))
+  out.push(tx(1166, 96, 'PART TAGS TO THE STANDARD PARTS SCHEDULE, SHEET 05', 'ts', 'end'))
   return layer('archkit', t3(out.join('')))
 }
 
@@ -883,11 +1005,10 @@ function interiorsLayer(): string {
   const b = BOX.notes
   const notes: ReadonlyArray<readonly string[]> = [
     ['ALL LEVELS TO PARK DECK DATUM ± 0.000.', 'THE SPRINGING IS THE DATUM.'],
-    ['DECK CROWNS + 0.34 AT CENTRE, FALLING TO', 'ZERO AT r 118. TOO SMALL TO PLOT.'],
+    ['THE FREEDOM TOWER STANDS 33.0 IN FRONT', 'OF THE CUT, SO IT IS DRAWN IN CHAIN.'],
     ['NO EVA. THE SHELL IS SEALED AND STAYS', 'SEALED. 71.2 kPa, 21.4 °C, RH 34 %.'],
-    ['MAINTAINED BY THE GK SERIES. NO STANDING', 'CREW. IN PARK TODAY 214 OF 10 000.'],
-    ['THE ONLY SOUND IS AIR, MACHINERY AND THE', 'TRAM. NOTHING IS PLAYED.'],
-    ['OBJECTS BEYOND THE CUT OMITTED FOR', 'CLARITY.'],
+    ['MAINTAINED BY THE GK SERIES AND THE', 'EIGHT. IN PARK TODAY 214 OF 10 000.'],
+    ['THE ONLY SOUND IS AIR, WATER, MACHINERY', 'AND THE TRAM. NOTHING IS PLAYED.'],
   ]
   const noteInk: string[] = []
   let ny = b.y + 42
@@ -934,15 +1055,30 @@ function keyPlanLayer(): string {
   }
   // Districts, as the plan knows them.
   out.push(ci(px(-2), py(-54), 11.3 * k, 's2'))
-  out.push(tx(px(-2), py(-54) - 16, 'THE COMMONS', 'ts', 'middle'))
-  out.push(ci(px(52), py(18), 7 * k, 's2'))
+  out.push(tx(px(-2), py(-54) - 21, 'THE COMMONS', 'ts', 'middle'))
+  out.push(ci(px(37), py(23), 7 * k, 's2'))
   out.push(ci(px(-52), py(34), 24 * k, 's0 dash'))
   out.push(tx(px(-52), py(34) + 4, 'BOWL', 'ts', 'middle'))
-  // The open-regolith zone (dashed) with THE FOUNTAIN's paved court inside it.
-  out.push(ci(px(-38), py(-40), 28 * k, 's0 dash'))
-  out.push(ci(px(-38), py(-40), 12.6 * k, 's2'))
-  out.push(ci(px(-38), py(-40), 7.6 * k, 'f2'))
-  out.push(tx(px(-38), py(-40) - 20, 'THE FOUNTAIN', 'ts', 'middle'))
+  // The open-regolith zone (dashed) with THE FOUNTAIN's paved court inside it:
+  // court disc, stylobate, then the basin's inner face, which is the water.
+  out.push(ci(px(W.ftn.x), py(W.ftn.z), 28 * k, 's0 dash'))
+  out.push(ci(px(W.ftn.x), py(W.ftn.z), W.ftn.courtR * k, 's2'))
+  out.push(ci(px(W.ftn.x), py(W.ftn.z), W.ftn.steps[0][0] * k, 's0'))
+  out.push(ci(px(W.ftn.x), py(W.ftn.z), W.ftn.basinR * k, 'f1'))
+  out.push(ci(px(W.ftn.x), py(W.ftn.z), W.ftn.basinR * k, 's2'))
+  out.push(tx(px(W.ftn.x), py(W.ftn.z) - 20, 'THE FOUNTAIN', 'ts', 'middle'))
+  // THE FREEDOM TOWER on its terrace, reached by the tower walk off the
+  // Meridian; the deck circle is the gallery, 38.75 up.
+  out.push(pl([[px(2), py(50)], [px(12), py(52)], [px(22.6), py(54.8)]], 's0'))
+  out.push(ci(px(W.tower.x), py(W.tower.z), W.tower.terraceR * k, 's2'))
+  out.push(ci(px(W.tower.x), py(W.tower.z), W.tower.legBaseR * k, 's0'))
+  out.push(ci(px(W.tower.x), py(W.tower.z), W.tower.deckR * k, 'f2'))
+  out.push(tx(px(W.tower.x) + 16, py(W.tower.z) + 3.4, 'FREEDOM TOWER', 'ts'))
+  // THE OPTIMUS COURT, off the Meridian's west flank on its own spur.
+  out.push(pl([[px(-2.4), py(73.2)], [px(-9), py(71.6)], [px(-22), py(70)]], 's0'))
+  out.push(ci(px(W.opt.x), py(W.opt.z), W.opt.courtR * k, 's2'))
+  out.push(ci(px(W.opt.x), py(W.opt.z), W.opt.plinthR * k, 'f2'))
+  out.push(tx(px(W.opt.x) - 14, py(W.opt.z) + 3.4, 'THE EIGHT', 'ts', 'end'))
   for (let i = 0; i < 3; i++) {
     const z = -22 + i * 22
     out.push(rc(px(53), py(z - 4.5), 34 * k, 9 * k, 's2'))
@@ -958,7 +1094,7 @@ function keyPlanLayer(): string {
     const a = Math.PI + 0.18 + i * 0.115
     out.push(rc(px(Math.cos(a) * 88) - 3, py(Math.sin(a) * 88) - 3, 6, 6, 's1'))
   }
-  out.push(tx(px(-67) - 6, py(-57), 'HABS 01–10', 'ts', 'end'))
+  out.push(tx(px(-67) - 6, py(-76), 'HABS 01–10', 'ts', 'end'))
   out.push(rc(px(-114) - 5, py(-6) - 9, 10, 18, 's2'))
   // Tree 1 at the origin, marked the way a survey marks a monument.
   out.push(ln(cx - 9, cy, cx + 9, cy, 'sr'))
@@ -980,6 +1116,16 @@ function keyPlanLayer(): string {
   const ny = b.y + 56
   out.push(pl([[nx, ny - 22], [nx + 6, ny + 10], [nx, ny + 3], [nx - 6, ny + 10]], 'f2', true))
   out.push(tx(nx, ny + 24, 'N', 'tb', 'middle'))
+  // The launch site is 215 m out — off this plan at 1:2000. A bearing line
+  // and a break carry it off the sheet to its own elevation.
+  const ux = -87 / 218.1
+  const uz = 200 / 218.1
+  const bear = (r: number): Pt => [px(ux * r), py(uz * r)]
+  out.push(pl([bear(136), bear(184)], 's1 chain'))
+  const [ax, ay] = bear(190)
+  const [bx0, by0] = bear(178)
+  out.push(pl([[ax, ay], [bx0 - 4.6, by0 - 2.4], [bx0 + 3.4, by0 - 5.6]], 'f2', true))
+  out.push(tx(bear(170)[0] - 8, bear(170)[1] - 4, 'LAUNCH SITE 215 m', 'ts', 'end'))
   out.push(tx(b.x + 12, b.y + b.h - 8, 'PARK Ø 260 · FLOOR r 122 · LOOP r 97 · 3 STOPS', 'ts'))
   return layer('park', t3(out.join('')))
 }
@@ -1002,8 +1148,10 @@ function tramLayer(): string {
   out.push(ln(back, sy(W.canopyH), edge - 4, sy(W.canopyH + 0.26), 's2'))
   out.push(ln(back - 8, sy(W.canopyH), back - 8, sy(0.9), 's2'))
   out.push(rc(sz(W.loopR + 1.3), sy(W.car.floor + W.car.crown), 2.6 * SCALE_500, (W.car.crown + 0.4) * SCALE_500, 's2'))
-  out.push(leader([edge - 6, sy(2.2)], [sz(84), sy(34)], 96, 'GATE S · PORTAL STATION'))
-  out.push(tx(sz(84) + 100, sy(34) + 10, 'HEADWAY 4 MIN · 2 CARS · 8 m/s', 'ts'))
+  // The Gate S annotation reads LEFT, out over the exterior sky: the airspace
+  // it used to land in (z 44…70, above the deck) is the Freedom Tower's now.
+  out.push(leader([edge - 6, sy(2.2)], [252, 152], -12, 'GATE S · PORTAL STATION'))
+  out.push(tx(240, 165, 'HEADWAY 4 MIN · 2 CARS · 8 m/s', 'ts', 'end'))
   out.push(tx(sz(W.portal.wallZ) + 6, sy(11.5), 'IRIS', 'ts'))
   return layer('tram', out.join('')) + detailTram()
 }
@@ -1045,6 +1193,103 @@ function detailTram(): string {
   out.push(dimV(dy(f + c.doorHead), dy(f), dx(-2.1), dx(-hw), '1940'))
   out.push(tx(b.x + b.w - 14, 618, 'LEVEL BOARDING · DOOR CLEAR 1760', 'ts', 'end'))
   return layer('tram', t3(out.join('')))
+}
+
+/**
+ * A-TWR — THE FREEDOM TOWER. It stands 33.0 m IN FRONT of this cutting plane,
+ * so nothing here is a cut: the profile is chain line (the convention for work
+ * nearer than the section) over a hairline lattice. Its clearance cannot be
+ * read off the shell arc on this sheet either — the glass over the tower's own
+ * plan radius (65.86) is 3.56 lower than the glass on the section plane — so a
+ * phantom arc at R 160.681 is struck over it and the 0.900 is taken to that.
+ */
+function freedomLayer(): string {
+  const T = W.tower
+  const out: string[] = []
+  /** Section abscissa for a point `dz` along world +z from the tower axis. */
+  const tz = (dz: number): number => sz(T.z + dz)
+  /** Lattice envelope radius at a world height — the hyperboloid's throat. */
+  const envelope = (y: number): number => {
+    const t = (y - T.legBaseY) / (T.legTopY - T.legBaseY)
+    const ax = T.legBaseR
+    const bx = T.legTopR * Math.cos(T.twist)
+    const by = T.legTopR * Math.sin(T.twist)
+    const px2 = ax + (bx - ax) * t
+    const py2 = by * t
+    return Math.hypot(px2, py2)
+  }
+
+  // The phantom glass line over the tower's own axis, and what it costs.
+  const gr = T.glassR * SCALE_500
+  const gy = (z: number): number => W.domeCenterY + Math.sqrt(T.glassR ** 2 - z * z)
+  out.push(
+    pa(
+      `M ${u(sz(92))} ${u(sy(gy(92)))} A ${u(gr)} ${u(gr)} 0 0 1 ${u(sz(24))} ${u(sy(gy(24)))}`,
+      's1 chain',
+    ),
+  )
+  out.push(tx(sz(10), 158, 'GLASS AT x + 33.0 · R 160.681', 'ts'))
+  out.push(tx(sz(10), 171, 'SPIRE TIP HOLDS 0.900 UNDER IT', 'ts'))
+
+  // Terrace: paved disc, three cast steps, the walking surface at + 0.986.
+  const terr: Pt[] = []
+  const rise = (T.terraceY - (T.padY + 0.075)) / 3
+  for (let i = 0; i <= 3; i++) {
+    const r = T.terraceR - i * 0.74
+    const y = T.padY + 0.075 + i * rise
+    terr.push([tz(r), sy(y)], [tz(r - 0.74), sy(y)], [tz(r - 0.74), sy(y + rise)])
+  }
+  out.push(pl(terr, 'sk'))
+  out.push(pl(terr.map((p) => [2 * tz(0) - p[0], p[1]] as Pt), 'sk'))
+  out.push(ln(tz(T.terraceR), sy(T.padY + 0.075), tz(-T.terraceR), sy(T.padY + 0.075), 's0'))
+
+  // The lattice: two opposed ruling families. Only the far half is drawn —
+  // the near half stands between the reader and the tower.
+  for (const family of [1, -1] as const) {
+    for (let i = 0; i < T.legs; i++) {
+      const a = (i / T.legs) * Math.PI * 2
+      if (Math.cos(a) > 0.001) continue
+      const b = a + family * T.twist
+      out.push(
+        ln(
+          tz(T.legBaseR * Math.sin(a)),
+          sy(T.legBaseY),
+          tz(T.legTopR * Math.sin(b)),
+          sy(T.legTopY),
+          'sf',
+        ),
+      )
+    }
+  }
+  for (const z of T.rings) {
+    const y = T.padY + z
+    const r = envelope(y)
+    out.push(ln(tz(r), sy(y), tz(-r), sy(y), 'sk'))
+  }
+
+  // The gallery: deck plate, sixteen bays of glass, the faceted tent, spire.
+  out.push(rc(tz(T.deckR), sy(T.deckY), T.deckR * 2 * SCALE_500, 0.62 * SCALE_500, 'sk'))
+  for (let i = -3; i <= 3; i++) {
+    const r = (i / 3) * (T.deckR - 0.1)
+    out.push(ln(tz(r), sy(T.deckY), tz(r), sy(T.deckY + T.wallHead), 'sf'))
+  }
+  out.push(ln(tz(T.deckR), sy(T.deckY + T.wallHead), tz(-T.deckR), sy(T.deckY + T.wallHead), 'sk'))
+  const roofL: Pt[] = T.roof.map(([r, dz]) => [tz(r), sy(T.deckY + dz)] as Pt)
+  const roofR: Pt[] = T.roof.map(([r, dz]) => [tz(-r), sy(T.deckY + dz)] as Pt)
+  out.push(pl([...roofL].reverse().concat(roofR), 'sk'))
+  out.push(
+    pl(
+      [
+        [tz(0.34), sy(T.spireBase)],
+        [tz(0), sy(T.tipY)],
+        [tz(-0.34), sy(T.spireBase)],
+      ],
+      'sk',
+    ),
+  )
+  out.push(level(tz(0), sy(T.tipY), '+ 49.296 SPIRE TIP', 1))
+  out.push(leader([tz(-T.deckR), sy(T.deckY)], [455, 212], 46, 'FREEDOM TOWER · DECK + 38.746', 'tb', 's1'))
+  return layer('freedomElevator', out.join(''))
 }
 
 /** M-GKR — the machines that keep it: one on the shell, one on the platform. */
@@ -1109,13 +1354,201 @@ function plantingLayer(): string {
   )
   out.push(tx(sz(-22) + 108, sy(30) + 10, '12.0 m — 1.0 m ABOVE ENVELOPE. SEE REV G.', 'tr'))
   // Low planting either side of the plaza, drawn the way a plan drafts shrubs.
-  for (const z of [22, 34, 46, 66, -20, -30, -74]) {
+  // Nothing between z 44 and z 70: that ground is the Freedom Tower's terrace.
+  for (const z of [22, 34, 78, -20, -30, -74]) {
     const x = sz(z)
     out.push(pa(scallop(cloudRing(x, sy(2.2), 8, 6, 8, z)), 's1'))
     out.push(ln(x, g, x, sy(1.1), 's1'))
   }
   out.push(dimH(sz(W.soilRing), sz(-W.soilRing), sy(-6), g, 'Ø 11.0 SOIL RING'))
   return layer('vegetation', out.join(''))
+}
+
+/**
+ * P-FTN — THE FOUNTAIN, half section at 1:150. It is a solid of revolution:
+ * drawing both halves would say the same thing twice, so the axis is the left
+ * edge of the drawing and the water is a hatched pool against it. The stone is
+ * cut; the jets are the plan's own ballistic arcs, dashed, because they are
+ * the only part of this piece that is not stone.
+ */
+function fountainLayer(): string {
+  const F = W.ftn
+  const out: string[] = []
+  const g = my(0)
+
+  // Court paving, stylobate, basin wall, coping — one cut profile outward.
+  // The paving stub stops at 9.9: the Optimus court's own ground line starts
+  // at 571 and the two cells must not run into each other.
+  const cut: Pt[] = [
+    [fx(9.9), g],
+    [fx(F.steps[0][0]), g],
+    [fx(F.steps[0][0]), my(F.steps[0][1])],
+    [fx(F.steps[1][0]), my(F.steps[0][1])],
+    [fx(F.steps[1][0]), my(F.steps[1][1])],
+    [fx(F.basinR + F.wall), my(F.steps[1][1])],
+    [fx(F.basinR + F.wall), my(F.copingY)],
+    [fx(F.basinR), my(F.copingY)],
+    [fx(F.basinR), my(F.floorY)],
+    [fx(F.plinth[0][0]), my(F.floorY - 0.03)],
+  ]
+  out.push(pl(cut, 'fh', true))
+  out.push(pl(cut, 's3'))
+  // The water: a still pool against the axis, 0.19 under the coping.
+  out.push(rc(fx(0), my(F.waterY), F.basinR * MON.k, (F.waterY - F.floorY + 0.03) * MON.k, 'f1'))
+  out.push(ln(fx(0), my(F.waterY), fx(F.basinR), my(F.waterY), 's1'))
+
+  // The island — three steps, the moulded pedestal, both tazze and the finial
+  // as ONE closed cut silhouette. Drawn as separate open profiles they read as
+  // scribble at this scale: everything on the axis is cut by the section, so
+  // it is poché'd like the rest of the stone and the piece reads as a solid.
+  const bowl = (t: { core: number; rimR: number; rimY: number }, stem: number): Pt[] => [
+    [fx(stem), my(t.core)],
+    [fx(t.rimR * 0.6), my(t.core + (t.rimY - t.core) * 0.44)],
+    [fx(t.rimR), my(t.rimY - 0.14)],
+    [fx(t.rimR), my(t.rimY)],
+    [fx(t.rimR * 0.93), my(t.rimY - 0.07)],
+    [fx(t.rimR * 0.11), my(t.rimY - 0.44)],
+  ]
+  const isle: Pt[] = [[fx(F.plinth[0][0]), my(F.floorY - 0.03)]]
+  for (let i = 0; i < F.plinth.length; i++) {
+    const [r, top] = F.plinth[i]
+    const next = F.plinth[i + 1]
+    isle.push([fx(r), my(top)], [fx(next ? next[0] : F.pedR), my(top)])
+  }
+  isle.push([fx(F.pedR), my(F.pedY)], [fx(0.34), my(F.pedY + 0.14)], [fx(0.34), my(F.lower.core)])
+  isle.push(...bowl(F.lower, 0.34))
+  isle.push([fx(0.3), my(F.upper.core)])
+  isle.push(...bowl(F.upper, 0.3))
+  isle.push([fx(0.12), my(F.finialY)], [fx(0), my(F.finialY)], [fx(0), my(F.floorY - 0.03)])
+  out.push(pl(isle, 'fh', true))
+  out.push(pl(isle, 's3', true))
+
+  // The jets. Mars gravity is 3.721, so these hang almost three times as long
+  // as an Earth fountain's — the arcs are drawn from the plan's own solve.
+  const jet = (r0: number, y0: number, r1: number, rise: number): string =>
+    pa(
+      `M ${u(fx(r0))} ${u(my(y0))} Q ${u(fx((r0 + r1) / 2))} ${u(my(y0 + rise * 2))} ` +
+        `${u(fx(r1))} ${u(my(F.waterY))}`,
+      's1 dash',
+    )
+  out.push(jet(6.3, F.waterY + 0.06, 3.5, 0.9))
+  out.push(jet(3.15, F.waterY + 0.08, 5.55, 0.78))
+  // The crown jet is cut short at + 8.0 and its apex called out instead: the
+  // cell is 160 units deep and the real 9.45 m plume would break the frame.
+  out.push(ln(fx(0), my(F.finialY), fx(0), my(8), 's1 dash'))
+  out.push(ln(fx(0), my(8), fx(0), g, 's0 chain'))
+
+  out.push(tx(fx(0.4), my(7.6), 'CROWN JET + 9.45', 'tn'))
+  // Lifted off the water line on a leader: sat on it, the label ran straight
+  // through both jet arcs, which are the only moving thing in the cell.
+  out.push(leader([fx(5.2), my(F.waterY)], [fx(5.9), my(3.2)], 22, 'WATER + 0.645', 'tn'))
+  out.push(tx(fx(0), g + 11, 'THE FOUNTAIN · HALF SECTION', 'ts'))
+  out.push(tx(fx(0), g + 22, 'BASIN Ø 13.96 · SEAT 0.835', 'tn'))
+  return layer('fountain', t3(out.join('')))
+}
+
+/**
+ * M-OPT — THE OPTIMUS COURT, elevation from the spur. The spur lands on the
+ * east flight head-on to the front rank, so this is the view a visitor
+ * actually gets: eight of them, facing you, on a 0.6 m cast plinth.
+ */
+function optimusLayer(): string {
+  const O = W.opt
+  const out: string[] = []
+  const g = my(0)
+  const k = MON.k
+
+  // Ground line stops at ±8.0, not the court's full 9.4: the cell is 366 wide
+  // and the full disc would run under the Fountain on one side and out of the
+  // frame on the other.
+  out.push(ln(ox(-8), g, ox(8), g, 's2'))
+  // Plinth drum and slab, with a cardinal flight breaking each side.
+  const run = O.steps * O.tread
+  const stair: Pt[] = [[ox(-(O.plinthR + run)), g]]
+  for (let i = 1; i <= O.steps; i++) {
+    stair.push([ox(-(O.plinthR + run - (i - 1) * O.tread)), my(i * O.riser)])
+    stair.push([ox(-(O.plinthR + run - i * O.tread)), my(i * O.riser)])
+  }
+  stair.push([ox(-O.plinthR), my(O.deckY)], [ox(O.plinthR), my(O.deckY)])
+  for (let i = O.steps; i >= 1; i--) {
+    stair.push([ox(O.plinthR + run - i * O.tread), my(i * O.riser)])
+    stair.push([ox(O.plinthR + run - (i - 1) * O.tread), my(i * O.riser)])
+  }
+  stair.push([ox(O.plinthR + run), g])
+  out.push(pl(stair, 'fh', true))
+  out.push(pl(stair, 's3'))
+  out.push(ln(ox(-O.plinthR), my(O.deckY - 0.075), ox(O.plinthR), my(O.deckY - 0.075), 's0'))
+
+  // The front rank of four, and the rank behind it in thin line.
+  for (let i = 0; i < 4; i++) {
+    const z = (i - 1.5) * O.rankPitch
+    out.push(figureSilhouette(ox(z + 0.5), my(O.deckY), k * 0.985))
+    out.push(figureSilhouette(ox(z - 0.5), my(O.deckY), k * 0.985))
+  }
+  out.push(dimV(my(O.deckY + O.figure), my(O.deckY), ox(O.plinthR + run) + 12, ox(4.2), '1730'))
+  // Right-anchored to the cell edge, not centred on the drawing: centred, the
+  // two captions close to within a few units of the Fountain's own pair.
+  out.push(tx(BOX.mon.x + BOX.mon.w - 12, g + 11, 'THE OPTIMUS COURT', 'ts', 'end'))
+  out.push(tx(BOX.mon.x + BOX.mon.w - 12, g + 22, 'PLINTH Ø 12.0 · EIGHT', 'tn', 'end'))
+  return layer('optimus-exhibit', t3(out.join('')))
+}
+
+/**
+ * S-PAD — THE LAUNCH SITE, against the dome at one scale. This box exists for
+ * the comparison and nothing else: Dome One's crown is + 64.000 and the stack
+ * beyond the glass is 147.1 m to the rod. The tallest thing in this world is
+ * not in the park.
+ */
+function launchLayer(): string {
+  const S = W.ship
+  const out: string[] = []
+  const g = ly(0)
+  const k = LAU.k
+  /** Local frame of the launch assembly: 0 is the OLM/tower datum. */
+  const s = (m: number): number => lx1(m)
+
+  out.push(ln(lx0(-138), g, lx0(138), g, 's2'))
+  const dr = W.domeSphere * k
+  out.push(
+    pa(
+      `M ${u(lx0(W.domeBase))} ${u(g)} A ${u(dr)} ${u(dr)} 0 0 0 ${u(lx0(-W.domeBase))} ${u(g)}`,
+      's2',
+    ),
+  )
+  out.push(ln(lx0(-W.tower.z * 0.42), ly(W.tower.tipY), lx0(W.tower.z * 0.42), ly(W.tower.tipY), 's0 dash'))
+  out.push(tx(lx0(0), ly(W.tower.tipY) - 4, 'FREEDOM TOWER + 49.30', 'tn', 'middle'))
+  out.push(tx(lx0(0), g + 13, 'DOME ONE · CROWN + 64.000', 'ts', 'middle'))
+
+  // The graded platform, the raft, the OLM, the tower and the stack on it.
+  out.push(ln(s(-42), ly(S.padY), s(34), ly(S.padY), 's2'))
+  out.push(rc(s(-38.3), ly(S.slabTop), 68.6 * k, 2.4 * k, 'fh'))
+  out.push(rc(s(-38.3), ly(S.slabTop), 68.6 * k, 2.4 * k, 's2'))
+  const tw = S.towerW / 2
+  const tx0 = -17.5
+  out.push(rc(s(tx0 - tw), ly(S.rodTop), S.towerW * k, (S.rodTop - S.slabTop) * k, 's2'))
+  for (let i = 1; i < 10; i++) {
+    const y = ly(S.slabTop + ((S.trussTop - S.slabTop) * i) / 10)
+    out.push(ln(s(tx0 - tw), y, s(tx0 + tw), y, 's0'))
+  }
+  out.push(ln(s(tx0 + tw), ly(S.armY), s(tx0 + tw + S.armLen), ly(S.armY + 1.4), 's2'))
+  out.push(ln(s(tx0 + tw), ly(S.armY - 2.6), s(tx0 + tw + S.armLen), ly(S.armY - 0.8), 's1'))
+  out.push(ln(s(tx0 + tw), ly(S.qdY), s(tx0 + tw + 9), ly(S.qdY), 's1'))
+  // OLM table, booster, ship.
+  const vx = 5.36
+  out.push(rc(s(vx - 10.3), ly(S.deckY), 20.6 * k, 3.6 * k, 's2'))
+  out.push(rc(s(vx - S.vehR), ly(S.boosterTop), S.vehR * 2 * k, (S.boosterTop - S.deckY) * k, 's3'))
+  out.push(
+    pa(
+      `M ${u(s(vx - S.vehR))} ${u(ly(S.boosterTop))} L ${u(s(vx - S.vehR))} ${u(ly(S.noseY - S.noseLen))} ` +
+        `Q ${u(s(vx - S.vehR))} ${u(ly(S.noseY))} ${u(s(vx))} ${u(ly(S.noseY))} ` +
+        `Q ${u(s(vx + S.vehR))} ${u(ly(S.noseY))} ${u(s(vx + S.vehR))} ${u(ly(S.noseY - S.noseLen))} ` +
+        `L ${u(s(vx + S.vehR))} ${u(ly(S.boosterTop))} Z`,
+      's3',
+    ),
+  )
+  out.push(dimV(ly(S.rodTop), ly(S.padY), s(34) + 14, s(tx0 + tw + S.armLen), '147 100'))
+  out.push(tx(s(-4), g + 13, 'THE LAUNCH SITE · 215 m WSW', 'ts', 'middle'))
+  return layer('starship', t3(out.join('')))
 }
 
 /** M-AIR — the air handlers, which are most of what you will hear. */
@@ -1171,6 +1604,7 @@ function drawing(): string {
     penTable() +
     skyLayer() +
     siteLayer() +
+    launchLayer() +
     domeLayer() +
     deckLayer() +
     figureLayer() +
@@ -1178,8 +1612,11 @@ function drawing(): string {
     interiorsLayer() +
     keyPlanLayer() +
     tramLayer() +
+    freedomLayer() +
     robotsLayer() +
+    optimusLayer() +
     plantingLayer() +
+    fountainLayer() +
     airLayer() +
     inkLayer() +
     `</svg>`
@@ -1215,9 +1652,9 @@ function markup(): string {
     `<div class="cap">Plot register<b><span class="count">00</span> / ${LAYERS.length}</b></div>` +
     `<div class="reg">${register}</div>` +
     `<div class="revs">` +
-    `<div class="rev"><i>E</i><b>SOL 061</b><span>Range B replanted after frost loss</span></div>` +
     `<div class="rev"><i>F</i><b>SOL 190</b><span>Loop headway 6 → 4 min. Park opened.</span></div>` +
-    `<div class="rev last"><i>G</i><b>SOL 214</b><span>Tree 1 at 12.0 m — 1.0 m above planting envelope. Drawing amended to suit.</span></div>` +
+    `<div class="rev"><i>G</i><b>SOL 214</b><span>Tree 1 at 12.0 m — 1.0 m above planting envelope. Drawing amended to suit.</span></div>` +
+    `<div class="rev last"><i>H</i><b>SOL 241</b><span>Freedom Tower, the Fountain, the Optimus court and the launch site added. Pen table and parts schedule to Sheet 05.</span></div>` +
     `</div>` +
     `<div class="fill"></div>` +
     `<div class="stampcell">` +
@@ -1232,14 +1669,14 @@ function markup(): string {
     `</div>` +
     `<div class="foot">` +
     `<h1>Dome One — General Arrangement</h1>` +
-    `<div class="sub">Section A–A · Key plan · Detail A · Sheet 03 of 12</div>` +
+    `<div class="sub">Section A–A · Key plan · Detail A · The monuments · The launch site · Sheet 03 of 12</div>` +
     `<div class="adm">Admission is by stamp. Gate S is always open.</div>` +
     `</div>` +
     `<div class="title">` +
     `<div class="proj"><b>Elysium Commons</b><span>Elysium Planitia, Mars · − 2 540 m</span></div>` +
     `<div class="cells">` +
-    `<div><em>Scale</em><b>1:500</b></div><div><em>Sheet</em><b>03/12</b></div><div><em>Rev</em><b>G</b></div>` +
-    `<div><em>Drawn</em><b>GK-04</b></div><div><em>Checked</em><b>GK-01</b></div><div><em>Date</em><b>SOL 214</b></div>` +
+    `<div><em>Scale</em><b>1:500</b></div><div><em>Sheet</em><b>03/12</b></div><div><em>Rev</em><b>H</b></div>` +
+    `<div><em>Drawn</em><b>GK-04</b></div><div><em>Checked</em><b>GK-01</b></div><div><em>Date</em><b>SOL 241</b></div>` +
     `</div>` +
     `<div class="status"><em>Status</em>As built · Shift 14, held</div>` +
     `</div>` +

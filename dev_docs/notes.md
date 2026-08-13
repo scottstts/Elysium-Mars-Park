@@ -3594,3 +3594,65 @@ Full write-up: `dev_docs/systems/starship.md` §8. The lessons that generalise:
   robotsSystem bobs the rake/brush with — so the scrub you hear is the stroke
   you see. Reuse the animation's own phase term for its sound wherever one
   exists; it costs nothing and can never drift.
+
+## SHEET 03 rev H — the plate catches up with the park (2026-08-13)
+
+The entry sheet is a SECOND CONSUMER of the world constants (see "Entry
+screen: SHEET 03"), and it had gone stale: the Freedom Tower, the Fountain,
+the Optimus court and the launch site all existed in the world and none of
+them existed on the drawing, and four systems were reporting boot labels the
+plot register had no row for. This pass re-synced it. Only the things the
+code cannot say for itself:
+
+- **The register must match `main.ts`'s real emit order, not a plausible
+  one.** 18 rows now. Note `portalStation`'s id is `archkit` and
+  `optimusExhibit`'s is `optimus-exhibit` (hyphen, not camel) — both easy to
+  guess wrong. `doors`/`opsScreens` still alias into the pseudo-row
+  `interiors`; `opsScreens` reports AFTER `optimus-exhibit`, so it lands
+  behind the pointer and is simply swept along, which is fine because
+  `advance()` is monotonic.
+- **The Freedom Tower stands 33 m IN FRONT of Section A–A's cutting plane.**
+  A section shows what is beyond the cut, so strictly the tower is omitted —
+  but it is the park's landmark and had to be on the sheet. It is drawn in
+  long-dash-dot (`.sk`, the standard pen for work nearer than the cut) over a
+  hairline lattice, with note 2 saying so. A stepped section was the other
+  candidate and was rejected: stepping to the tower axis means the shell arc
+  over the step band is a DIFFERENT radius, which means breaking the rib
+  band's hatched envelope in two. Not worth it.
+- **The tower's clearance cannot be read off the shell arc on this sheet.**
+  The glass over the tower's own plan radius (65.86) is R 160.681, 3.56 m
+  LOWER than the glass on the section plane at the same abscissa. So a
+  phantom arc at the tower's own radius is struck over it and the 0.900 is
+  dimensioned to that. Anyone adding another off-axis object tall enough to
+  matter has to do the same thing or the drawing lies.
+- **The launch site is drawn AGAINST the dome at one scale (1:2500).** That
+  comparison is the whole point of the cell — 64 m of dome, 147.1 m of stack
+  — and it is also the only scale at which a 147 m stack fits a cell at all.
+  1:1000 would need 278 units of height and the tallest cell on the plate is
+  ~150.
+- **Two cells had to be found, so two were retired.** The plotter pen table
+  and the standard-parts schedule went to "Sheet 05": the pens survive as a
+  one-line legend under the section (still the X-PEN layer, still the first
+  thing to ink) and the kit as balloon tags on the parts where they occur,
+  which is better drafting than repeating a component schedule on a general
+  arrangement anyway.
+- **Verification, extended.** The blind-layout probe from the previous pass
+  still applies, plus two checks it lacked that both caught real bugs:
+  (1) every `<text>` in the lower band must lie inside one of the five boxes
+  — captions had fallen out the bottom of two cells and no text-vs-text pass
+  can see that; (2) run the overlap test at ZERO slack, and use ~0.61 em/char
+  for the mono class (`tn`) and ~0.55 for the sans — a 2-unit tolerance let
+  two visibly-touching pairs through.
+- **Rasterizing the plate for a look, on macOS with no headless browser:**
+  emit a standalone `.svg` with the module's CSS inlined and `#entry`
+  rescoped, then `qlmanage -t`. Two traps, both of which produce a
+  confidently wrong picture: rescope `#entry svg` → `svg` BEFORE `#entry` →
+  `svg` (otherwise the root rule becomes `svg svg`, matches nothing, and
+  every unfilled path renders solid black), and do not line-filter the CSS
+  (it silently drops every multi-line rule). Leave the svg's intrinsic size
+  alone or qlmanage crops instead of fitting.
+- Cells are tight enough that geometry, not just text, collides: the
+  Fountain's court stub and the Optimus court's ground line were run into
+  each other at their true widths and are both drawn short, and Gate S's
+  annotation had to move out over the exterior sky because the airspace it
+  used to land in (z 44…70 above the deck) is the tower's now.
