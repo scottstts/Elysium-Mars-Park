@@ -277,41 +277,43 @@ deliberate containments; three members cannot meet without either
 interpenetrating or butting, and butting is what makes coplanar pairs.
 
 **The panel is a lightbox, not a printed plate.** `src/assets/tesla_logo.png`
-is a neon mark on a black ground, so one `texture()` node drives both
-`colorNode` and `emissiveNode`. Emissive sits on the park's sign rung (3.4),
-so the artificial layer keeps one ladder, and the faces do not cast (an
-emitter throwing a shadow of its own glow is a contradiction the cached maps
-cannot express).
+stores two different signals. Its alpha channel is a clean anti-aliased mask
+of the physical-looking tubes. Its RGB contains the white tube colour **and a
+very broad halo in fully transparent pixels**. Sampling RGB alone exposes
+that hidden halo; sending it through the park's full-frame bloom then blurs it
+a second time. At the design view, the fixed screen-space blur becomes wider
+than the small glyph counters and the wordmark collapses into white mush.
 
-**The artwork's painted halo has to be held under the bloom threshold, and
-that took two passes to get right.** The source already contains a glow, so
-emitting it flat double-counts it. Measured over the band the panel shows
-(bloom is threshold 1.0 / strength 0.3), against a **true neon-stroke area of
-1.53 %**:
+The material therefore premultiplies the sampled signal explicitly:
 
-| emission curve | bloom area | bloom energy | peak | at mip4 |
-|---|---|---|---|---|
-| flat `lum · 3.4` | 26.2 % | — | 3.40 | — |
-| `lum^2.2 · 3.4` | 6.0 % | 0.0464 | 3.40 | peak 1.91 |
-| `lum^6 · 2.0` | 1.42 % | 0.0099 | 2.00 | **peak 0.68 — sign goes dark** |
-| **shipped:** core + base | **2.63 %** | **0.0187** | **2.20** | peak 1.44 ✓ |
+```text
+stroke   = art.rgb · art.a
+emissive = stroke · 2.2
+albedo   = stroke · 0.22
+```
 
-A single power curve cannot do both jobs. Crushed hard enough to keep the
-letter counters open up close, it collapses under mip averaging and the sign
-switches OFF at distance. So the curve is two terms:
+This makes the alpha-covered tubes the only HDR source and lets the renderer
+create the visible halo exactly once. Peak 2.2 sits above the scene-linear
+bloom threshold of 1.0 without competing with the park's larger emitters.
 
-- **CORE** — `smoothstep(0.62, 0.95, luminance) · 1.7`, which only opens on
-  the true strokes. This is the only term allowed over the threshold, so it is
-  the only thing that blooms.
-- **BASE** — `luminance · 0.5`, capped below the threshold by construction
-  (0.5 can never reach 1.0). It carries the painted halo as plain lit panel
-  and is what keeps the sign reading once mip averaging has thinned the
-  strokes.
+The alpha also supplies the required distance behaviour without a camera
+distance fade. It is mip-filtered as coverage, so unresolved tubes remain as
+sub-threshold emission but stop driving the fixed screen-space blur before it
+is wider than the logo. Measured over the exact source band shown by the panel:
 
-Bloom energy is 2.5× lower up close and 6.9× lower at mip4 than the first
-version, with the panel still glowing at every range. The diffuse is the
-panel, not the sign: `art · 0.22`, a dark acrylic face that happens to be
-lighter where the tubes are printed.
+| sampled mip | peak `rgb · alpha` | area above threshold after `× 2.2` |
+|---|---:|---:|
+| 0 | 0.992 | 1.97 % |
+| 1 | 0.980 | 2.30 % |
+| 2 | 0.871 | 2.25 % |
+| 3 | 0.561 | 0.05 % |
+| 4 | 0.302 | 0 % |
+| 5 | 0.192 | 0 % |
+
+Thus close views retain a restrained bloom around resolved tubes, while the
+design/far views retain a readable emissive wordmark with open counters and
+no broad bloom contribution. The faces do not cast: an emitter throwing a
+shadow of its own glow is a contradiction the cached maps cannot express.
 
 The lit quads stand 4 mm proud of the carcass — not coplanar with it — inside
 a 20 mm dark reveal. UVs show a horizontal BAND of the source at its true

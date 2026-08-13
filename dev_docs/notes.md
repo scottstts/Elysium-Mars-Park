@@ -3104,39 +3104,29 @@ whitelists.
 Corollary worth remembering: a base plate resting ON a deck puts its underside
 in the deck's plane. Bed it 4 mm in. There is room inside any real slab.
 
-### Backlit signs: the image IS the emitter — but crush a PAINTED halo first
+### Backlit signs: inspect alpha before treating hidden RGB as emission
 
 For artwork that is a light source on a dark ground (neon, backlit acrylic),
-feed ONE `texture()` node to both `colorNode` and `emissiveNode.mul(rung)`.
-The dark ground stays dark, only the legend crosses the bloom threshold, and
-you never fight a separate glow mask. Pattern already in `parkAmenities`
-(`signs-lit`); the Optimus marque is the second user.
+inspect all four channels before choosing the emission mask. The Tesla PNG's
+alpha is a clean anti-aliased tube mask, while its fully transparent RGB
+stores a broad painted halo. The first implementation ignored alpha, exposed
+the hidden halo as scene-linear emission, and then sent it through global
+bloom. That is double bloom, and a fixed screen-space kernel turns it into a
+mushy slab as the sign shrinks.
 
-**Caveat that cost two frames:** artwork that ALREADY has a glow baked into it
-double-counts. Emitting the Tesla marque flat at rung 3.4 put **26 % of the
-panel over the bloom threshold** against a true stroke area of **1.53 %** —
-the scene's bloom spread that again and the letter counters filled in solid.
+The correct recipe for this asset is `stroke = rgb · alpha`, then feed
+`stroke · 2.2` to emission and `stroke · 0.22` to albedo. The HDR peak gives
+resolved tubes restrained bloom up close. As the texture minifies, the alpha
+mips average physical coverage: mip 3 leaves only 0.05 % of the shown band
+over the 1.0 threshold and mip 4 leaves none. The below-threshold average
+still draws the wordmark, but the bloom retires before its screen-space radius
+can fill the letter counters. Prefer this coverage behaviour to an arbitrary
+camera-distance fade.
 
-The obvious fix, a power curve on luminance, is a trap: crushed hard enough to
-keep the counters open up close (`lum^6`, 1.42 % blooming) it **collapses
-under mip averaging and the sign switches OFF at distance** — measured peak
-0.68 at mip4, under the threshold. Use TWO terms instead:
-
-- a **core** term, `smoothstep(lo, hi, luminance) · gain`, that only opens on
-  the real strokes — the only term allowed over the threshold, so the only
-  thing that blooms;
-- a **base** term, `luminance · g` with `g < 1`, capped under the threshold by
-  construction, which carries the painted halo as plain lit panel and keeps
-  the sign readable once mips have thinned the strokes.
-
-Marque ships at core `smoothstep(0.62,0.95)·1.7` + base `·0.5`: 2.63 %
-blooming, peak 2.20, and 6.9× less bloom energy than the first version at
-mip4 while still glowing there.
-
-**Measure this, do not eyeball it.** Decoding a PNG in node is ~40 lines
-(parse IHDR/IDAT, `zlib.inflateSync`, undo the per-scanline filters), and
-box-averaging the band in LINEAR light simulates the mip chain. That is what
-turned "it looks mushy" into the table above.
+**Measure this, do not eyeball it.** Inspect raw RGB with alpha disabled as
+well as the composited image; normal image viewers hide RGB stored under zero
+alpha. Box-average RGBA channels independently before applying the shader
+expression to simulate the mip chain.
 
 Rules that came with it:
 

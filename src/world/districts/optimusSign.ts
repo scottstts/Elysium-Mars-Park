@@ -1,7 +1,7 @@
 import { BufferAttribute, BufferGeometry, Mesh, SRGBColorSpace, TextureLoader, Vector3 } from 'three'
 import { MeshStandardNodeMaterial } from 'three/webgpu'
 import type { Node } from 'three/webgpu'
-import { smoothstep, texture as textureNode } from 'three/tsl'
+import { texture as textureNode } from 'three/tsl'
 import logoUrl from '../../assets/tesla_logo.png'
 import type { PartWriter } from '../../archkit/writer'
 import { plinthAnchor } from './optimusPlaza'
@@ -24,9 +24,9 @@ import type { ColliderSpec } from './types'
  * The artwork is a neon mark on a black ground, so the panel is a LIGHTBOX,
  * not a printed plate: one image drives both colour and emission and the
  * black ground stays black. Its peak lands at 2.2 — between the ladder's
- * `interiorGlow` and `floorLens` rungs (notes.md) — because the emitting AREA
- * here is a whole panel rather than a legend, and the ladder's own rule is to
- * scale the area, not the multiplier. See the emission curve below.
+ * `interiorGlow` and `floorLens` rungs (notes.md). The PNG's alpha is the
+ * anti-aliased tube coverage; its transparent RGB contains a broad painted
+ * halo and must never be rendered directly. See the coverage rule below.
  */
 
 /** All heights are metres above the plinth's DECK, not the court. */
@@ -65,28 +65,25 @@ const LOGO_ASPECT = 1536 / 1024
 /** Vertical centre of the artwork within the image (v, y-up). */
 const LOGO_V_CENTRE = 0.512
 /**
- * Emission curve for the artwork. TWO terms, and the split is the whole point
- * (measured against the decoded PNG; bloom threshold is 1.0):
+ * The artwork's alpha channel is the emission coverage mask (measured against
+ * the decoded PNG; bloom threshold is 1.0):
  *
- *   CORE — a smoothstep that only opens on the true neon strokes. These are
- *   1.53 % of the panel; this is the only term allowed over the threshold, so
- *   it is the only thing the renderer blooms.
+ *   RGB — white tube colour plus a very broad glow painted into fully
+ *   transparent pixels. Reading it alone double-blooms the halo and fills the
+ *   TESLA counters at the design view.
  *
- *   BASE — a gentle linear term, capped by construction below the threshold
- *   (0.5 × luminance can never reach 1.0). It carries the artwork's painted
- *   halo as plain lit panel, and it is what keeps the sign reading once mip
- *   averaging has thinned the strokes: a pure power curve looks crisp up
- *   close and then goes DARK at distance — measured peak 0.68 at mip4, under
- *   the threshold, sign off.
+ *   ALPHA — clean anti-aliased tube coverage. Multiplying sampled RGB by alpha
+ *   discards the hidden halo and lets the park's one HDR bloom pass generate
+ *   the visible glow exactly once.
  *
- * Against the first version (flat luminance × 3.4): blooming area 6.02 % →
- * 2.63 %, bloom energy cut 2.5×, peak 3.40 → 2.20, and the panel still glows
- * at mip4 (peak 1.44). The letter counters stay open instead of filling in.
+ * Coverage-aware mip behaviour is the distance contract: at mip 0–2 the
+ * 2.2 peak gives the resolved tubes a restrained bloom; at mip 3 only 0.05 %
+ * of the shown band remains over threshold, and at mip 4+ none does. The
+ * sub-threshold mip average remains visible as emission, while the fixed
+ * screen-space bloom kernel retires before it becomes wider than the glyphs.
  */
-const CORE_LOW = 0.62
-const CORE_HIGH = 0.95
-const CORE_GAIN = 1.7
-const BASE_GAIN = 0.5
+const STROKE_EMISSIVE = 2.2
+const STROKE_ALBEDO = 0.22
 
 const SILL_TOP = SIGN.clear + SIGN.beamHeight
 const PANEL_TOP = SILL_TOP + SIGN.panelHeight
@@ -241,18 +238,16 @@ export async function loadOptimusSignFaces(): Promise<Mesh> {
 
   const material = new MeshStandardNodeMaterial()
   const art = textureNode(map)
-  // The artwork already has a glow HALO painted into it, so emitting it flat
-  // double-counts: the halo clears the bloom threshold across its full width,
-  // the renderer spreads that again, and the letter counters fill in until
-  // the panel is a white slab. Only the strokes are allowed over the line.
-  const lum = art.r.mul(0.2126).add(art.g.mul(0.7152)).add(art.b.mul(0.0722))
-  const core = smoothstep(CORE_LOW, CORE_HIGH, lum)
-  material.emissiveNode = art.rgb.mul(
-    core.mul(CORE_GAIN).add(lum.mul(BASE_GAIN)),
-  ) as unknown as Node<'vec3'>
+  // The transparent RGB contains the source artwork's broad baked halo. The
+  // alpha channel is the actual tube coverage, so premultiply explicitly in
+  // the shader and let the park's HDR bloom create the halo once. Crucially,
+  // alpha is mip-filtered as coverage: distant strokes stay visible below the
+  // threshold instead of feeding a screen-space blur wider than the glyphs.
+  const stroke = art.rgb.mul(art.a)
+  material.emissiveNode = stroke.mul(STROKE_EMISSIVE) as unknown as Node<'vec3'>
   // Diffuse is the panel, not the sign: a dark acrylic face that happens to
   // be lighter where the tubes are printed.
-  material.colorNode = art.rgb.mul(0.22) as unknown as Node<'vec3'>
+  material.colorNode = stroke.mul(STROKE_ALBEDO) as unknown as Node<'vec3'>
   material.roughness = 0.34
   material.metalness = 0
 
