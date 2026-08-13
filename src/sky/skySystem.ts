@@ -1,7 +1,10 @@
 import { BackSide, DirectionalLight, Mesh, Scene, SphereGeometry } from 'three'
 import { MeshBasicNodeMaterial, PMREMGenerator } from 'three/webgpu'
 import { float, normalize, positionLocal } from 'three/tsl'
-import { CachedShadowClipmapNode } from '../render/cachedShadowClipmaps'
+import {
+  CachedShadowClipmapNode,
+  type ShadowClipmapSnapshot,
+} from '../render/cachedShadowClipmaps'
 import { DYNAMIC_SHADOW_LAYER } from '../render/layers'
 import { createStaticShadowScene } from '../render/staticShadowScene'
 import type { GameContext } from '../runtime/context'
@@ -209,12 +212,17 @@ export class SkySystem implements GameSystem {
   sealStaticShadowCasters(scene: Scene): void {
     if (!this.clipmaps) return
     const staticShadows = createStaticShadowScene(scene)
-    this.clipmaps.setStaticCasterScene(staticShadows.scene, staticShadows.casterCount)
+    this.clipmaps.setStaticCasterScene(staticShadows)
   }
 
   /** Force every clipmap level to re-render on the next frame (warmup). */
   invalidateShadowLevels(): void {
     this.clipmaps?.invalidate()
+  }
+
+  /** Read-only state for the opt-in arrival profiler and visual validation. */
+  debugShadowSnapshot(): ShadowClipmapSnapshot | null {
+    return this.clipmaps?.debugSnapshot() ?? null
   }
 
   dispose(ctx: GameContext): void {

@@ -149,6 +149,24 @@ supposed to be cheap.
 | 1 | 6 mm | 193,804 | 1.55 M | 30–70 m, **and every shadow** |
 | 2 | 22 mm | 19,979 | 0.16 M | > 70 m |
 
+All three visible LODs are explicitly compiled during boot against the live
+MRT/MSAA scene pass. This is required even though they share one material
+array: each decimated geometry produces a distinct TSL vertex program. The
+arrival camera crosses into LOD1 visibility exactly at the tunnel mouth; if
+warmup compiles only the currently active far LOD, Three r185 synchronously
+generates twelve missing vertex programs in that frame. `compileAllLods()`
+temporarily exposes one LOD at a time behind the entry plate and restores the
+runtime selection afterward. It also bypasses frustum culling for the selected
+compile-only mesh because the broad warmup camera does not contain the court;
+both visibility and culling state are restored before BOARD. This does not
+change the LOD thresholds or image.
+
+Three r185's `PassNode.compileAsync()` still omits these grouped
+`InstancedMesh` variants from its persistent render cache. Each forced LOD
+therefore also receives one real `pipeline.render()` while the entry plate is
+up. That is the exact live path, so it cannot defer node-program generation;
+the final warmup GPU fence covers these submissions.
+
 Decimation is vertex clustering, not edge collapse: it is O(n), it needs no
 manifold topology (a CSG'd, beveled, distance-welded mesh is emphatically not
 manifold), and its one weakness — softened hard edges — is indistinguishable

@@ -469,6 +469,18 @@ export class RenderPipelineSystem implements GameSystem {
   }
 
   /**
+   * Compile scene materials in the exact live MRT/MSAA context at the current
+   * camera pose. A normal renderer compile targets the canvas and produces a
+   * different WebGPU pipeline key; fire-and-forget sneak renders only queue
+   * r185's deferred builders and can still overlap the first gameplay frames.
+   */
+  async compileSceneAsync(): Promise<void> {
+    const renderer = this.context?.renderer
+    if (!renderer || !this.scenePass) return
+    await this.scenePass.compileAsync(renderer)
+  }
+
+  /**
    * Compile the ACTUAL final fullscreen pipeline through WebGPU's async path
    * so the first presented frame never stalls on pipeline creation. Three
    * r185 has no RenderPipeline.compileAsync(); its concrete quad is a normal
@@ -499,6 +511,15 @@ export class RenderPipelineSystem implements GameSystem {
       renderer.toneMapping = previousToneMapping
       renderer.outputColorSpace = previousOutputColorSpace
     }
+  }
+
+  /** Wait until loading-screen warmup commands have completed on the GPU. */
+  async finishWarmup(): Promise<void> {
+    const renderer = this.context?.renderer
+    const backend = renderer?.backend as {
+      device?: { queue?: { onSubmittedWorkDone(): Promise<void> } }
+    } | undefined
+    await backend?.device?.queue?.onSubmittedWorkDone()
   }
 
   update(ctx: GameContext): void {

@@ -1,8 +1,18 @@
 import type { GameContext } from './context'
 import type { GameSystem } from './system'
 
+export type SystemUpdatePhase = 'fixed' | 'update' | 'late'
+export type SystemTimingHandler = (
+  systemId: string,
+  phase: SystemUpdatePhase,
+  durationMs: number,
+) => void
+
 export class SystemRegistry {
   private readonly systems: GameSystem[] = []
+
+  /** Debug profiler hook. Unset in normal gameplay, so the hot path stays direct. */
+  onSystemTiming?: SystemTimingHandler
 
   add<T extends GameSystem>(system: T): T {
     this.systems.push(system)
@@ -26,15 +36,45 @@ export class SystemRegistry {
   }
 
   fixedUpdate(ctx: GameContext, dt: number): void {
-    for (const system of this.systems) system.fixedUpdate?.(ctx, dt)
+    const timing = this.onSystemTiming
+    if (!timing) {
+      for (const system of this.systems) system.fixedUpdate?.(ctx, dt)
+      return
+    }
+    for (const system of this.systems) {
+      if (!system.fixedUpdate) continue
+      const start = performance.now()
+      system.fixedUpdate(ctx, dt)
+      timing(system.id, 'fixed', performance.now() - start)
+    }
   }
 
   update(ctx: GameContext, dt: number, alpha: number): void {
-    for (const system of this.systems) system.update?.(ctx, dt, alpha)
+    const timing = this.onSystemTiming
+    if (!timing) {
+      for (const system of this.systems) system.update?.(ctx, dt, alpha)
+      return
+    }
+    for (const system of this.systems) {
+      if (!system.update) continue
+      const start = performance.now()
+      system.update(ctx, dt, alpha)
+      timing(system.id, 'update', performance.now() - start)
+    }
   }
 
   lateUpdate(ctx: GameContext, dt: number, alpha: number): void {
-    for (const system of this.systems) system.lateUpdate?.(ctx, dt, alpha)
+    const timing = this.onSystemTiming
+    if (!timing) {
+      for (const system of this.systems) system.lateUpdate?.(ctx, dt, alpha)
+      return
+    }
+    for (const system of this.systems) {
+      if (!system.lateUpdate) continue
+      const start = performance.now()
+      system.lateUpdate(ctx, dt, alpha)
+      timing(system.id, 'late', performance.now() - start)
+    }
   }
 
   dispose(ctx: GameContext): void {

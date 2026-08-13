@@ -3717,3 +3717,35 @@ knowing generally:
 - The lectern frame is +X toward the audience, so a speaker-facing microphone
   must finish at a *smaller* forward coordinate than its socket. Keep this
   directional assertion in the headless stage audit when adjusting the sweep.
+
+## Arrival hitch + audio/render start ordering (2026-08-13)
+
+- **A loading `render()` is not a compile barrier in Three r185.** The old
+  three-pose sneak renders queued deferred WebGPU builders and immediately
+  enabled BOARD, so a fast first click could overlap compilation. Await the
+  scene `PassNode.compileAsync()` in the live MRT/MSAA context at every warmup
+  pose, restore the real camera, force all clipmaps there, then wait for the
+  GPU queue before releasing the entry plate.
+- **The surviving tunnel-mouth hitch was `optimus:lod1`, not shadows.** A live
+  `?profile=arrival` trace reproduced a 278–283 ms render-submission block at
+  tram z ≈ 132 m while system work stayed below 1 ms and the static refresh
+  cost ~0.3 ms. The frame created twelve missing Optimus LOD1 vertex programs
+  at once. `PassNode.compileAsync()` omitted the grouped `InstancedMesh` LOD
+  even when it was selected explicitly, so boot now forces each LOD visible
+  and uncullable, awaits compilation, and submits one real covered scene frame
+  per LOD. A same-size live rerun produced no program builds and capped the
+  arrival at 59.8 ms (normal cadence for that probe) with 12–13 ms CPU through
+  the tunnel mouth. No geometry, material, LOD threshold, or render setting
+  changed.
+- **A render bundle removes command encoding, not irrelevant GPU draws.** The
+  single static-shadow bundle submitted every caster on each camera-centred
+  refresh; an analytic arrival probe counted 408 static map refreshes in the
+  9.5 s ride. Fixed 32 m spatial bundles, conservatively selected in the same
+  light-space square as the committed map, preserve every caster and texel but
+  stop fine portal maps from transforming the whole park. Record all bundles
+  against every clipmap camera during loading so selection never creates a
+  first-use bundle in play (`tools/static-shadow-bundle-audit.mjs`).
+- **Autoplay activation and audibility are different clocks.** Create/resume
+  WebAudio on BOARD with master gain zero; release it only on the event emitted
+  after the first unpaused render submission. Starting the source graph on the
+  gesture is browser policy, not permission for sound to outrun the image.

@@ -106,6 +106,8 @@ async function boot(): Promise<void> {
 
   const registry = new SystemRegistry()
   const pipeline = new RenderPipelineSystem()
+  let tram: TramSystem
+  let optimus: OptimusExhibitSystem
   if (flags.debug) registry.add(new DebugOverlaySystem())
   const sky = registry.add(new SkySystem())
   registry.add(new ExteriorSystem(pipeline))
@@ -125,10 +127,10 @@ async function boot(): Promise<void> {
     registry.add(new PortalStationSystem(physics, null, null))
     const doors = registry.add(new DoorsSystem(physics, null))
     const assembly = registry.add(new ParkAssemblySystem(physics, null, null, doors))
-    const tram = registry.add(new TramSystem(physics, null, null))
+    tram = registry.add(new TramSystem(physics, null, null))
     registry.add(new FreedomElevatorSystem(physics, null, null))
     const robots = registry.add(new RobotsSystem(null))
-    registry.add(new OptimusExhibitSystem())
+    optimus = registry.add(new OptimusExhibitSystem())
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
     registry.add(new FountainSystem(physics))
@@ -138,12 +140,12 @@ async function boot(): Promise<void> {
     registry.add(new PortalStationSystem(physics, player, interaction))
     const doors = registry.add(new DoorsSystem(physics, interaction))
     const assembly = registry.add(new ParkAssemblySystem(physics, player, interaction, doors))
-    const tram = registry.add(new TramSystem(physics, player, interaction))
+    tram = registry.add(new TramSystem(physics, player, interaction))
     // After the tram: both share the caption override, and the later system
     // must be the elevator so its seated hint wins while a guest rides it.
     registry.add(new FreedomElevatorSystem(physics, player, interaction))
     const robots = registry.add(new RobotsSystem(player))
-    registry.add(new OptimusExhibitSystem())
+    optimus = registry.add(new OptimusExhibitSystem())
     registry.add(new OpsScreensSystem(assembly, tram, robots))
     registry.add(new VegetationSystem(physics))
     // The fountain owns its own stone, water and spray; its four coping
@@ -169,30 +171,67 @@ async function boot(): Promise<void> {
   // The frozen world records its shadow bundle once, behind the entry screen.
   sky.sealStaticShadowCasters(scene)
 
+  // Lay out the boot-time camera and live canvas textures once without
+  // advancing simulation. The player begins inside a moving tram, so init()
+  // alone has not yet copied that seated pose onto the camera.
+  registry.update(ctx, 0, 0)
+  registry.lateUpdate(ctx, 0, 0)
+
   entry.setProgress('prewarm', 0.92)
   await pipeline.compileAsync()
+  await pipeline.compileSceneAsync()
+
+  if (!validationMode) {
+    // Compile the ACTUAL scene pass at the same wide poses previously used as
+    // fire-and-forget sneak renders. Three r185 defers uncached WebGPU builds
+    // from render(), so those renders could still be compiling after BOARD.
+    // Awaiting PassNode.compileAsync() keeps all of that work behind the plate.
+    entry.setProgress('prewarm', 0.96)
+    const arrivalPosition = camera.position.clone()
+    const arrivalQuaternion = camera.quaternion.clone()
+    camera.position.set(100, 80, 135)
+    camera.lookAt(0, 20, 0)
+    await pipeline.compileSceneAsync()
+    await optimus.compileAllLods(async () => {
+      await pipeline.compileSceneAsync()
+      // Three r185's scene compiler still omits these grouped InstancedMesh
+      // variants. A real covered render exercises the exact node-build path
+      // that would otherwise run at the tunnel mouth.
+      pipeline.render()
+    })
+    pipeline.render()
+    camera.position.set(0, 4.2, 246)
+    camera.lookAt(0, 2, 100)
+    await pipeline.compileSceneAsync()
+    pipeline.render()
+    camera.position.set(-40, 3, -30)
+    camera.lookAt(-150, 4, -60)
+    await pipeline.compileSceneAsync()
+    pipeline.render()
+
+    // The broad poses must not leave camera-centred shadow maps committed far
+    // from the arrival tram. Restore the real seat pose, force every static
+    // level to that centre while still loading, and wait for GPU completion.
+    camera.position.copy(arrivalPosition)
+    camera.quaternion.copy(arrivalQuaternion)
+    await pipeline.compileSceneAsync()
+    sky.invalidateShadowLevels()
+    pipeline.render()
+    await pipeline.finishWarmup()
+  }
 
   const loop = new GameLoop(ctx, registry)
-  loop.renderFrame = () => pipeline.render()
+  let firstGameplayFramePending = false
+  loop.renderFrame = () => {
+    pipeline.render()
+    if (!firstGameplayFramePending) return
+    firstGameplayFramePending = false
+    ctx.events.emit('render/started', { arrival: true })
+  }
   loop.onFrameEnd = (timing) => {
     ctx.quality.submitFrame(timing.frameIntervalMs)
   }
   loop.start()
-
-  if (!validationMode) {
-    // Sneak-render wide poses behind the entry screen so every park material
-    // compiles NOW — the arrival reveal must never hitch on first sight.
-    entry.setProgress('prewarm', 0.96)
-    camera.position.set(100, 80, 135)
-    camera.lookAt(0, 20, 0)
-    pipeline.render()
-    camera.position.set(0, 4.2, 246)
-    camera.lookAt(0, 2, 100)
-    pipeline.render()
-    camera.position.set(-40, 3, -30)
-    camera.lookAt(-150, 4, -60)
-    pipeline.render()
-  }
 
   if (flags.debug) {
     // Console/automation handle for live inspection (agents + humans).
@@ -213,10 +252,28 @@ async function boot(): Promise<void> {
     }
   }
 
+  if (
+    import.meta.env.DEV
+    && !validationMode
+    && new URLSearchParams(window.location.search).get('profile') === 'arrival'
+  ) {
+    const { installArrivalProfiler } = await import('./core/arrivalProfiler')
+    installArrivalProfiler({
+      ctx,
+      loop,
+      registry,
+      tramSnapshot: () => tram.debugSnapshot(),
+      shadowSnapshot: () => sky.debugShadowSnapshot(),
+    })
+  }
+
   if (!validationMode) await entry.showEnter()
   entry.hide()
-  ctx.time.paused = false
   ctx.events.emit('park/entered', { arrival: !validationMode })
+  // Audio is gesture-armed (silently) by park/entered. The render callback
+  // releases it only after this first unpaused gameplay frame is submitted.
+  firstGameplayFramePending = !validationMode
+  ctx.time.paused = false
 }
 
 void boot()

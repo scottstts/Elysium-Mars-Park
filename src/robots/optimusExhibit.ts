@@ -128,6 +128,34 @@ export class OptimusExhibitSystem implements GameSystem {
     this.select(level)
   }
 
+  /**
+   * Compile every visible-geometry LOD in the caller's current render context.
+   * Only one mesh is exposed at a time, exactly like runtime selection; the
+   * prior selection is restored even if compilation fails.
+   */
+  async compileAllLods(compileScene: () => Promise<void>): Promise<void> {
+    if (this.meshes.length === 0) return
+    const restoreLevel = this.active
+    const restoreFrustumCulled = this.meshes.map((mesh) => mesh.frustumCulled)
+    try {
+      for (let level = 0; level < this.meshes.length; level++) {
+        for (let i = 0; i < this.meshes.length; i++) {
+          this.meshes[i].visible = i === level
+          // The authored wide camera warms most of the park, but the court is
+          // outside that pose's frustum. Compilation must still visit the one
+          // explicitly selected mesh.
+          this.meshes[i].frustumCulled = false
+        }
+        await compileScene()
+      }
+    } finally {
+      for (let i = 0; i < this.meshes.length; i++) {
+        this.meshes[i].visible = i === restoreLevel
+        this.meshes[i].frustumCulled = restoreFrustumCulled[i]
+      }
+    }
+  }
+
   private select(level: number): void {
     if (level === this.active) return
     this.active = level

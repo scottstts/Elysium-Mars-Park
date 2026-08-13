@@ -6,7 +6,7 @@ import {
   Vector3,
   Vector4,
 } from 'three'
-import type { DirectionalLight, DirectionalLightShadow, Scene } from 'three'
+import type { DirectionalLight, DirectionalLightShadow } from 'three'
 import { NodeUpdateType, ShadowBaseNode, ShadowNode } from 'three/webgpu'
 import type { Node, NodeBuilder, NodeFrame } from 'three/webgpu'
 import {
@@ -24,6 +24,7 @@ import {
 } from 'three/tsl'
 import { MAIN_DETAIL_LAYER, STATIC_SHADOW_PROXY_LAYER } from './layers'
 import { latticeSunVisibility } from '../dome/latticeField'
+import type { StaticShadowScene } from './staticShadowScene'
 
 const ORIGIN = new Vector3()
 const WORLD_UP = new Vector3(0, 1, 0)
@@ -146,7 +147,12 @@ export interface ShadowClipmapOptions {
 
 export interface ShadowClipmapSnapshot {
   textureCount: number
-  staticCasterBundle: null | { casterCount: number }
+  staticCasterBundle: null | {
+    casterCount: number
+    bundleCount: number
+    visibleBundleCount: number
+    visibleCasterCount: number
+  }
   dynamicLevels: number
   dynamicRefreshFrames: number
   updateBudget: number
@@ -267,8 +273,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   private budgetBefore = 0
   private budgetAfter = 0
   private directionDelta = 0
-  private staticCasterScene: Scene | null = null
-  private staticCasterCount = 0
+  private staticCasterScene: StaticShadowScene | null = null
   private staticRefreshes = 0
   private lastStaticRefreshCpuMs = 0
   private maxStaticRefreshCpuMs = 0
@@ -330,9 +335,8 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   }
 
   /** Use a sealed, render-bundled proxy scene for immutable clipmap levels. */
-  setStaticCasterScene(scene: Scene, casterCount: number): void {
+  setStaticCasterScene(scene: StaticShadowScene): void {
     this.staticCasterScene = scene
-    this.staticCasterCount = casterCount
   }
 
   /** Zero-allocation live counters for per-frame hitch attribution. */
@@ -346,12 +350,18 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
 
   staticPerformanceSnapshot(): {
     casterCount: number
+    bundleCount: number
+    visibleBundleCount: number
+    visibleCasterCount: number
     refreshes: number
     lastCpuMs: number
     maxCpuMs: number
   } {
     return {
-      casterCount: this.staticCasterCount,
+      casterCount: this.staticCasterScene?.casterCount ?? 0,
+      bundleCount: this.staticCasterScene?.bundleCount ?? 0,
+      visibleBundleCount: this.staticCasterScene?.visibleBundleCount ?? 0,
+      visibleCasterCount: this.staticCasterScene?.visibleCasterCount ?? 0,
       refreshes: this.staticRefreshes,
       lastCpuMs: this.lastStaticRefreshCpuMs,
       maxCpuMs: this.maxStaticRefreshCpuMs,
@@ -498,6 +508,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     this.lastCameraLight.copy(CAMERA_LIGHT)
     const lightSpeed = Math.hypot(this.velocityLight.x, this.velocityLight.y)
 
+    const warmingAllStaticBundles = this.firstUpdate
     let budget = this.firstUpdate || directionChanged ? this.levels : this.updateBudget
     this.budgetBefore = budget
     this.firstUpdate = false
@@ -566,7 +577,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       if (state.dirtyReasons === 0) continue
       const dynamic = index < this.dynamicLevels
       if (dynamic || state.forceDirty) {
-        this.renderLevel(index, frame)
+        this.renderLevel(index, frame, warmingAllStaticBundles)
         continue
       }
       const recenterDistance = Math.max(1e-6, state.halfWidth * this.guardBand * 0.5)
@@ -583,7 +594,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     for (const entry of pending) {
       if (budget <= 0) break
       budget--
-      this.renderLevel(entry.index, frame)
+      this.renderLevel(entry.index, frame, warmingAllStaticBundles)
     }
 
     for (let index = 0; index < this.levels; index++) {
@@ -604,7 +615,11 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   }
 
   /** Commit a level's desired center and render its shadow map. */
-  private renderLevel(index: number, frame: NodeFrame): void {
+  private renderLevel(
+    index: number,
+    frame: NodeFrame,
+    warmingAllStaticBundles = false,
+  ): void {
     const state = this.levelStates[index]
     const levelLight = this.lights[index]
     const shadow = levelLight.shadow
@@ -630,8 +645,21 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     if (shadowNode.shadowMap) {
       const started = performance.now()
       if (this.staticCasterScene) {
+        if (warmingAllStaticBundles) {
+          // Record every spatial bundle for every level while the loading
+          // screen is still up. Later visibility changes then only choose
+          // already-recorded GPU bundles; they never trigger lazy recording.
+          this.staticCasterScene.showAllBundles()
+        } else {
+          this.staticCasterScene.selectBundles(
+            state.centerX,
+            state.centerY,
+            state.halfWidth,
+            this.worldToLight,
+          )
+        }
         const staticFrame = Object.assign(Object.create(frame), {
-          scene: this.staticCasterScene,
+          scene: this.staticCasterScene.scene,
         }) as NodeFrame
         shadowNode.updateShadow(staticFrame)
       } else {
@@ -670,7 +698,12 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     return {
       textureCount: this.levels + this.dynamicCasterLevels.length,
       staticCasterBundle: this.staticCasterScene
-        ? { casterCount: this.staticCasterCount }
+        ? {
+            casterCount: this.staticCasterScene.casterCount,
+            bundleCount: this.staticCasterScene.bundleCount,
+            visibleBundleCount: this.staticCasterScene.visibleBundleCount,
+            visibleCasterCount: this.staticCasterScene.visibleCasterCount,
+          }
         : null,
       dynamicLevels: this.dynamicLevels,
       dynamicRefreshFrames: this.dynamicRefreshFrames,
@@ -747,9 +780,8 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     }
     this.dynamicCasterLevels.length = 0
     this.dynamicLevelData.length = 0
-    this.staticCasterScene?.clear()
+    this.staticCasterScene?.scene.clear()
     this.staticCasterScene = null
-    this.staticCasterCount = 0
     super.dispose()
   }
 

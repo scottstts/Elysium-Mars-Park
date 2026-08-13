@@ -26,8 +26,15 @@
 - Seated view: the pose yaw's frame delta is carried into the player yaw
   every frame (head rides a TURNING vehicle); boarding eases yaw/pitch
   toward the seat facing while the 1.2 s blend runs.
-- Arrival: the player boots ALREADY SEATED, ~50 s unbroken to the dock.
-  Wide-pose sneak renders behind the entry screen precompile the park.
+- Arrival: the player boots ALREADY SEATED, ~9.5 s unbroken to the dock.
+  The exact MRT scene pass is asynchronously compiled and awaited at the
+  arrival seat plus three wide park poses behind the entry plate. The first
+  wide pose also compiles all three Optimus LOD meshes explicitly: LOD1 first
+  enters the arrival frustum at the tunnel mouth, and relying on its runtime
+  visibility switch deferred twelve TSL vertex programs into that frame. The
+  camera, Optimus selection, and every static shadow level are restored to the
+  real arrival state before BOARD becomes available; prewarm views must never
+  leak into live clipmap state.
 - Iris: six sliding petals in a collar at z 128.4, opened by tram
   proximity on the spur; stays open once on the loop.
 - ?view modes: no player — the tram circulates (spurActive off).

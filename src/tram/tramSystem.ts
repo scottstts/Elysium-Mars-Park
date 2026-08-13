@@ -51,6 +51,14 @@ const STATION_ORDER = ['portal', 'farmside', 'overlook'] as const
 
 type Phase = 'waiting' | 'arrival' | 'dwell' | 'run'
 
+export interface TramDebugSnapshot {
+  phase: Phase
+  arrivalS: number
+  arrivalLength: number
+  speed: number
+  frontCar: [number, number, number]
+}
+
 export class TramSystem implements GameSystem {
   readonly id = 'tram'
 
@@ -356,6 +364,18 @@ export class TramSystem implements GameSystem {
     }
 
     this.syncCarColliders()
+  }
+
+  /** Stable, allocation-light state used by the opt-in arrival profiler. */
+  debugSnapshot(): TramDebugSnapshot {
+    const front = this.cars[0]?.group.position
+    return {
+      phase: this.phase,
+      arrivalS: this.arrivalS,
+      arrivalLength: this.track?.arrivalLength ?? 0,
+      speed: this.speed,
+      frontCar: [front?.x ?? 0, front?.y ?? 0, front?.z ?? 0],
+    }
   }
 
   update(): void {

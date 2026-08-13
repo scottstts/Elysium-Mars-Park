@@ -30,6 +30,7 @@ import type { RobotAudioSource } from './robotVoice'
  */
 
 type Zone = 'park' | 'interior' | 'tram' | 'tube'
+const MASTER_GAIN = 0.72
 
 export class AudioEngineSystem implements GameSystem {
   readonly id = 'audio'
@@ -54,6 +55,7 @@ export class AudioEngineSystem implements GameSystem {
   private tramOsc: OscillatorNode | null = null
   private mistGain: GainNode | null = null
   private ventGain: GainNode | null = null
+  private audible = false
 
   private readonly player: PlayerSystem | null
   private readonly robots: RobotsSystem | null
@@ -68,8 +70,12 @@ export class AudioEngineSystem implements GameSystem {
   }
 
   init(ctx: GameContext): void {
-    // The context must begin on a user gesture: the BOARD click.
+    // Arm the context on the BOARD gesture so browser autoplay policy is
+    // satisfied, but keep the graph silent until a gameplay frame is really
+    // submitted. Shader warmup or a slow first render must never have an
+    // audible head start over the image.
     ctx.events.on('park/entered', () => this.start(ctx))
+    ctx.events.on('render/started', () => this.beginPlayback())
   }
 
   /**
@@ -108,7 +114,7 @@ export class AudioEngineSystem implements GameSystem {
         const t = context.currentTime
         master.gain.cancelScheduledValues(t)
         master.gain.setValueAtTime(0, t)
-        master.gain.linearRampToValueAtTime(0.72, t + 0.18)
+        master.gain.linearRampToValueAtTime(MASTER_GAIN, t + 0.18)
       })
     }
   }
@@ -119,7 +125,7 @@ export class AudioEngineSystem implements GameSystem {
     this.context = context
 
     const master = context.createGain()
-    master.gain.value = 0.72
+    master.gain.value = 0
     const lowpass = context.createBiquadFilter()
     lowpass.type = 'lowpass'
     lowpass.frequency.value = 20000
@@ -127,6 +133,11 @@ export class AudioEngineSystem implements GameSystem {
     lowpass.connect(context.destination)
     this.master = master
     this.lowpass = lowpass
+
+    // `park/entered` is dispatched directly from the click continuation. A
+    // muted resume here consumes that user activation without leaking sound;
+    // the first rendered frame releases the master below.
+    if (context.state === 'suspended') void context.resume().catch(() => {})
 
     const noiseBuffer = buildNoiseBuffer(context, 4)
 
@@ -224,6 +235,28 @@ export class AudioEngineSystem implements GameSystem {
     })
 
     void this.startFountain(context, master)
+  }
+
+  /** Release the silent, gesture-armed graph after rendering has begun. */
+  private beginPlayback(): void {
+    if (this.audible) return
+    this.audible = true
+    const context = this.context
+    const master = this.master
+    if (!context || !master || this.pauseWanted) return
+
+    const release = (): void => {
+      if (!this.master || this.pauseWanted) return
+      const now = context.currentTime
+      master.gain.cancelScheduledValues(now)
+      master.gain.setValueAtTime(0, now)
+      master.gain.linearRampToValueAtTime(MASTER_GAIN, now + 0.06)
+    }
+    if (context.state === 'suspended') {
+      void context.resume().then(release).catch(() => {})
+    } else {
+      release()
+    }
   }
 
   /**
@@ -527,6 +560,7 @@ export class AudioEngineSystem implements GameSystem {
   dispose(): void {
     this.context?.close()
     this.context = null
+    this.audible = false
   }
 }
 

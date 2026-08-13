@@ -51,6 +51,11 @@ Choices beyond the code:
   boost so scarce vegetation pops (design pillar "green is currency").
 - `compileAsync()` adapter reaches into `RenderPipeline._quadMesh` (guarded,
   throws on upgrade) because r185 lacks a public async compile for it.
+- Scene warmup separately uses the public `PassNode.compileAsync(renderer)` so
+  materials compile against the exact scene MRT/MSAA render context. The
+  arrival seat and three broad park poses are awaited before BOARD; the real
+  arrival pose is restored, all static clipmaps are forced there, and the GPU
+  queue is settled before the entry plate releases.
 - `?pass=` views: final · nopost · ao · aoraw · aodenoised · aoradius ·
   aoshare · aoapplied · bloom · depth · normal · worldray · shafts · shadows
   (last two filled by S4 via `pipeline.debugNodes`). `worldray` encodes the
@@ -284,6 +289,17 @@ only the new level stretches out. Raising `maxDistance` on four levels would
 have grown L3's texel ~46 % for one object's benefit. Cost is one more cached
 map at the coarsest tier size and one more sample per lit pixel; static maps
 re-render only on recentre.
+
+Static refresh submission is spatial without changing shadow content. The old
+single render bundle disabled proxy culling and therefore submitted every
+park caster on every recenter; the arrival probe counted 408 static refreshes
+over the 9.5 s ride, with the fine maps reaching the dense portal district at
+the visible hitch. `staticShadowScene.ts` now records immutable 32 m bundles
+(large casters stand alone) and selects them by a conservative world-sphere vs
+committed light-space-square test. All bundles are deliberately enabled on the
+first loading update so every bundle/level pair is recorded before play. The
+test has false positives only: rejecting a bundle that could affect the map is
+not permitted, and no map/filter/texel/caster parameter changed.
 
 **A level's usable reach is `halfWidth · (1 − guardBand) · (1 − blendRatio)`,
 not `halfWidth`** — 0.88 · 0.84 = 0.739 of it. `levelData.z` is the guard-banded

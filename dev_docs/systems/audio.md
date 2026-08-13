@@ -1,7 +1,11 @@
 # Audio (S13)
 
 - 100% procedural WebAudio (`src/audio/engine.ts`), no assets, NO music
-  (canon). AudioContext starts on the BOARD click (the one real gesture).
+  (canon). The AudioContext is created/resumed on the BOARD click (the one
+  real gesture) with master gain at zero. `render/started` is emitted only
+  after the first unpaused gameplay render submission; that event releases
+  the master over 60 ms. Audio can therefore never run ahead of a slow first
+  frame, while browser autoplay activation is still consumed correctly.
 - Beds: dome room tone (brown noise → 190 Hz lowpass), HVAC breath
   (bandpass 520 Hz + 0.05 Hz swell LFO), interior hush bed (crossfaded).
 - Zones: `park | interior | tram | tube`, classified per frame from player
