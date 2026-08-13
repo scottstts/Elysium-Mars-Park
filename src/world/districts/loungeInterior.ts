@@ -605,14 +605,30 @@ export function buildLoungeInterior(services: DistrictServices): void {
   }
   for (const part of lowTable(ux(-1.85), shell.mezzTop, vz(-3.5), 0.3)) parts.push(part)
 
-  // ---- coffee console against the sill wall, clear of the stair's run
-  // (u 1.85 … 3.35, v −2.2 … 4.5).
-  const console0 = { u: 4.15, v: 1.2 }
+  // ---- coffee console, in the low-ceilinged nook UNDER the mezzanine on the
+  // east wall, north of the stair's north end.
+  //
+  // It used to stand at (4.15, 1.2), which is 0.8 m straight in front of the
+  // entrance: the door is centred on v 0.745 and a guest walks in along −u, so
+  // the console (0.72 × 2.1, plus the urn) closed the doorway completely
+  // (owner report). Moving it along the same wall was not enough — the stair
+  // occupies u 1.85…3.35 across v −1.9…4.5, so the whole east flank from the
+  // door southward is a 1.35 m entry corridor serving that flight, and
+  // anything parked in it narrows the only way into the room. North of v −2.8
+  // the flank opens out under the mezzanine slab, which is where a coffee
+  // point belongs anyway.
+  //
+  // 1.6 m long, not 2.1: a straight counter against a 2:1 drum only touches
+  // its curve at one point, and the shorter run keeps the service gap behind
+  // it between 0.28 m (ends) and 0.47 m (middle) instead of half a metre.
+  const console0 = { u: 3.58, v: -3.6, length: 1.6 }
   parts.push([
     'cast',
     bevel(
       prism(
-        roundedRect(0.72, 2.1, 0.05, 3).map(([x, z]) => [ux(console0.u) + x, vz(console0.v) + z] as Vec2),
+        roundedRect(0.72, console0.length, 0.05, 3).map(
+          ([x, z]) => [ux(console0.u) + x, vz(console0.v) + z] as Vec2,
+        ),
         shell.floor,
         shell.floor + 0.9,
       ),
@@ -624,7 +640,9 @@ export function buildLoungeInterior(services: DistrictServices): void {
     'aluminum',
     bevel(
       prism(
-        roundedRect(0.78, 2.16, 0.06, 3).map(([x, z]) => [ux(console0.u) + x, vz(console0.v) + z] as Vec2),
+        roundedRect(0.78, console0.length + 0.06, 0.06, 3).map(
+          ([x, z]) => [ux(console0.u) + x, vz(console0.v) + z] as Vec2,
+        ),
         shell.floor + 0.9,
         shell.floor + 0.94,
       ),
@@ -644,12 +662,12 @@ export function buildLoungeInterior(services: DistrictServices): void {
     20,
     { capStart: false, capEnd: false, smooth: SMOOTH.turned },
   )
-  translate(urn, [ux(console0.u), vz(console0.v - 0.6), shell.floor + 0.94])
+  translate(urn, [ux(console0.u), vz(console0.v - 0.46), shell.floor + 0.94])
   parts.push(['aluminum', urn])
   services.colliders.push({
     kind: 'box',
     center: new Vector3(ux(console0.u), shell.floor + 0.47, vz(console0.v)),
-    size: new Vector3(0.8, 0.95, 2.2),
+    size: new Vector3(0.8, 0.95, console0.length + 0.1),
   })
 
   // ---- entry door in the missing bay, from the rim promenade side.

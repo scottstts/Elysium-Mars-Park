@@ -4,7 +4,7 @@ import { PartWriter } from '../archkit/writer'
 import { exteriorHeight } from '../exterior/terrainHeight'
 import { buildTrackData } from '../tram/track'
 import type { DomeSlot } from './domeMaterials'
-import { PORTAL_AXIS_Y } from './domeGeometry'
+import { PORTAL_AXIS_Y, PORTAL_BORE } from './domeGeometry'
 import { DOME_CENTER_Y, DOME_SPHERE_RADIUS } from './latticeField'
 
 /**
@@ -51,9 +51,52 @@ function smoothStep(edge0: number, edge1: number, x: number): number {
 }
 
 /**
- * Surface of revolution about the Z axis for a closed (r, z) profile — the
- * Z-axis twin of a lathe, which the portal bulkhead needs and three's lathe
- * cannot give.
+ * Triangle soup carrying its OWN per-vertex normals into `PartWriter.raw`.
+ *
+ * `writer.quad` computes one flat normal per quad, which is right for a
+ * machined plate and wrong for every barrel in this file: a 9.7 m drum on 72
+ * segments facets into 0.85 m plates, and a warped skirt quad facets along its
+ * own diagonal. Everything curved here is emitted through this instead.
+ */
+class SmoothSoup {
+  private readonly positions: number[] = []
+  private readonly normals: number[] = []
+  private readonly uvs: number[] = []
+
+  tri(
+    points: [Vector3, Vector3, Vector3],
+    normals: [Vector3, Vector3, Vector3],
+    uvs: [[number, number], [number, number], [number, number]],
+  ): void {
+    for (let i = 0; i < 3; i++) {
+      this.positions.push(points[i].x, points[i].y, points[i].z)
+      this.normals.push(normals[i].x, normals[i].y, normals[i].z)
+      this.uvs.push(uvs[i][0], uvs[i][1])
+    }
+  }
+
+  emit(writer: PartWriter, slot: DomeSlot): void {
+    if (this.positions.length > 0) writer.raw(slot, this.positions, this.normals, this.uvs)
+  }
+}
+
+/**
+ * Surface of revolution about the Z axis for an (r, z) profile — the Z-axis
+ * twin of a lathe, which the portal bulkhead needs and three's lathe cannot
+ * give.
+ *
+ * CONVENTION: the profile runs **clockwise** in the (r, z) plane (r right, z
+ * up), so the solid's outward normal is the LEFT normal of the travel
+ * direction, `(−dz, dr)`. Authoring one counter-clockwise ships the whole
+ * casting inside-out — which is exactly what the collar did until this pass
+ * (the bulkhead drum was a culled backface and the flange faced away from the
+ * park). Winding and normal are derived from that one rule below, so the two
+ * can no longer disagree.
+ *
+ * Normals are ANALYTIC, not per-quad: smooth around the circumference (a 9.7 m
+ * drum on 72 segments has 0.85 m facets, and flat-shading them is what made
+ * the portal read as a faceted cone), sharp across every profile crease
+ * because each segment emits its own vertices.
  */
 function revolveZ(
   writer: PartWriter,
@@ -63,25 +106,48 @@ function revolveZ(
   profile: Array<[number, number]>,
   segments: number,
 ): void {
-  const rings: Vector3[][] = []
-  for (let s = 0; s <= segments; s++) {
-    const angle = (s / segments) * Math.PI * 2
+  const positions: number[] = []
+  const normals: number[] = []
+  const uvs: number[] = []
+  const push = (angle: number, r: number, z: number, nr: number, nz: number, u: number, v: number): void => {
     const cos = Math.cos(angle)
     const sin = Math.sin(angle)
-    rings.push(
-      profile.map(([r, z]) => new Vector3(centerX + cos * r, centerY + sin * r, z)),
-    )
+    positions.push(centerX + cos * r, centerY + sin * r, z)
+    normals.push(cos * nr, sin * nr, nz)
+    uvs.push(u, v)
   }
-  for (let s = 0; s < segments; s++) {
-    for (let i = 0; i < profile.length - 1; i++) {
-      writer.quad(slot, rings[s][i], rings[s][i + 1], rings[s + 1][i + 1], rings[s + 1][i])
+  let run = 0
+  for (let i = 0; i < profile.length - 1; i++) {
+    const [r0, z0] = profile[i]
+    const [r1, z1] = profile[i + 1]
+    const dr = r1 - r0
+    const dz = z1 - z0
+    const length = Math.hypot(dr, dz)
+    if (length < 1e-9) continue
+    // Left normal of the travel direction — outward for a clockwise profile.
+    const nr = -dz / length
+    const nz = dr / length
+    for (let s = 0; s < segments; s++) {
+      const a0 = (s / segments) * Math.PI * 2
+      const a1 = ((s + 1) / segments) * Math.PI * 2
+      const u0 = (s / segments) * Math.PI * 2 * ((r0 + r1) / 2)
+      const u1 = ((s + 1) / segments) * Math.PI * 2 * ((r0 + r1) / 2)
+      // Two triangles, wound so the face is CCW seen from the normal side.
+      push(a0, r0, z0, nr, nz, u0, run)
+      push(a0, r1, z1, nr, nz, u0, run + length)
+      push(a1, r1, z1, nr, nz, u1, run + length)
+      push(a0, r0, z0, nr, nz, u0, run)
+      push(a1, r1, z1, nr, nz, u1, run + length)
+      push(a1, r0, z0, nr, nz, u1, run)
     }
+    run += length
   }
+  writer.raw(slot, positions, normals, uvs)
 }
 
 function buildPortalCollar(writer: PartWriter): void {
-  // One closed section: outer drum → outboard face → bore → petal slot →
-  // inboard face → back to the drum.
+  // One closed section, CLOCKWISE in (r, z) per `revolveZ`: inboard face →
+  // bore → petal slot → outboard face → outer drum → back to the inboard face.
   revolveZ(
     writer,
     'node',
@@ -89,20 +155,20 @@ function buildPortalCollar(writer: PartWriter): void {
     PORTAL_AXIS_Y,
     [
       [COLLAR_OUTER, COLLAR_INBOARD_Z + 0.14],
-      [COLLAR_OUTER, COLLAR_OUTBOARD_Z - 0.14],
-      [COLLAR_OUTER - 0.15, COLLAR_OUTBOARD_Z],
-      [COLLAR_BORE + 0.15, COLLAR_OUTBOARD_Z],
-      [COLLAR_BORE, COLLAR_OUTBOARD_Z - 0.14],
-      [COLLAR_BORE, SLOT_BACK_Z],
-      [SLOT_OUTER, SLOT_BACK_Z],
-      [SLOT_OUTER, SLOT_FRONT_Z],
-      [COLLAR_BORE, SLOT_FRONT_Z],
-      [COLLAR_BORE, COLLAR_INBOARD_Z + 0.14],
-      [COLLAR_BORE + 0.15, COLLAR_INBOARD_Z],
       [COLLAR_OUTER - 0.15, COLLAR_INBOARD_Z],
+      [COLLAR_BORE + 0.15, COLLAR_INBOARD_Z],
+      [COLLAR_BORE, COLLAR_INBOARD_Z + 0.14],
+      [COLLAR_BORE, SLOT_FRONT_Z],
+      [SLOT_OUTER, SLOT_FRONT_Z],
+      [SLOT_OUTER, SLOT_BACK_Z],
+      [COLLAR_BORE, SLOT_BACK_Z],
+      [COLLAR_BORE, COLLAR_OUTBOARD_Z - 0.14],
+      [COLLAR_BORE + 0.15, COLLAR_OUTBOARD_Z],
+      [COLLAR_OUTER - 0.15, COLLAR_OUTBOARD_Z],
+      [COLLAR_OUTER, COLLAR_OUTBOARD_Z - 0.14],
       [COLLAR_OUTER, COLLAR_INBOARD_Z + 0.14],
     ],
-    72,
+    96,
   )
 
   // Bolt ring on the outboard flange: 32 studs, seated 40 mm into the face.
@@ -134,7 +200,7 @@ function buildPortalCollar(writer: PartWriter): void {
       [COLLAR_BORE + 0.95, COLLAR_OUTBOARD_Z + 0.07],
       [COLLAR_BORE + 0.95, COLLAR_OUTBOARD_Z - 0.04],
     ],
-    72,
+    96,
   )
 
   // Iris drive housings: four boxes riding the drum, one per petal pair.
@@ -154,47 +220,155 @@ function buildPortalCollar(writer: PartWriter): void {
 
 /**
  * Portal skirt: the pressure envelope between the glass aperture and the
- * bulkhead. The aperture is an oblique cut through the sphere (its z runs
- * from 121 m at the crown of the hole to 131 m at its invert), so this is a
- * genuinely warped cone, not a cylinder — built as one lofted band with real
- * thickness normal to its own surface, capped at both rims.
+ * bulkhead. The aperture is an oblique cut through the sphere (its z runs from
+ * 121 m at the crown of the hole to 131 m at its invert) while the bulkhead
+ * flange is a PLANAR ring at z = 127.10, so this is a genuinely warped flare.
+ *
+ * Two rules make it read as one moulded piece rather than the faceted hood it
+ * used to be:
+ *
+ *  - **The outer rim is the flange, unconditionally.** It used to be
+ *    `min(collarFace, apertureZ − 0.4)`, which over the whole upper half of
+ *    the ring put the rim 0.4 m INBOARD of the glass instead of 6 m outboard
+ *    on the bulkhead — a cowl leaning back into the park, folded along the
+ *    latitude where the two branches of that `min` swap over. That fold is
+ *    what showed as hard triangular faces, and it drove the rim through the
+ *    glass shell and the portal ring frame as well.
+ *  - **The meridian is a Hermite flare, and normals are per-vertex.** `e(t) =
+ *    1 − (1 − t)²` leaves the aperture immediately (0.44 m of clearance off
+ *    the glass at the springing, where a symmetric ease left only 50 mm) and
+ *    lands tangent to the flange, so the skirt fillets into the casting
+ *    instead of butting it at an angle.
  */
+const SKIRT_RINGS = 12
+const SKIRT_SEGMENTS = 96
+const SKIRT_WALL = 0.11
+
+/** Sphere z of the glass aperture on this meridian. */
+function apertureZ(cos: number, sin: number): number {
+  const x = cos * PORTAL_BORE
+  const dy = PORTAL_AXIS_Y + sin * PORTAL_BORE - DOME_CENTER_Y
+  return Math.sqrt(Math.max(1, DOME_SPHERE_RADIUS * DOME_SPHERE_RADIUS - x * x - dy * dy))
+}
+
+/** The flare's mid-surface: `t` 0 at the glass aperture, 1 at the flange. */
+function skirtPoint(cos: number, sin: number, t: number): Vector3 {
+  const r = PORTAL_BORE + (COLLAR_OUTER - PORTAL_BORE) * t
+  const az = apertureZ(cos, sin)
+  const ease = 1 - (1 - t) * (1 - t)
+  return new Vector3(
+    cos * r,
+    PORTAL_AXIS_Y + sin * r,
+    az + (COLLAR_INBOARD_Z - az) * ease,
+  )
+}
+
 function buildPortalSkirt(writer: PartWriter): void {
-  const segments = 72
-  const bore = 6.15
-  const wall = 0.11
-  const inner: Vector3[][] = [[], []]
-  const outer: Vector3[][] = [[], []]
-  for (let i = 0; i <= segments; i++) {
-    const angle = (i / segments) * Math.PI * 2
-    const cx = Math.cos(angle)
-    const cy = Math.sin(angle)
-    const x = cx * bore
-    const y = PORTAL_AXIS_Y + cy * bore
-    const dy = y - DOME_CENTER_Y
-    const az = Math.sqrt(
-      Math.max(1, DOME_SPHERE_RADIUS * DOME_SPHERE_RADIUS - x * x - dy * dy),
-    )
-    const bz = Math.min(COLLAR_INBOARD_Z, az - 0.4)
-    const dr = COLLAR_OUTER - bore
-    const dz = bz - az
-    const length = Math.hypot(dr, dz)
-    // Surface normal in the (radial, z) plane of this meridian.
-    const nr = (dz / length) * wall
-    const nz = (-dr / length) * wall
-    const a = new Vector3(x, y, az)
-    const b = new Vector3(cx * COLLAR_OUTER, PORTAL_AXIS_Y + cy * COLLAR_OUTER, bz)
-    inner[0].push(a)
-    inner[1].push(b)
-    outer[0].push(new Vector3(a.x + cx * nr, a.y + cy * nr, a.z + nz))
-    outer[1].push(new Vector3(b.x + cx * nr, b.y + cy * nr, b.z + nz))
+  // Mid-surface grid, angle-major. The ring is closed, so the seam column is
+  // not duplicated and the normals wrap without a shading break.
+  const grid: Vector3[][] = []
+  for (let i = 0; i <= SKIRT_RINGS; i++) {
+    const t = i / SKIRT_RINGS
+    const ring: Vector3[] = []
+    for (let s = 0; s < SKIRT_SEGMENTS; s++) {
+      const angle = (s / SKIRT_SEGMENTS) * Math.PI * 2
+      ring.push(skirtPoint(Math.cos(angle), Math.sin(angle), t))
+    }
+    grid.push(ring)
   }
-  for (let i = 0; i < segments; i++) {
-    writer.quad('duct', outer[0][i], outer[0][i + 1], outer[1][i + 1], outer[1][i])
-    writer.quad('duct', inner[1][i], inner[1][i + 1], inner[0][i + 1], inner[0][i])
-    writer.quad('duct', inner[0][i], inner[0][i + 1], outer[0][i + 1], outer[0][i])
-    writer.quad('node', outer[1][i], outer[1][i + 1], inner[1][i + 1], inner[1][i])
+
+  // Per-vertex normals by central differences over that grid — smooth in both
+  // directions, which is the whole point of subdividing the meridian.
+  const normals: Vector3[][] = grid.map((ring, i) =>
+    ring.map((p, s) => {
+      const prevS = ring[(s - 1 + SKIRT_SEGMENTS) % SKIRT_SEGMENTS]
+      const nextS = ring[(s + 1) % SKIRT_SEGMENTS]
+      const along = new Vector3().subVectors(
+        grid[Math.min(SKIRT_RINGS, i + 1)][s],
+        grid[Math.max(0, i - 1)][s],
+      )
+      const across = new Vector3().subVectors(nextS, prevS)
+      void p
+      // `across × along` faces the park — the side seen through the bore.
+      return new Vector3().crossVectors(across, along).normalize()
+    }),
+  )
+
+  const park: Vector3[][] = grid.map((ring, i) =>
+    ring.map((p, s) => p.clone().addScaledVector(normals[i][s], SKIRT_WALL / 2)),
+  )
+  const valley: Vector3[][] = grid.map((ring, i) =>
+    ring.map((p, s) => p.clone().addScaledVector(normals[i][s], -SKIRT_WALL / 2)),
+  )
+
+  const sheet = new SmoothSoup()
+  const arc = (s: number): number => (s / SKIRT_SEGMENTS) * Math.PI * 2 * COLLAR_OUTER
+  const span = (i: number): number => (i / SKIRT_RINGS) * (COLLAR_OUTER - PORTAL_BORE)
+  const flip = (n: Vector3): Vector3 => n.clone().negate()
+  for (let i = 0; i < SKIRT_RINGS; i++) {
+    for (let s = 0; s < SKIRT_SEGMENTS; s++) {
+      const s2 = (s + 1) % SKIRT_SEGMENTS
+      // Wound so the face is CCW seen from `normals`, which points at the park.
+      sheet.tri(
+        [park[i][s], park[i + 1][s2], park[i + 1][s]],
+        [normals[i][s], normals[i + 1][s2], normals[i + 1][s]],
+        [[arc(s), span(i)], [arc(s + 1), span(i + 1)], [arc(s), span(i + 1)]],
+      )
+      sheet.tri(
+        [park[i][s], park[i][s2], park[i + 1][s2]],
+        [normals[i][s], normals[i][s2], normals[i + 1][s2]],
+        [[arc(s), span(i)], [arc(s + 1), span(i)], [arc(s + 1), span(i + 1)]],
+      )
+      sheet.tri(
+        [valley[i][s], valley[i + 1][s], valley[i + 1][s2]],
+        [flip(normals[i][s]), flip(normals[i + 1][s]), flip(normals[i + 1][s2])],
+        [[arc(s), span(i)], [arc(s), span(i + 1)], [arc(s + 1), span(i + 1)]],
+      )
+      sheet.tri(
+        [valley[i][s], valley[i + 1][s2], valley[i][s2]],
+        [flip(normals[i][s]), flip(normals[i + 1][s2]), flip(normals[i][s2])],
+        [[arc(s), span(i)], [arc(s + 1), span(i + 1)], [arc(s + 1), span(i)]],
+      )
+    }
   }
+  sheet.emit(writer, 'duct')
+
+  // Rim bands: the 110 mm sheet edge at the aperture and at the flange, each
+  // with its own edge normal so the arris creases instead of smearing.
+  const rim = (ringIndex: number, neighbour: number, slot: DomeSlot): void => {
+    const band = new SmoothSoup()
+    const edgeNormal = (s: number): Vector3 =>
+      new Vector3().subVectors(grid[ringIndex][s], grid[neighbour][s]).normalize()
+    // (park[s], park[s2], valley[s2], valley[s]) is CCW seen from the meridian's
+    // FORWARD direction, so the aperture rim — whose edge normal points back
+    // down the meridian — takes the reversed order.
+    const forward = ringIndex > neighbour
+    for (let s = 0; s < SKIRT_SEGMENTS; s++) {
+      const s2 = (s + 1) % SKIRT_SEGMENTS
+      const na = edgeNormal(s)
+      const nb = edgeNormal(s2)
+      const loop: Array<[Vector3, Vector3, [number, number]]> = [
+        [park[ringIndex][s], na, [arc(s), 0]],
+        [park[ringIndex][s2], nb, [arc(s + 1), 0]],
+        [valley[ringIndex][s2], nb, [arc(s + 1), SKIRT_WALL]],
+        [valley[ringIndex][s], na, [arc(s), SKIRT_WALL]],
+      ]
+      if (!forward) loop.reverse()
+      for (const [a, b, c] of [
+        [0, 1, 2],
+        [0, 2, 3],
+      ]) {
+        band.tri(
+          [loop[a][0], loop[b][0], loop[c][0]],
+          [loop[a][1], loop[b][1], loop[c][1]],
+          [loop[a][2], loop[b][2], loop[c][2]],
+        )
+      }
+    }
+    band.emit(writer, slot)
+  }
+  rim(SKIRT_RINGS, SKIRT_RINGS - 1, 'node')
+  rim(0, 1, 'duct')
 }
 
 /** Tube axis: concentric with the iris at the portal, on the spur beyond. */
@@ -244,12 +418,47 @@ function buildTubeShell(writer: PartWriter, curve: (z: number) => Vector3): void
     rings.push(ring)
   }
 
+  // Smooth AROUND the barrel, sharp ALONG it: the radial component comes from
+  // the segment's own angle (so 44 facets stop reading as 44 flats) while the
+  // axial component comes from the band's own slope, which keeps every rib
+  // shoulder a crease instead of a rolled-over blur.
   for (let i = 0; i < rings.length - 1; i++) {
     const slot: DomeSlot = isRibBand(zs[i]) && isRibBand(zs[i + 1]) ? 'node' : 'duct'
+    const soup = new SmoothSoup()
+    const axis0 = tubeAxis(zs[i], curve)
+    const axis1 = tubeAxis(zs[i + 1], curve)
+    const dr =
+      Math.hypot(rings[i + 1][0].x - axis1.x, rings[i + 1][0].y - axis1.y) -
+      Math.hypot(rings[i][0].x - axis0.x, rings[i][0].y - axis0.y)
+    const dz = zs[i + 1] - zs[i]
+    const length = Math.hypot(dr, dz) || 1
+    // Right normal of the (dr, dz) generator: outward for a barrel run +z.
+    const nr = dz / length
+    const nz = -dr / length
+    const normalAt = (ring: number, s: number): Vector3 => {
+      const axis = ring === 0 ? axis0 : axis1
+      const p = rings[i + ring][s]
+      const ux = p.x - axis.x
+      const uy = p.y - axis.y
+      const ul = Math.hypot(ux, uy) || 1
+      return new Vector3((ux / ul) * nr, (uy / ul) * nr, nz)
+    }
     for (let s = 0; s < segments; s++) {
       const s2 = (s + 1) % segments
-      writer.quad(slot, rings[i][s], rings[i][s2], rings[i + 1][s2], rings[i + 1][s])
+      const u0 = (s / segments) * Math.PI * 2 * TUBE_RADIUS_RUN
+      const u1 = ((s + 1) / segments) * Math.PI * 2 * TUBE_RADIUS_RUN
+      soup.tri(
+        [rings[i][s], rings[i][s2], rings[i + 1][s2]],
+        [normalAt(0, s), normalAt(0, s2), normalAt(1, s2)],
+        [[u0, zs[i]], [u1, zs[i]], [u1, zs[i + 1]]],
+      )
+      soup.tri(
+        [rings[i][s], rings[i + 1][s2], rings[i + 1][s]],
+        [normalAt(0, s), normalAt(1, s2), normalAt(1, s)],
+        [[u0, zs[i]], [u1, zs[i + 1]], [u0, zs[i + 1]]],
+      )
     }
+    soup.emit(writer, slot)
   }
 
   // Far end: a closed bulkhead, so the duct never reads as an open pipe.

@@ -1,5 +1,4 @@
-import { DoubleSide, InstancedMesh, Matrix4, Mesh, PlaneGeometry, Quaternion, Vector3 } from 'three'
-import { MeshStandardNodeMaterial } from 'three/webgpu'
+import { InstancedMesh, Matrix4, Mesh, PlaneGeometry, Quaternion, Vector3 } from 'three'
 import {
   MeshData,
   SMOOTH,
@@ -23,7 +22,9 @@ import {
 } from '../../archkit/meshdata'
 import type { Vec2, Vec3 } from '../../archkit/meshdata'
 import { signageMaterial } from '../../materials/library'
-import { cropHeadTexture } from '../../vegetation/leafTextures'
+import { CROP_VARIETIES, createCropMaterial, vegetableGeometry } from '../../vegetation/cropSpecies'
+import type { CropVariety } from '../../vegetation/cropSpecies'
+import { instanceSeed } from '../../vegetation/foliageMaterial'
 import { interiorHeight } from '../interiorHeight'
 import { HYDRO_TOWER } from '../parkPlan'
 import { curtainGlassMaterial, curvedSignMesh, groundedBand, signBox, signFaceMaterial } from './commons'
@@ -244,8 +245,11 @@ export function buildHydroTower(services: DistrictServices): void {
     new Vector3(HYDRO_TOWER.x + px, y0 + pz, HYDRO_TOWER.z + py)
 
   const glassParts: MeshData[] = []
-  const crops: Matrix4[] = []
-  const chard: Matrix4[] = []
+  // One transform list per modelled variety — the racks mix them plant by
+  // plant, so a tier never reads as one repeated silhouette.
+  const planting = new Map<CropVariety, Matrix4[]>(
+    CROP_VARIETIES.map((variety) => [variety, [] as Matrix4[]]),
+  )
   const rng = services.rng.fork('hydro-tower')
 
   /** Local height of the paved apron, relative to the tower datum. */
@@ -255,7 +259,7 @@ export function buildHydroTower(services: DistrictServices): void {
   plinth(emit, ground)
   curtainWall(emit, glassParts)
   core(emit)
-  racks(emit, crops, chard, rng, y0)
+  racks(emit, planting, rng, y0)
   roof(emit, services, y0)
   signage(emit, services, y0, ground)
   serviceStair(emit, ground)
@@ -272,30 +276,27 @@ export function buildHydroTower(services: DistrictServices): void {
     services.group.add(mesh)
   }
 
-  plant(services, crops, cropHeadTexture(37, false, 256), 'hydro-crops', 0.36)
-  plant(services, chard, cropHeadTexture(53, true, 256), 'hydro-chard', 0.42)
+  for (const [variety, transforms] of planting) plant(services, variety, transforms)
 }
 
-function plant(
-  services: DistrictServices,
-  transforms: Matrix4[],
-  map: MeshStandardNodeMaterial['map'],
-  name: string,
-  height: number,
-): void {
+/**
+ * One instanced draw per variety. These used to be `PlaneGeometry` cards with
+ * a painted crop texture — from the lane you were looking at a stack of flat
+ * green rectangles through clear glass, which is the one thing the building's
+ * whole identity rests on not being. `vegetableGeometry` is real modelled
+ * leaves and needs no alpha cut.
+ */
+function plant(services: DistrictServices, variety: CropVariety, transforms: Matrix4[]): void {
   if (transforms.length === 0) return
-  const material = new MeshStandardNodeMaterial()
-  material.map = map
-  material.alphaTest = 0.34
-  material.side = DoubleSide
-  material.roughness = 0.7
-  const card = new PlaneGeometry(height * 1.15, height)
-  card.translate(0, height / 2, 0)
-  const mesh = new InstancedMesh(card, material, transforms.length)
+  const mesh = new InstancedMesh(
+    vegetableGeometry(variety),
+    createCropMaterial({ seed: instanceSeed(), far: 22 }),
+    transforms.length,
+  )
   transforms.forEach((matrix, index) => mesh.setMatrixAt(index, matrix))
   mesh.instanceMatrix.needsUpdate = true
   mesh.castShadow = false
-  mesh.name = name
+  mesh.name = `hydro-${variety}`
   services.group.add(mesh)
 }
 
@@ -436,8 +437,7 @@ function core(emit: Emit): void {
 
 function racks(
   emit: Emit,
-  crops: Matrix4[],
-  chard: Matrix4[],
+  planting: Map<CropVariety, Matrix4[]>,
   rng: DistrictServices['rng'],
   y0: number,
 ): void {
@@ -476,8 +476,8 @@ function racks(
       emit('dark', ringBand(5.66, 4.96, zAbove - 0.13, zAbove - 0.07, 0.008, 48))
       emit('growBar', ringBand(5.58, 5.04, zAbove - 0.07, zAbove - 0.02, 0.006, 48))
 
-      // Baseline planting. Two species, alternating bands so a shelf does not
-      // read as one repeated card.
+      // Baseline planting: every variety mixed along the ring, so no tier
+      // reads as a repeated silhouette.
       const perTier = 46
       for (let i = 0; i < perTier; i++) {
         const phi = ((i + rng.range(0.15, 0.85)) / perTier) * Math.PI * 2
@@ -486,13 +486,14 @@ function racks(
         matrix.compose(
           new Vector3(
             HYDRO_TOWER.x + Math.cos(phi) * r,
-            y0 + zTray + 0.05,
+            y0 + zTray + 0.055,
             HYDRO_TOWER.z + Math.sin(phi) * r,
           ),
-          new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), rng.range(0, Math.PI)),
-          new Vector3().setScalar(rng.range(0.72, 1.18)),
+          new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), rng.range(0, Math.PI * 2)),
+          new Vector3().setScalar(rng.range(0.78, 1.16)),
         )
-        ;(i % 3 === 0 ? chard : crops).push(matrix)
+        const variety = CROP_VARIETIES[Math.floor(rng.range(0, CROP_VARIETIES.length))]
+        planting.get(variety)?.push(matrix)
       }
     }
   }

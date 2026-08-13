@@ -3309,3 +3309,77 @@ Fix is at the source: `targetSpeed / max(1, hypot(forward, strafe))`.
   deltas, tram curve samples/collider centres, seat-pose records, player
   movement records, and frame timing; it does not justify broad matrix
   freezing or any render/simulation budget reduction.
+
+## Owner fix session (2026-08-13, afternoon): five targeted defects
+
+- **An Euler component is not an angle after `rotateX`.** `placeCars` did
+  `car.rotation.set(0, yaw, 0)` then `car.rotateX(-pitch)`; three re-derives
+  `rotation` from the quaternion, so `car.rotation.y` became
+  `asin(sin yaw · cos pitch)` — right only inside ±90°, wrong over half the
+  Loop. The tram's collider took its yaw from there, so it stood ACROSS the
+  car on half the circuit. Symptom pair: "blocked where nothing is" AND "I can
+  walk through the wall". **Record the angle you computed; never read it back
+  out of an Euler.**
+- A bounding box is not a collider for a tapered body. `CAR_WIDTH/2 + 0.05`
+  stood 0.44 m proud of the skin at the nose (0.85 m with the capsule and the
+  controller offset). `RAPIER.ColliderDesc.convexHull` over the analytic skin
+  is exact where the section is convex and bridges only what should be solid
+  anyway (the door bay, the bogie tunnel). 2 652 points, built once, shared.
+- **A forward-only lookahead biases every heading.** Taking a car's yaw from a
+  point 1.5 m ahead lags the true tangent by half that chord: 0.44° of outward
+  yaw, and 13 mm of separation between two cars' coupler faces on the Loop.
+  A CENTRED chord (`s ± 0.75`) is free and exact on any circle.
+- **Kinematic placement at fixed ARC offsets makes coupler distance breathe.**
+  Two cars 8.7 m apart on the real Loop present 0.226…0.350 m between their
+  coupler faces, and up to 0.773 m through the spur's terminal hook. Anything
+  bridging two independently-placed vehicles must TELESCOPE: fixed root, head
+  placed at the measured length, scaled run between. Only scale the run — a
+  scaled flange or ball is instantly visible.
+- **`revolveZ` (dome/connectorTube) wants CLOCKWISE (r, z) profiles**: its
+  normal is the LEFT normal of travel, `(−dz, dr)`. The portal collar was
+  authored CCW and shipped inside-out for the whole project's life — the
+  bulkhead drum was a culled backface. The hazard band beside it was CW, which
+  is how the two disagreed without anyone noticing. Same family as S14's
+  inside-out tube barrels; check winding FIRST when a big revolve looks wrong.
+- **A `min()` in a swept rim is a fold generator.** The portal skirt's outer
+  rim was `min(collarFace, apertureZ − 0.4)`; the branch swap-over latitude was
+  a hard crease, which is what read as "triangular faces", and the wrong branch
+  pointed the rim back into the park through the glass. Sweep to the real
+  boundary and shape the meridian instead.
+- **`writer.quad` flat-shades.** Right for a machined plate, wrong for every
+  barrel: a 9.7 m drum on 72 segments facets into 0.85 m plates. Anything
+  curved needs per-vertex normals through `writer.raw` — analytic around a
+  surface of revolution, central differences on a warped grid.
+- **Decide which local axis carries a part's LENGTH before picking a yaw
+  helper.** `prismXZ` extrudes along +Y; `prism` of a plan polygon carries its
+  length on +X. `crossYaw` is for the latter. Getting it backwards rotated every
+  transom in the Overlook drum 90° — 62 bars poking radially into the room,
+  attached to nothing. (Same trap as W2-works' "body of revolution's axis" and
+  W2-commons' `rotateZ(phi)` vs `phi − π/2`.)
+- **Furniture has to respect the circulation, not just the wall.** The lounge's
+  coffee console was 0.8 m in front of the door; but the fix is not "slide it
+  along the wall", because the stair already claims u 1.85…3.35 and the whole
+  east flank is a 1.35 m entry corridor. Audit the CORRIDOR (`tools/lounge-
+  audit.mjs` sweeps a capsule in from the threshold, then laterally).
+- **Cup and ruffle must scale with a leaf's LOCAL width.** Scaling them by the
+  blade's maximum fanned the petiole open (±80 mm of ruffle on a 15 mm stalk)
+  and dropped the outer whorl 56 mm below the tray. Real modelled crops at
+  ~108 tris/head cost 1.27 M instanced triangles across ~11 800 plants — but
+  they drop the alpha test, which double-sided cut-out cards make expensive.
+- **Two districts anchored on two `parkPlan` constants cannot notice they
+  overlap.** The hydro tower at (52, 18) ate 6.7 m of the glasshouse at
+  (70, 22) and its spiral stair stood entirely inside that house. Solve a
+  building's site against its neighbours' real extents and keep the solver:
+  `tools/farm-layout-audit.mjs` builds both districts and compares every part
+  box (773 intersections at the old site, 0 at (37, 23)).
+- **One aimed group per TARGET, not per assembly.** The coupling's bar ends on
+  the socket seat; its jumper hoses end on the rear car's head TIP, 0.16 m
+  further along that car's own axis — which is up to 4° off the bar's aim. Both
+  in one aimed group left the hose ends 139 mm short on the Loop. Two aims from
+  one origin cost nothing and are exact (measured error = the authored 4 mm
+  reveal, on every curve).
+- New headless gates this session, all node + `--experimental-strip-types`, no
+  browser: `tools/tram-coupling-audit.mjs`, `tools/lounge-audit.mjs`,
+  `tools/crop-audit.mjs`, `tools/farm-layout-audit.mjs`. The lounge one's
+  "floating part" test — a part whose inflated box touches nothing else and
+  reaches no floor level — is generic and worth porting to other interiors.

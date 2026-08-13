@@ -1183,7 +1183,17 @@ function buildOverlook(services: DistrictServices): void {
     const uz = (n.z - s.z) / width
     const mx = (s.x + n.x) / 2
     const mz = (s.z + n.z) / 2
-    const bayYaw = crossYaw(uz, -ux)
+    const nx = (s.nx + n.nx) / 2
+    const nz = (s.nz + n.nz) / 2
+    // `prismXZ` extrudes along local +Y, so the transom's LENGTH is its +Y
+    // axis and its depth is +X — the mullion's convention, i.e. the plain
+    // bearing of the bay normal, NOT `crossYaw` (which lays +X across the
+    // face and is right for `lensBar`/`prism` plan sections). With crossYaw
+    // here every transom in the drum ran RADIALLY, poking 1.4 m into the room
+    // from a point in mid-air: the owner's "floating blocks attached to
+    // nothing", horizontal in the lower band and raking in the upper one
+    // purely because the upper band sits 3.6 m above the eye.
+    const bayYaw = Math.atan2(nz, nx)
     for (const level of [shell.apron + 1.94, shell.apron + 5.3]) {
       const bar = prismXZ(
         [
@@ -1202,8 +1212,6 @@ function buildOverlook(services: DistrictServices): void {
 
     // Panes: four rows per bay, set 8 mm behind the mullion face, double-sided
     // so the lit interior reads from outside AND the plain reads from inside.
-    const nx = (s.nx + n.nx) / 2
-    const nz = (s.nz + n.nz) / 2
     for (const [y0, y1] of [
       [shell.baseTop + 0.05, shell.apron + 1.89],
       [shell.apron + 1.99, shell.mezzBottom - 0.05],

@@ -118,3 +118,45 @@ boulders (> 0.55 m). Everything else is walk-through by design.
   build: the app was unbootable throughout the session on other agents'
   in-flight errors. Geometry was verified mechanically instead (headless
   NaN/degenerate/normal-length sweep over the tree and rocks).
+
+## The bench crop is modelled, not painted (2026-08-13)
+
+`cropHead()` — three alpha cards carrying a painted bush — is gone from the
+glasshouses and the hydroponics tower. At bench distance (the walkable range
+puts a guest 0.6 m from a tray) three cards read as three flat angular blobs,
+and the tower's crops were literally `PlaneGeometry` seen through clear glass.
+
+`vegetation/cropSpecies.ts` builds four real varieties — **butterhead,
+romaine, chard, pak choi** — plus a seedling, and both consumers pick per
+PLANT so no two neighbours share a silhouette. Three things do the work, and
+none of them is polygon count:
+
+- **A width profile with a petiole**: `sin(pi·t^k)` peaking at the blade's
+  belly, floored at the stalk width below it.
+- **A ruffled margin**: out-of-plane displacement weighted by `(2u−1)²`, so the
+  centre stays flat and the EDGE waves. This is the whole lettuce read.
+- **Rounded normals**, kept from the card system, so a head lights as a ball.
+
+**Cup and ruffle scale with the LOCAL width, never the maximum.** Against the
+maximum, a leaf whose stalk is 15 mm across still got ±80 mm of ruffle there:
+the petiole fanned open and the outer whorl's margins dropped 56 mm below the
+tray the head stands on.
+
+Two baked attributes carry the shading contract — `aDepth` (0 outside the head,
+1 in its heart) and `aPale` (the blanched stalk). `uv.y` is root-to-tip and
+`uv.x` is across, so the midrib is derived, never baked. `createCropMaterial`
+needs no map and no alpha test: the silhouette is geometry, so the shadow pass
+gets it for free and `foliageMaterial`'s r185 cut-out contract does not apply.
+
+**Sizes are contracts with the racks**, and `tools/crop-audit.mjs` enforces
+them: glasshouse tiers are 0.52 m apart with a grow bar hanging 0.10 m under
+each shelf, so a head scaled by the planter's 1.18 must stay under ~0.39 m
+tall; benches plant on a 0.30 m pitch, so a mature head must finish under
+0.42 m across (just touching its neighbours). Cost: 108 tris/head average,
+~11 800 plants, **1.27 M triangles in 5 instanced draws** (the card build was
+0.28 M, but alpha-tested and double-sided).
+
+Fixed alongside: the tower densifying pass stepped its tiers by the
+GLASSHOUSE's `CROP_TRAY_TIER_PITCH` from the floor level, so that row grew out
+of the floor plate instead of standing in the trays. It reads
+`HYDRO_TIER_HEIGHTS` now.

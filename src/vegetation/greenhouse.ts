@@ -1,18 +1,14 @@
-import { AdditiveBlending, Color, Sprite, Vector3 } from 'three'
+import { AdditiveBlending, Sprite, Vector3 } from 'three'
 import type { InstancedMesh, Object3D } from 'three'
 import { SpriteNodeMaterial } from 'three/webgpu'
 import { float, mix, mrt, smoothstep, uniform, uv, vec2, vec3, vec4 } from 'three/tsl'
 import type { Rng } from '../core/prng'
 import { markParticle } from '../render/layers'
-import {
-  CROP_TRAY_SURFACES,
-  CROP_TRAY_TIER_PITCH,
-  MIST_NOZZLES,
-} from '../world/districts/farmside'
-import { HYDRO_SHELVES } from '../world/districts/hydroTower'
-import { createFoliageMaterial, floatAttribute, instanceSeed } from './foliageMaterial'
-import { cropHeadTexture, seedlingTexture } from './leafTextures'
-import { buildPlant, cropHead, SpeciesInstances } from './species'
+import { CROP_TRAY_SURFACES, MIST_NOZZLES } from '../world/districts/farmside'
+import { HYDRO_SHELVES, HYDRO_TIER_HEIGHTS } from '../world/districts/hydroTower'
+import { createCropMaterial, LEAFY_VARIETIES, vegetableGeometry } from './cropSpecies'
+import { instanceSeed } from './foliageMaterial'
+import { SpeciesInstances } from './species'
 
 /**
  * FARMSIDE + HYDROPONICS — the working green, as opposed to the ornamental
@@ -40,51 +36,44 @@ export interface CropStats {
   hydroRuns: number
 }
 
+/**
+ * The bench crop. Four modelled VARIETIES rather than one painted card, picked
+ * per plant so no two neighbours are the same head — a real bench is a mix of
+ * what was sown that week, and one repeated silhouette is the single clearest
+ * tell that a farm is wallpaper.
+ *
+ * Chard stays its own species (it is the stage the trays are assigned by), the
+ * other three share the `mature` pick.
+ */
 export class GreenhouseCrops {
-  readonly mature: SpeciesInstances
+  readonly leafy: SpeciesInstances[]
   readonly chard: SpeciesInstances
   readonly seedling: SpeciesInstances
 
   constructor() {
-    const headGeometry = buildPlant(cropHead(3, 0.24))
-    const seedTray = buildPlant(cropHead(2, 0.1))
+    const material = (): ReturnType<typeof createCropMaterial> =>
+      createCropMaterial({ seed: instanceSeed(), far: 26 })
 
-    const common = {
-      seed: instanceSeed(),
-      depth: floatAttribute('aDepth'),
-      // Under grow bars, not the sun: these read cooler and flatter than the
-      // planter species, which is what makes the glasshouses feel artificial.
-      tintCool: new Color(0.74, 0.86, 0.74),
-      tintWarm: new Color(1.08, 1.1, 0.88),
-      transmit: new Color(0.34, 0.54, 0.18),
-      backlight: 0.6,
-      sway: 0.008,
-      alphaTest: 0.34,
-      far: 26,
-    }
-
-    this.mature = new SpeciesInstances(
-      'crop-leaf',
-      headGeometry,
-      createFoliageMaterial({ ...common, map: cropHeadTexture(37, false) }),
-      false,
+    this.leafy = LEAFY_VARIETIES.map(
+      (variety) =>
+        new SpeciesInstances(`crop-${variety}`, vegetableGeometry(variety), material(), false),
     )
-    this.chard = new SpeciesInstances(
-      'crop-chard',
-      headGeometry,
-      createFoliageMaterial({ ...common, map: cropHeadTexture(61, true) }),
-      false,
-    )
+    this.chard = new SpeciesInstances('crop-chard', vegetableGeometry('chard'), material(), false)
     this.seedling = new SpeciesInstances(
       'crop-seedling',
-      seedTray,
-      createFoliageMaterial({ ...common, map: seedlingTexture(), alphaTest: 0.28, far: 18 }),
+      vegetableGeometry('seedling'),
+      createCropMaterial({ seed: instanceSeed(), far: 16, sway: 0.003 }),
       false,
     )
   }
 
+  /** A leafy variety chosen from the plant's own position — stable per build. */
+  pick(rng: Rng): SpeciesInstances {
+    return this.leafy[Math.min(this.leafy.length - 1, Math.floor(rng.range(0, this.leafy.length)))]
+  }
+
   all(): SpeciesInstances[] {
-    return [this.mature, this.chard, this.seedling]
+    return [...this.leafy, this.chard, this.seedling]
   }
 
   meshes(): InstancedMesh[] {
@@ -123,8 +112,6 @@ export function plantGreenhouses(crops: GreenhouseCrops, rng: Rng): CropStats {
     // Two planting lines across the tray for the mature stages, four for
     // seedlings — a propagation tray is always denser than a finishing one.
     const lines = stage === 'seedling' ? [-0.36, -0.12, 0.12, 0.36] : [-0.26, 0.26]
-    const species =
-      stage === 'seedling' ? crops.seedling : stage === 'chard' ? crops.chard : crops.mature
     const scaleBase = stage === 'young' ? 0.6 : stage === 'seedling' ? 1 : 0.95
 
     for (let row = 0; row < rows; row++) {
@@ -138,7 +125,7 @@ export function plantGreenhouses(crops: GreenhouseCrops, rng: Rng): CropStats {
             const position = new Vector3(tx, ty, tz)
               .addScaledVector(along, offset)
               .addScaledVector(across, lateral * tray.width)
-            crops.mature.add(position, rng.range(0, Math.PI * 2), rng.range(0.16, 0.24))
+            crops.pick(rng).add(position, rng.range(0, Math.PI * 2), rng.range(0.16, 0.24))
             heads++
           }
         }
@@ -149,6 +136,9 @@ export function plantGreenhouses(crops: GreenhouseCrops, rng: Rng): CropStats {
         const position = new Vector3(tx, ty, tz)
           .addScaledVector(along, offset)
           .addScaledVector(across, lateral * tray.width + rng.range(-0.015, 0.015))
+        // Variety is per PLANT, not per tray: a bench sown by hand is mixed.
+        const species =
+          stage === 'seedling' ? crops.seedling : stage === 'chard' ? crops.chard : crops.pick(rng)
         species.add(
           position,
           rng.range(0, Math.PI * 2),
@@ -169,14 +159,19 @@ export function plantGreenhouses(crops: GreenhouseCrops, rng: Rng): CropStats {
     const [rx, ry, rz] = run.position
     const along = new Vector3(Math.sin(run.yaw), 0, Math.cos(run.yaw))
     const count = Math.max(2, Math.floor(run.width / 0.55))
-    for (let tier = 0; tier < run.tiers; tier += 2) {
+    for (let tier = 0; tier < Math.min(run.tiers, HYDRO_TIER_HEIGHTS.length); tier += 2) {
       for (let i = 0; i < count; i++) {
         const t = (i + 0.5) / count - 0.5
-        const position = new Vector3(rx, ry + tier * CROP_TRAY_TIER_PITCH + 0.02, rz).addScaledVector(
+        // The tower's tiers are its own — `HYDRO_TIER_HEIGHTS`, measured from
+        // each floor's finished level, plus the 50 mm tray lip. This used to
+        // step by the GLASSHOUSE's 0.52 m rack pitch from the floor itself, so
+        // the densifying row grew out of the floor plate and through the trays
+        // instead of standing in them.
+        const position = new Vector3(rx, ry + HYDRO_TIER_HEIGHTS[tier] + 0.055, rz).addScaledVector(
           along,
           t * run.width * 0.86,
         )
-        crops.mature.add(position, rng.range(0, Math.PI * 2), rng.range(0.55, 0.8))
+        crops.pick(rng).add(position, rng.range(0, Math.PI * 2), rng.range(0.55, 0.8))
         heads++
       }
     }

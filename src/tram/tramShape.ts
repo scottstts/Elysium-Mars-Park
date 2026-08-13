@@ -453,6 +453,34 @@ export const APERTURES: Aperture[] = [
   { z0: 1.98, z1: QUARTER, j0: IDX.CANT_L, j1: IDX.BELT_L - 1, kind: 'window' },
 ]
 
+// ------------------------------------------------------------- collision
+//
+// The cabin collider is a CONVEX HULL of the skin, not a bounding box. The box
+// it replaces was `CAR_WIDTH/2 + 0.05` wide over the car's whole length, which
+// at the nose (where `taperAt` pinches the section to 0.7) stands 0.44 m proud
+// of the skin — with the capsule radius and the controller offset on top, a
+// guest was stopped 0.85 m short of a body they could see they were not
+// touching. The hull is exact wherever the section is convex, which is
+// everywhere above the chine; it bridges only the bogie tunnel (below the beam
+// top, inside the guideway channel) and the 52 mm door-bay scallop, which is
+// what we want — the doorway must block as solidly as the wall.
+
+/**
+ * Point cloud for `RAPIER.ColliderDesc.convexHull`, in the car's local frame
+ * (metres, floor datum). Sampled at every authored z station so the nose rake
+ * and the tumblehome are both captured exactly.
+ */
+export function hullCollisionPoints(): Float32Array {
+  const out: number[] = []
+  for (const z of STATIONS) {
+    for (let j = 0; j < IDX.COUNT; j++) {
+      const p = hullPoint(z, j, 0, false)
+      out.push(p[0], p[1], p[2])
+    }
+  }
+  return new Float32Array(out)
+}
+
 /**
  * Cabin furniture datums, all traceable back to the section tables.
  *

@@ -12,6 +12,10 @@ import { LOOP } from '../world/parkPlan'
 import { buildPortalGate } from './portalGate'
 import type { PortalGate } from './portalGate'
 import { buildSideStations } from '../world/sideStations'
+import { buildTramCoupling } from './tramCoupling'
+import type { TramCoupling } from './tramCoupling'
+import { tramMaterials } from './tramMaterials'
+import { hullCollisionPoints } from './tramShape'
 import { buildGuideway, buildTrackData, buildTube, carFloorY } from './track'
 import type { TrackData } from './track'
 import { buildTramCar, CAR_LENGTH, CAR_WIDTH } from './vehicle'
@@ -72,6 +76,9 @@ export class TramSystem implements GameSystem {
    */
   private spurActive = true
   private readonly carBodies: RAPIER.RigidBody[] = []
+  /** True heading per car, recorded at placement (see `syncCarColliders`). */
+  private readonly carYaw: number[] = [0, 0]
+  private coupling: TramCoupling | null = null
 
   private readonly physics: PhysicsSystem
   private readonly player: PlayerSystem | null
@@ -79,6 +86,7 @@ export class TramSystem implements GameSystem {
   private readonly boardPosition = new Vector3()
   private readonly pathPoint = new Vector3()
   private readonly pathAhead = new Vector3()
+  private readonly pathBehind = new Vector3()
   private readonly transformScratch = new Vector3()
   private readonly colliderCentre = new Vector3()
   private readonly rotationScratch = new Quaternion()
@@ -119,24 +127,42 @@ export class TramSystem implements GameSystem {
       this.movingGroup.add(car.group)
       this.cars.push(car)
     }
+
+    // The articulated draw gear between the pair. The socket housing is rigid
+    // on the rear car's nose; the bar is re-aimed every fixed step.
+    const coupling = buildTramCoupling(tramMaterials(0))
+    this.cars[1].group.add(coupling.socket)
+    this.movingGroup.add(coupling.group)
+    this.coupling = coupling
+
     markDynamic(this.movingGroup)
     ctx.scene.add(this.movingGroup)
 
-    // Cabin colliders: one box per car, teleported along with the car every
-    // fixed step. Boarding is strictly the E interaction (the seat rig) —
-    // walking through an open door must be impossible, or the tram departs
-    // around a stowaway standing in the aisle (owner report). A moving car
-    // additionally shoves standing players clear (nudgeOutOfBox): the
-    // kinematic character controller never resolves collisions on its own.
+    // Cabin colliders: one CONVEX HULL of the car's own skin per car,
+    // teleported along with the car every fixed step. Boarding is strictly the
+    // E interaction (the seat rig) — walking through an open door must be
+    // impossible, or the tram departs around a stowaway standing in the aisle
+    // (owner report). A moving car additionally shoves standing players clear
+    // (nudgeOutOfBox): the kinematic character controller never resolves
+    // collisions on its own.
+    //
+    // The hull replaces a `CAR_WIDTH/2 + 0.05` box that was both too big and
+    // wrongly oriented: too big because the nose pinches to 0.7 of the section
+    // (guests were stopped ~0.85 m off the skin), and wrongly oriented because
+    // the yaw was read back from `car.rotation.y` AFTER `rotateX(-pitch)` had
+    // turned the group's Euler into an XYZ decomposition — `asin(sin yaw ·
+    // cos pitch)`, which is not the yaw at all outside ±90° and puts the box
+    // across the car over half the Loop. That is the "blocked where nothing is,
+    // and I can walk through the wall" pair in one bug.
     const world = this.physics.world
     const api = this.physics.api
     if (world && api) {
+      const points = hullCollisionPoints()
       for (let i = 0; i < this.cars.length; i++) {
         const body = world.createRigidBody(api.RigidBodyDesc.fixed())
-        world.createCollider(
-          api.ColliderDesc.cuboid(CAR_WIDTH / 2 + 0.05, 1.5, CAR_LENGTH / 2 + 0.05),
-          body,
-        )
+        const desc = api.ColliderDesc.convexHull(points)
+        if (!desc) throw new Error('tram: convex hull of the car skin failed')
+        world.createCollider(desc, body)
         this.carBodies.push(body)
       }
     }
@@ -163,6 +189,10 @@ export class TramSystem implements GameSystem {
       this.loopS = track.stationS.get('farmside') ?? 0
       this.speed = CRUISE
       this.nextStationIndex = this.stationOrder().indexOf('overlook')
+      // Place before the first render: without it the pair sits at the origin
+      // through every prewarm frame, and the coupling — which is aimed FROM
+      // the cars — would take its stroke from two coincident poses.
+      this.placeCars()
     }
 
     if (this.interaction && this.player) {
@@ -333,30 +363,33 @@ export class TramSystem implements GameSystem {
     )
   }
 
-  /** Keep each car's cabin collider glued to the car; shove bystanders. */
+  /**
+   * Keep each car's cabin collider glued to the car; shove bystanders.
+   *
+   * The collider takes the car's FULL quaternion — the hull is authored in the
+   * car's own frame, so yaw, pitch and roll all have to travel with it. Never
+   * rebuild a rotation from `car.rotation.y`: that Euler is an XYZ
+   * decomposition of `Ry(yaw)·Rx(−pitch)` and its `y` term is
+   * `asin(sin yaw · cos pitch)`, i.e. the yaw only inside ±90°.
+   */
   private syncCarColliders(): void {
     const player = this.player
     for (let i = 0; i < this.carBodies.length && i < this.cars.length; i++) {
       const car = this.cars[i].group
-      const yaw = car.rotation.y
-      const cy = car.position.y + 1.5
-      this.carBodies[i].setTranslation(
-        { x: car.position.x, y: cy, z: car.position.z },
-        false,
-      )
-      this.carBodies[i].setRotation(
-        { x: 0, y: Math.sin(yaw / 2), z: 0, w: Math.cos(yaw / 2) },
-        false,
-      )
+      this.carBodies[i].setTranslation(car.position, false)
+      this.carBodies[i].setRotation(car.quaternion, false)
+      // The shove is a safety net for a moving car overtaking a standing
+      // guest, so it keeps a plain OBB — but on the TRUE yaw recorded when the
+      // car was placed, and on the car's real extents rather than the old
+      // padded box. Half height 1.6 spans floor to crown; the centre sits at
+      // mid-body height, not at the floor + 1.5 the old box used.
       if (player && !this.riding && this.speed > 0.02) {
-        const center = this.colliderCentre.set(car.position.x, cy, car.position.z)
-        player.nudgeOutOfBox(
-          center,
-          yaw,
-          CAR_WIDTH / 2 + 0.05,
-          1.5,
-          CAR_LENGTH / 2 + 0.05,
+        const center = this.colliderCentre.set(
+          car.position.x,
+          car.position.y + 1.05,
+          car.position.z,
         )
+        player.nudgeOutOfBox(center, this.carYaw[i], CAR_WIDTH / 2, 1.6, CAR_LENGTH / 2)
       }
     }
   }
@@ -411,12 +444,24 @@ export class TramSystem implements GameSystem {
     for (let i = 0; i < this.cars.length; i++) {
       const offset = (i === 0 ? 0.5 : -0.5) * spacing
       const point = this.carPoint(trainS + offset, this.pathPoint)
-      const ahead = this.carPoint(trainS + offset + 1.5, this.pathAhead)
+      // Heading from a CENTRED chord, not a forward-only lookahead. A forward
+      // chord lags the true tangent by half its length, which yaws every car
+      // 0.44 deg outward of the alignment — and, because the bias is a
+      // rotation about each car's own centre, it pulls the two cars' coupler
+      // faces 13 mm apart on the Loop. Centred, the pair is symmetric about
+      // the coupling and the draw bar spans a constant length by construction.
+      const back = this.carPoint(trainS + offset - 0.75, this.pathBehind)
+      const ahead = this.carPoint(trainS + offset + 0.75, this.pathAhead)
       const car = this.cars[i].group
       car.position.copy(point)
       car.position.y += 0.62
-      car.rotation.set(0, Math.atan2(ahead.x - point.x, ahead.z - point.z), 0)
-      const pitch = Math.atan2(ahead.y - point.y, Math.hypot(ahead.x - point.x, ahead.z - point.z))
+      const yaw = Math.atan2(ahead.x - back.x, ahead.z - back.z)
+      // Recorded, not re-read: `rotateX` below turns `car.rotation` into an
+      // XYZ decomposition whose `y` is no longer this angle (see
+      // `syncCarColliders`).
+      this.carYaw[i] = yaw
+      car.rotation.set(0, yaw, 0)
+      const pitch = Math.atan2(ahead.y - back.y, Math.hypot(ahead.x - back.x, ahead.z - back.z))
       car.rotateX(-pitch)
       car.updateMatrixWorld()
 
@@ -430,6 +475,10 @@ export class TramSystem implements GameSystem {
     // Keep the boarding caption anchored at the front car's left door.
     const car = this.cars[0]
     this.boardPosition.set(1.6, 1.2, 0).applyMatrix4(car.group.matrixWorld)
+
+    // The draw gear spans whatever the two cars now present — any yaw, pitch
+    // or roll between them, including the spur's transition curves.
+    if (this.cars.length > 1) this.coupling?.update(this.cars[0].group, this.cars[1].group)
   }
 
   dispose(ctx: GameContext): void {

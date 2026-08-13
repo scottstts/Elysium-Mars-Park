@@ -394,3 +394,36 @@ is how a crane rail is built anyway. `domeCraneRailLift(θ)` is exported so
 the Panewalker derives its stand-off instead of hardcoding one — **the gantry
 in `robots/panewalker.ts` must use it** (see the shared-file note in that
 file's header when it is updated).
+
+## The portal bulkhead was inside-out, and the skirt was folded (2026-08-13)
+
+Two defects, both visible as "triangular faces" on the tunnel entrance frame.
+
+**`revolveZ`'s normal is the profile's LEFT normal**, `(−dz, dr)` — so a
+profile must run CLOCKWISE in the (r, z) plane. The collar's 13-point section
+was authored counter-clockwise, which shipped the whole bulkhead casting
+inside-out: the outer drum was a culled backface and the inboard flange faced
+away from the park. The hazard band next to it was CW and therefore correct,
+which is how the two disagreed. The profile is reversed, the convention is now
+documented on the function, and normals are ANALYTIC — smooth around the
+circumference (a 9.7 m drum on 72 segments facets into 0.85 m plates, and
+`writer.quad` flat-shades every one of them), sharp across every profile
+crease.
+
+**`buildPortalSkirt`'s outer rim was `min(collarFace, apertureZ − 0.4)`.** Over
+the whole upper half of the ring that put the rim 0.4 m INBOARD of the glass
+instead of 6 m outboard on the bulkhead — a cowl leaning back into the park,
+folded along the latitude where the two branches of that `min` swap over. That
+fold is what showed as hard triangular faces, and it drove the rim through the
+glass shell and the portal ring frame as well. The rim is now the flange,
+unconditionally; the meridian is a Hermite flare (`e(t) = 1 − (1 − t)²`, which
+leaves the aperture immediately — a symmetric ease left only 50 mm of clearance
+off the glass at the springing — and lands tangent to the flange); and the
+surface is a 12 × 96 grid with per-vertex normals by central differences.
+Verified: zero meridian direction reversals, and the samples that sit inside
+the glass shell drop from 4 818 to 2 822 (the remainder is the collar drum's
+own pre-existing penetration near the springing, below the plinth top).
+
+`SmoothSoup` in that file is the shared sink for anything curved here; the
+connector duct's 44-segment barrel goes through it too, smooth around and sharp
+along so the rib shoulders stay creases.

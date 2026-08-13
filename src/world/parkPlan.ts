@@ -81,8 +81,18 @@ export const COMMONS = { x: -2, z: -54, radius: 11, y: 0.55 }
 /**
  * Hydroponics tower: sealed three-story glass cylinder of planted shelves
  * (the reference image's "62" building), glowing green on the farm lane.
+ *
+ * The site is solved against the glasshouse ranges, which run x 53…87 in three
+ * z bands. At the old (52, 18) the 7.24 m plinth ate 6.7 m of the +22 range
+ * and the external spiral stair (its own drum at bearing 45 deg, r 9.4) stood
+ * entirely INSIDE that house; the paved apron and the pad skirt reached 11 m
+ * and 14.5 m in. (37, 23) is the nearest site that clears every range with the
+ * whole assembly — plinth 8.3 m, apron 4.0 m, pad skirt 0.5 m — while keeping
+ * the tower off the farm lane's walking corridor (plinth 1.7 m clear of the
+ * paved edge) and still letting its apron bite 2.6 m into the lane, so the
+ * building fronts continuous paving instead of standing in the middle of it.
  */
-export const HYDRO_TOWER = { x: 52, z: 18, radius: 7, floors: 3, y: 0.55 }
+export const HYDRO_TOWER = { x: 37, z: 23, radius: 7, floors: 3, y: 0.55 }
 
 /** White water tower over The Works — the skyline landmark. */
 export const WATER_TOWER = { x: 66, z: -34, height: 17 }
@@ -304,7 +314,7 @@ export const PADS: PadSpec[] = [
   // in interiorHeight, or the bowl has no rake at all.
   { id: 'amphitheater', x: -64, z: 39, y: -1.8, radius: 8, skirt: 6 },
   { id: 'commons', x: -2, z: -54, y: 0.55, radius: 14, skirt: 7 },
-  { id: 'hydro-tower', x: 52, z: 18, y: 0.55, radius: 10, skirt: 5 },
+  { id: 'hydro-tower', x: HYDRO_TOWER.x, z: HYDRO_TOWER.z, y: 0.55, radius: 10, skirt: 5 },
   { id: 'farmside', x: 70, z: 0, y: 0.6, radius: 26, skirt: 10 },
   // Freedom Tower site: flat ground under the terrace + lattice footing.
   { id: 'freedom-tower', x: FREEDOM_TOWER.x, z: FREEDOM_TOWER.z, y: 0.55, radius: 13, skirt: 7 },

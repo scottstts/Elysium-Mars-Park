@@ -461,3 +461,72 @@ the fix is `clashAllow` pairs on slot names, not thinner joints.
 `track.ts` uses ONLY slots that already exist in `kitMaterials()`, because
 `tramSystem` builds its writer with a bare `kitMaterials()` and an unbound slot
 throws. `portalStation.ts` owns its own build call and adds `stationGlass`.
+
+## Cabin collision is a convex hull, not a box (2026-08-13)
+
+The cabin collider was `cuboid(CAR_WIDTH/2 + 0.05, 1.5, CAR_LENGTH/2 + 0.05)`,
+and it failed in two directions at once — the owner's "blocked where nothing
+is, and I can walk through the wall".
+
+- **Too big.** `taperAt` pinches the section to 0.7 at the nose, so the box
+  stood **0.44 m** proud of the skin there; with the capsule radius and the
+  controller offset that is 0.85 m of phantom blocking off a body the guest can
+  see they are not touching.
+- **Wrongly oriented.** The yaw was read back from `car.rotation.y` AFTER
+  `car.rotateX(-pitch)`. That Euler is an XYZ decomposition of
+  `Ry(yaw)·Rx(−pitch)`, whose `y` term is `asin(sin yaw · cos pitch)` — not the
+  yaw at all outside ±90°, which is half the Loop. **Never rebuild a rotation
+  from an Euler component after `rotateX`/`rotateOnAxis`.**
+
+`tramShape.hullCollisionPoints()` samples the outer skin at every authored `z`
+station (2 652 points) and `RAPIER.ColliderDesc.convexHull` wraps it; the body
+takes the car's full quaternion. The hull is exact wherever the section is
+convex — everywhere above the chine — and bridges only the bogie tunnel (below
+the beam top, inside the guideway channel) and the 52 mm door-bay scallop,
+which is what we want: the doorway must block as solidly as the wall.
+`placeCars` records the true yaw in `carYaw[]` for `nudgeOutOfBox`, which is
+still an OBB because it is a safety shove, not the barrier.
+
+## Placement heading is a CENTRED chord
+
+`placeCars` used to take its heading from a point 1.5 m ahead. A forward-only
+chord lags the true tangent by half its length: every car yawed 0.44° outward
+of the alignment, and — because the bias is a rotation about each car's own
+centre — it pulled the two coupler faces 13 mm apart on the Loop. Sampling
+`s ± 0.75` makes the pair symmetric about the coupling and fixes the pitch term
+for free.
+
+## The coupling (`tram/tramCoupling.ts`)
+
+A bar coupler on TWO spherical joints:
+
+- `socket` — one lathed casting (barrel, mouth lip and spherical seat in a
+  single closed profile) plugged 30 mm into the rear car's nose head pocket. A
+  rigid child of that car; add once.
+- `group` — TWO aimed runs from the same origin (the front car's head tip),
+  re-aimed every fixed step. They need different targets: the bar ends on the
+  socket's SEAT, the jumper hoses on the rear car's head TIP, and those two
+  points are 0.16 m apart along the rear car's own axis — up to 4° off the
+  bar's. Aiming the hoses with the bar left their far ends 139 mm short on the
+  Loop. Roll for both comes from the MEAN of the two cars' local up, built
+  through `Matrix4.makeBasis`, not from a look-at (whose arbitrary roll would
+  flip the hoses through a grade change).
+
+**Why two joints, and why it telescopes.** A single-ball bar has to be rigid
+with one car, and its ball then only lands in the seat when the two cars sit
+symmetrically about the joint. That is exact on a constant-radius arc and only
+approximate through the spur's transitions. Worse, the placement model holds
+each car at a fixed ARC offset, so the straight-line distance between the
+coupler faces genuinely breathes: **0.226 → 0.350 m on the Loop and up to
+0.773 m through the spur's terminal hook** (measured, `tools/tram-coupling-
+audit.mjs`). The bar therefore has a fixed root, a fixed ball head placed at
+the measured length, and a scaled run (shaft + bellows) between them — real
+draw gear absorbs exactly that, and the seat error is 0.000 mm everywhere.
+Only the run scales, so no flange or ball is ever distorted.
+
+`buildEnd`'s coupler head pocket now finishes at `COUPLER_HEAD_Z = 4.16`
+(it ran to 4.24), which is what opens the 0.38 m of free span the joint needs.
+
+Gate: `node --experimental-strip-types tools/tram-coupling-audit.mjs` — hull
+extents, seat error and stroke swept over the real loop and spur curves, bar
+clearance against both bodies, and the triangle budget.
