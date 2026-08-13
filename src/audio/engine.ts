@@ -16,14 +16,17 @@ import {
 } from '../world/parkPlan'
 import { interiorHeight } from '../world/interiorHeight'
 import { pavedSignedDistance } from '../world/pavingPlan'
+import { RobotVoices } from './robotVoice'
+import type { RobotAudioSource } from './robotVoice'
 
 /**
  * The park's voice (plan §13) — procedural WebAudio, no music (canon). The
  * dome is a vast soft room; interiors are small warm ones; the tube is a
  * duct. Every source is synthesized — noise beds, filtered bursts for
- * footsteps, servo whines, the tram's rail-sing — except THE FOUNTAIN, the
- * park's one recorded voice (owner-supplied loop), placed in the world
- * behind the same panner model as everything else.
+ * footsteps, the wheeled fleet's drive trains (audio/robotVoice.ts), the
+ * tram's rail-sing — except THE FOUNTAIN, the park's one recorded voice
+ * (owner-supplied loop), placed in the world behind the same panner model
+ * as everything else.
  */
 
 type Zone = 'park' | 'interior' | 'tram' | 'tube'
@@ -45,7 +48,7 @@ export class AudioEngineSystem implements GameSystem {
   private zone: Zone = 'tram'
   private zoneBlend = 0
 
-  private servoNodes: Array<{ osc: OscillatorNode; gain: GainNode; panner: PannerNode }> = []
+  private robotVoices: RobotVoices | null = null
   private tramNoiseGain: GainNode | null = null
   private tramPanner: PannerNode | null = null
   private tramOsc: OscillatorNode | null = null
@@ -67,6 +70,15 @@ export class AudioEngineSystem implements GameSystem {
   init(ctx: GameContext): void {
     // The context must begin on a user gesture: the BOARD click.
     ctx.events.on('park/entered', () => this.start(ctx))
+  }
+
+  /**
+   * The ground fleet's roster. A runtime cast — TS `private` is compile-time
+   * only — so `RobotAudioSource` must track `GroundRobot`'s field names.
+   */
+  private fleet(): RobotAudioSource[] | null {
+    if (!this.robots) return null
+    return (this.robots as unknown as { robots: RobotAudioSource[] }).robots
   }
 
   /**
@@ -168,29 +180,9 @@ export class AudioEngineSystem implements GameSystem {
     interior.start()
     this.interiorGain = interiorGain
 
-    // Robot servos: one thin saw each behind a bandpass + panner.
-    if (this.robots) {
-      const fleet = (this.robots as unknown as { robots: Array<{ rig: { group: { position: Vector3 } } }> })
-        .robots
-      for (let i = 0; i < fleet.length; i++) {
-        const osc = context.createOscillator()
-        osc.type = 'sawtooth'
-        osc.frequency.value = 1150 + i * 173
-        const filter = context.createBiquadFilter()
-        filter.type = 'bandpass'
-        filter.frequency.value = 1500 + i * 120
-        filter.Q.value = 6
-        const gain = context.createGain()
-        gain.gain.value = 0
-        const panner = context.createPanner()
-        panner.distanceModel = 'inverse'
-        panner.refDistance = 2.5
-        panner.rolloffFactor = 1.4
-        osc.connect(filter).connect(gain).connect(panner).connect(master)
-        osc.start()
-        this.servoNodes.push({ osc, gain, panner })
-      }
-    }
+    // The wheeled fleet's drive-train voice (audio/robotVoice.ts).
+    const fleet = this.fleet()
+    if (fleet) this.robotVoices = new RobotVoices(context, master, noiseBuffer, fleet)
 
     // Tram: rail-sing (noise through resonant band + a faint tone).
     const tramNoise = context.createBufferSource()
@@ -503,25 +495,9 @@ export class AudioEngineSystem implements GameSystem {
       this.lastStepCount = player.stepCount
     }
 
-    // Servos follow their robots.
-    if (this.robots) {
-      const fleet = (
-        this.robots as unknown as {
-          robots: Array<{ rig: { group: { position: Vector3 } }; state: string; speed: number }>
-        }
-      ).robots
-      for (let i = 0; i < this.servoNodes.length && i < fleet.length; i++) {
-        const node = this.servoNodes[i]
-        const robot = fleet[i]
-        const p = robot.rig.group.position
-        node.panner.positionX.value = p.x
-        node.panner.positionY.value = p.y + 0.5
-        node.panner.positionZ.value = p.z
-        const moving = robot.state === 'moving'
-        node.gain.gain.value = moving ? 0.05 : 0.008
-        node.osc.frequency.value = (moving ? 1.18 : 1) * (1150 + i * 173)
-      }
-    }
+    // The wheeled fleet's drive trains follow their robots.
+    const fleet = this.fleet()
+    if (this.robotVoices && fleet) this.robotVoices.update(fleet, dt)
 
     // Tram rail-sing.
     const tram = this.tram as unknown as {

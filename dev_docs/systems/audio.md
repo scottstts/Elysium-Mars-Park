@@ -16,14 +16,31 @@
   classification: station pad footprint → deck, distance-to-PATHS segments
   (paver only) → paver, else regolith; interior zone → muted interior step.
   Each step is a filtered noise burst with per-surface band/decay.
-- Point sources use PannerNode (inverse distance): 4 robot servos (thin
-  saws behind tight bandpass, pitch up when moving), tram rail-sing
-  (resonant noise + 80–160 Hz tone ∝ speed), greenhouse mist hiss (only
-  during the 10 s/90 s misting window), reclaimer vent hiss (slow sine
-  breathing).
+- Point sources use PannerNode (inverse distance): the 4 wheeled robots
+  (`src/audio/robotVoice.ts`, below), tram rail-sing (resonant noise +
+  80–160 Hz tone ∝ speed), greenhouse mist hiss (only during the 10 s/90 s
+  misting window), reclaimer vent hiss (slow sine breathing).
+- Wheeled fleet voice (`src/audio/robotVoice.ts`, owner call 2026-08-13 —
+  the previous version was a fixed 1150–1670 Hz saw behind a Q=6 bandpass
+  at 1500–1860 Hz, always on: a pure tone in the ear's most sensitive band
+  that read as a *ring*, not a machine). Rule taken from it: **keep steady
+  point-source loops broadband and out of 2–4 kHz; a high-Q band on a saw
+  is a whistle.** Four layers per rig, all under ~900 Hz — drive hum (saw →
+  lowpass that opens with load), gear mesh (triangle at 4.5× the
+  fundamental, capped 560 Hz), roll grit (brown noise bandpassed by wheel
+  size), and a 900 Hz brush swish for rigs with `spinners` (the sweeper).
+  Drive pitch is the motor pole-passing rate derived from real wheel
+  revs/s; **ground speed is measured from the frame position delta, not
+  read off `robot.speed`**, so a robot stopped to yield to the player (held
+  in state `'moving'` by the routine) actually falls quiet. Idle is a
+  whisper of hum only; while `'working'` the grit layer swells on
+  `|sin(toolPhase · 2.2)|` — the same term robotsSystem bobs the rake and
+  brush carriage with, so stroke and sound are one event.
 - Sparse thermal glass ticks: 3.4 kHz pings with random stereo pan every
   8–25 s (sim-clock hashed, deterministic).
 - Tram door chime: two-tone (988/740 Hz) on `tram/docked`.
 - Private-field peeks into tram/robots use runtime casts — TS `private`
   is compile-time only; keep field names in sync if refactoring
-  (`tram.cars/speed/riding`, `robots.robots[].rig/state/speed`).
+  (`tram.cars/speed/riding`, and `RobotAudioSource` in robotVoice.ts:
+  `robots.robots[].rig.group.position / rig.wheelRadius / rig.spinners /
+  state / toolPhase`).

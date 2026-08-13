@@ -3557,3 +3557,34 @@ Full write-up: `dev_docs/systems/starship.md` §8. The lessons that generalise:
   re-voxelised a 1 600-triangle arm thousands of times and ran for minutes;
   memoising on the angle quantised to a quarter degree cut it to ~45 s, because
   a few dozen distinct angles serve the whole sweep.
+
+### The wheeled robots' ring (2026-08-13)
+
+- **Steady point-source loops must be broadband and out of 2–4 kHz.** The four
+  ground robots were one thin sawtooth each at 1150–1670 Hz behind a Q=6
+  bandpass at 1500–1860 Hz, running always, at a fixed pitch. Owner report:
+  "really high pitch ring, unpleasant" — and it *is* a ring, not a robot, for
+  three independently sufficient reasons. A high-Q band on a saw is a whistle,
+  the band sits on the ear's sensitivity peak, and nothing about it moves. If a
+  loop never stops, none of those three is survivable.
+- **Machine voices belong in the motor register.** The replacement
+  (`src/audio/robotVoice.ts`) is four layers, all under ~900 Hz: drive hum (saw
+  into a lowpass that opens with load), gear mesh (TRIANGLE at 4.5× the
+  fundamental — a saw there re-introduces the whistle an octave up), roll grit
+  (brown noise bandpassed by wheel radius), brush swish for rigs with
+  `spinners`. Noise carries the moving cue because noise cannot ring.
+- **Derive the modulator from the geometry that already exists.** Drive pitch
+  is the motor pole-passing rate off real wheel revolutions per second
+  (`speed / 2πr`), so the fleet's voices separate by wheel size for free —
+  sweeper 0.132 m sits above the mule's 0.186 m without a per-robot table.
+- **Measure speed from the position delta, never from the configured field.**
+  `robot.speed` is the routine's *setting*; robots hold state `'moving'` while
+  they stand still yielding to the player, so a declared-speed gate has them
+  droning at a wall. A frame delta gets pauses, yields and corner damping right
+  with no extra state, and hands you a continuous value for pitch as a bonus.
+- **Idle needs a texture, not a tone.** A parked machine held at low gain on
+  the same oscillator is exactly the ring, quieter. While `'working'` the grit
+  layer now swells on `|sin(toolPhase · 2.2)|` — the identical term
+  robotsSystem bobs the rake/brush with — so the scrub you hear is the stroke
+  you see. Reuse the animation's own phase term for its sound wherever one
+  exists; it costs nothing and can never drift.
