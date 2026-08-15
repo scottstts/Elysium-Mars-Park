@@ -340,43 +340,6 @@ export function broadLeafTexture(seed = 43, size = 512): CanvasTexture {
   return finish(canvas)
 }
 
-/** Low mat of small spatulate leaves — the filler between the hero plants. */
-export function groundcoverTexture(seed = 59, size = 256): CanvasTexture {
-  const { canvas, g } = sheet(size)
-  const random = seeded(seed)
-  const s = size / 256
-
-  withBleed(g, () => {
-    for (let layer = 0; layer < 3; layer++) {
-      const count = 16 - layer * 3
-      for (let i = 0; i < count; i++) {
-        const a = (random() - 0.5) * 2.5
-        const reach = (34 + random() * 74) * s * (1 - layer * 0.14)
-        const x = 128 * s + Math.sin(a) * reach
-        const y = (250 - layer * 26) * s - Math.cos(a) * reach * 0.62
-        const len = (26 + random() * 30) * s
-        const wide = len * (0.38 + random() * 0.2)
-        g.save()
-        g.translate(x, y)
-        g.rotate(a * 0.7 + (random() - 0.5) * 0.5)
-        g.beginPath()
-        g.ellipse(0, -len * 0.5, wide, len * 0.5, 0, 0, Math.PI * 2)
-        const tone = 20 + layer * 5 + random() * 8
-        g.fillStyle = `hsl(${146 - layer * 8 + random() * 14}, ${30 + random() * 12}%, ${tone}%)`
-        g.fill()
-        g.strokeStyle = `hsla(90, 30%, ${tone + 20}%, 0.4)`
-        g.lineWidth = 1.4 * s
-        g.beginPath()
-        g.moveTo(0, -len * 0.08)
-        g.lineTo(0, -len * 0.9)
-        g.stroke()
-        g.restore()
-      }
-    }
-  })
-  return finish(canvas)
-}
-
 /**
  * A trailing sprig for the coping spill: a stem with paired ovate leaves,
  * drawn radiating from the bottom so the wind term still roots the card; the

@@ -97,6 +97,231 @@ export function bladeCluster(options: BladeClusterOptions = {}): BufferGeometry 
   return geometry
 }
 
+/**
+ * A real grassland flower assembled from growth parts: tapered swept stem,
+ * two stem leaves, a sepal whorl, fourteen shaped petals and a raised disc. The
+ * whole plant is one instanced geometry with a root-to-head UV for wind.
+ */
+export function grassBloomCluster(): BufferGeometry {
+  const positions: number[] = []
+  const normals: number[] = []
+  const uvs: number[] = []
+  const colors: number[] = []
+  const blooms: number[] = []
+  const indices: number[] = []
+  const totalHeight = 0.43
+  const stemHeight = 0.39
+  const stemSections = 7
+  const stemSegments = 7
+  const up = new Vector3(0, 1, 0)
+  const quaternion = new Quaternion()
+  const tangent = new Vector3()
+  const radial = new Vector3()
+  const vertex = new Vector3()
+
+  const pushVertex = (
+    point: Vector3,
+    normal: Vector3,
+    u: number,
+    color: readonly [number, number, number],
+    bloom: number,
+  ): number => {
+    const index = positions.length / 3
+    positions.push(point.x, point.y, point.z)
+    normals.push(normal.x, normal.y, normal.z)
+    uvs.push(u, Math.max(0, Math.min(1, point.y / totalHeight)))
+    colors.push(color[0], color[1], color[2])
+    blooms.push(bloom)
+    return index
+  }
+
+  const stemPoint = (t: number, target = new Vector3()): Vector3 =>
+    target.set(
+      0.018 * t * t + Math.sin(t * Math.PI) * 0.006,
+      stemHeight * t,
+      -0.014 * t * t + Math.sin(t * Math.PI * 1.4) * 0.004,
+    )
+  const stemTangent = (t: number, target = new Vector3()): Vector3 => {
+    const epsilon = 0.002
+    const before = stemPoint(Math.max(0, t - epsilon))
+    const after = stemPoint(Math.min(1, t + epsilon))
+    return target.subVectors(after, before).normalize()
+  }
+
+  // Stem rings. The frame follows the curve rather than assuming vertical,
+  // so the small lean does not shear the tube or detach the flower head.
+  const stemBase = positions.length / 3
+  for (let section = 0; section <= stemSections; section++) {
+    const t = section / stemSections
+    const centre = stemPoint(t)
+    stemTangent(t, tangent)
+    quaternion.setFromUnitVectors(up, tangent)
+    const radius = 0.0052 + (0.0024 - 0.0052) * Math.pow(t, 0.85)
+    const green: readonly [number, number, number] = [
+      0.055 + t * 0.025,
+      0.115 + t * 0.055,
+      0.035 + t * 0.018,
+    ]
+    for (let segment = 0; segment <= stemSegments; segment++) {
+      const theta = (Math.PI * 2 * (segment % stemSegments)) / stemSegments
+      radial.set(Math.cos(theta), 0, Math.sin(theta)).applyQuaternion(quaternion).normalize()
+      vertex.copy(centre).addScaledVector(radial, radius)
+      pushVertex(vertex, radial, segment / stemSegments, green, 0)
+    }
+  }
+  const stemStride = stemSegments + 1
+  for (let section = 0; section < stemSections; section++) {
+    for (let segment = 0; segment < stemSegments; segment++) {
+      const a = stemBase + section * stemStride + segment
+      indices.push(a, a + stemStride, a + 1, a + 1, a + stemStride, a + stemStride + 1)
+    }
+  }
+
+  const emitStemLeaf = (at: number, yaw: number, length: number, width: number): void => {
+    const rows = 4
+    const base = positions.length / 3
+    const origin = stemPoint(at)
+    const direction = new Vector3(Math.sin(yaw), 0.2, Math.cos(yaw)).normalize()
+    const side = new Vector3(direction.z, 0, -direction.x).normalize()
+    const normal = new Vector3(-direction.x * 0.18, 0.96, -direction.z * 0.18).normalize()
+    for (let row = 0; row <= rows; row++) {
+      const t = row / rows
+      const centre = origin
+        .clone()
+        .addScaledVector(direction, length * t)
+        .addScaledVector(up, Math.sin(t * Math.PI) * 0.012 - t * t * 0.015)
+      const halfWidth = width * (0.14 + Math.sin(t * Math.PI) * 0.86) * (1 - t * 0.42)
+      for (const sign of [-1, 1] as const) {
+        const point = centre.clone().addScaledVector(side, halfWidth * sign)
+        pushVertex(point, normal, sign < 0 ? 0 : 1, [0.06, 0.15, 0.045], 0)
+      }
+    }
+    for (let row = 0; row < rows; row++) {
+      const a = base + row * 2
+      indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+    }
+  }
+  emitStemLeaf(0.31, 2.2, 0.105, 0.014)
+  emitStemLeaf(0.5, -0.82, 0.085, 0.012)
+
+  const head = stemPoint(1).add(new Vector3(0, 0.006, 0))
+  // Sepals form a green star beneath the petals rather than leaving the bloom
+  // pasted directly onto the stem tip.
+  for (let sepal = 0; sepal < 5; sepal++) {
+    const angle = (sepal / 5) * Math.PI * 2 + 0.3
+    const out = new Vector3(Math.cos(angle), -0.22, Math.sin(angle)).normalize()
+    const side = new Vector3(-Math.sin(angle), 0, Math.cos(angle))
+    const a = pushVertex(
+      head.clone().addScaledVector(side, -0.005),
+      new Vector3(0, -0.7, 0.3).applyAxisAngle(up, -angle).normalize(),
+      0,
+      [0.055, 0.13, 0.038],
+      0,
+    )
+    const b = pushVertex(
+      head.clone().addScaledVector(side, 0.005),
+      new Vector3(0, -0.7, 0.3).applyAxisAngle(up, -angle).normalize(),
+      1,
+      [0.055, 0.13, 0.038],
+      0,
+    )
+    const c = pushVertex(
+      head.clone().addScaledVector(out, 0.028),
+      new Vector3(0, -0.7, 0.3).applyAxisAngle(up, -angle).normalize(),
+      0.5,
+      [0.075, 0.17, 0.045],
+      0,
+    )
+    indices.push(a, b, c)
+  }
+
+  // Fourteen warm-white ray petals make the head read as a daisy rather than
+  // the sparse dark star produced by the original seven dusty-blue petals.
+  // Width remains finite at root and tip, avoiding coincident fan vertices.
+  const petals = 14
+  const petalRows = 4
+  for (let petal = 0; petal < petals; petal++) {
+    const angle = (petal / petals) * Math.PI * 2 + 0.18
+    const direction = new Vector3(Math.cos(angle), 0, Math.sin(angle))
+    const side = new Vector3(-Math.sin(angle), 0, Math.cos(angle))
+    const normal = new Vector3(direction.x * 0.28, 0.94, direction.z * 0.28).normalize()
+    const base = positions.length / 3
+    for (let row = 0; row <= petalRows; row++) {
+      const t = row / petalRows
+      const centre = head
+        .clone()
+        .addScaledVector(direction, 0.004 + t * 0.052)
+        .addScaledVector(up, 0.003 + Math.sin(t * Math.PI) * 0.012 - t * 0.004)
+      const halfWidth = 0.0035 + Math.sin(t * Math.PI) * 0.009
+      const baseColor: readonly [number, number, number] = [0.9, 0.9, 0.86]
+      const tipColor: readonly [number, number, number] = [1, 0.99, 0.95]
+      const color: readonly [number, number, number] = [
+        baseColor[0] + (tipColor[0] - baseColor[0]) * t,
+        baseColor[1] + (tipColor[1] - baseColor[1]) * t,
+        baseColor[2] + (tipColor[2] - baseColor[2]) * t,
+      ]
+      for (const sign of [-1, 1] as const) {
+        pushVertex(centre.clone().addScaledVector(side, halfWidth * sign), normal, sign < 0 ? 0 : 1, color, 1)
+      }
+    }
+    for (let row = 0; row < petalRows; row++) {
+      const a = base + row * 2
+      indices.push(a, a + 2, a + 1, a + 1, a + 2, a + 3)
+    }
+  }
+
+  // Raised ochre disc: side wall plus a shallow domed top.
+  const discSegments = 12
+  const discRadius = 0.014
+  const lower: number[] = []
+  const upper: number[] = []
+  for (let segment = 0; segment < discSegments; segment++) {
+    const angle = (segment / discSegments) * Math.PI * 2
+    const direction = new Vector3(Math.cos(angle), 0, Math.sin(angle))
+    lower.push(
+      pushVertex(
+        head.clone().addScaledVector(direction, discRadius).addScaledVector(up, 0.004),
+        direction,
+        segment / discSegments,
+        [0.42, 0.29, 0.07],
+        1,
+      ),
+    )
+    upper.push(
+      pushVertex(
+        head.clone().addScaledVector(direction, discRadius * 0.82).addScaledVector(up, 0.012),
+        new Vector3(direction.x * 0.35, 0.94, direction.z * 0.35).normalize(),
+        segment / discSegments,
+        [0.62, 0.46, 0.12],
+        1,
+      ),
+    )
+  }
+  const crown = pushVertex(
+    head.clone().addScaledVector(up, 0.016),
+    up,
+    0.5,
+    [0.72, 0.56, 0.18],
+    1,
+  )
+  for (let segment = 0; segment < discSegments; segment++) {
+    const next = (segment + 1) % discSegments
+    indices.push(lower[segment], upper[segment], lower[next])
+    indices.push(lower[next], upper[segment], upper[next])
+    indices.push(upper[segment], crown, upper[next])
+  }
+
+  const geometry = new BufferGeometry()
+  geometry.setAttribute('position', new Float32BufferAttribute(positions, 3))
+  geometry.setAttribute('normal', new Float32BufferAttribute(normals, 3))
+  geometry.setAttribute('uv', new Float32BufferAttribute(uvs, 2))
+  geometry.setAttribute('color', new Float32BufferAttribute(colors, 3))
+  geometry.setAttribute('aBloom', new Float32BufferAttribute(blooms, 1))
+  geometry.setIndex(indices)
+  geometry.computeBoundingSphere()
+  return geometry
+}
+
 export interface CardSpec {
   /** Rotation about the plant's axis. */
   yaw: number
@@ -302,27 +527,6 @@ export function broadLeafBush(cards = 5, height = 0.72): CardSpec[] {
       columns: 2,
       rows: 3,
       round: 0.7,
-    }
-  })
-}
-
-/** Low mat: cards laid nearly flat, filling the soil between the heroes. */
-export function groundcoverMat(cards = 4, height = 0.2): CardSpec[] {
-  return Array.from({ length: cards }, (_, i) => {
-    const t = i / cards
-    return {
-      yaw: t * Math.PI * 2 + 0.4,
-      pitch: 0.85 + ((i * 3) % 3) * 0.12,
-      width: 0.34,
-      height: height * (0.8 + ((i * 11) % 5) / 5 * 0.5),
-      originY: 0.015,
-      originR: 0.03,
-      cup: 0.1,
-      droop: 0.04,
-      depth: 0.45,
-      columns: 2,
-      rows: 2,
-      round: 0.42,
     }
   })
 }

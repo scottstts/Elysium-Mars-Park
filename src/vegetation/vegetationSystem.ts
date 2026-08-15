@@ -24,19 +24,19 @@ import type { VegetationCollider } from './planting'
  * and open ground stays mineral Mars. That is not a compromise between the
  * design doc's "sparse and Mars-feeling" and the reference image's overflowing
  * beds — it is the mechanism that makes both true at once. The plaza and the
- * boulevard read green because 42 walled beds overflow; walk ten metres off
+ * boulevard read green because the generated walled beds overflow; walk ten metres off
  * the paving and you are on raked regolith with rock and a rationed bed.
  *
  * Ownership:
  *   `firstTree.ts`  the 12 m ginkgo — branches, canopy, bark
- *   `planting.ts`   the shared species palette, the 42 planters, the tree pit
+ *   `planting.ts`   the shared species palette, the arc planters, the tree pit
  *   `gardens.ts`    the open-regolith rock groups
  *   `../fountain/fountainPlanting.ts` THE FOUNTAIN's four coping planters
  *   `greenhouse.ts` crop trays and the misting cycle
  *   `species.ts`    plant geometry primitives and the instancing sink
  *   `foliageMaterial.ts` every foliage/bark/rock material in the park
  *
- * Draw-call shape: seven ornamental species + three crop species + one canopy
+ * Draw-call shape: eight ornamental species + three crop species + one canopy
  * + one wood mesh + one merged hard-geometry group. Density is affordable
  * precisely because nothing here is a per-plant object.
  */
@@ -87,7 +87,7 @@ export class VegetationSystem implements GameSystem {
       FIRST_TREE.soilRingRadius,
     )
 
-    // ── The 42 arc planters.
+    // ── Every generated arc planter.
     const planterStats = plantPlanters(palette, writer, rng.fork('planters'))
 
     // ── The rock groups on the open regolith zones.

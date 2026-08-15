@@ -15,6 +15,7 @@ import {
   createBarkMaterial,
   createBladeMaterial,
   createFoliageMaterial,
+  createGrassBloomMaterial,
   createRockMaterial,
   floatAttribute,
   instanceSeed,
@@ -23,7 +24,6 @@ import {
   broadLeafTexture,
   fernFrondTexture,
   flowerSprayTexture,
-  groundcoverTexture,
   pineSprayTexture,
   trailingSprigTexture,
 } from './leafTextures'
@@ -34,7 +34,7 @@ import {
   buildPlant,
   fernRosette,
   flowerSpray,
-  groundcoverMat,
+  grassBloomCluster,
   pineBough,
   SpeciesInstances,
   trailingSprig,
@@ -43,7 +43,7 @@ import {
 /**
  * THE PLANTERS — the reference image's signature move, and the reconciliation
  * the masterplan asks for: green is LUSH, and it is lush **only inside walls**.
- * Open regolith stays mineral. Forty-two arc planters ring the plaza and the
+ * Open regolith stays mineral. Generated arc planters ring the plaza and the
  * boulevard's inner edge; every one of them overflows.
  *
  * `world/paving.ts` owns the walls, the coping and the soil SURFACE (at
@@ -53,8 +53,9 @@ import {
  * over the middle of every bed.
  *
  * Placement doctrine (SeaPark's, via experience-craft §2.3): NEVER a uniform
- * sprinkle. Every species is clustered — a handful of parents, each seeding
- * two to four children — so the beds read as planted rather than scattered.
+ * sprinkle. Grass uses a fertility-weighted Poisson disk, with juvenile roots
+ * attracted toward established clumps; the other species retain authored
+ * parent/child colonies. The beds read as living communities, not scatter.
  */
 
 /** Soil surface above the paving slab, from paving's own constants. */
@@ -68,6 +69,20 @@ const SOIL_LIFT = PLANTER.rimY - PLANTER.soilDrop
  */
 const TRAM_SWEPT_INNER = 94.5
 
+/**
+ * The low layer is juvenile sedge, not a flattened broadleaf card. Its roots
+ * sit just under the soil and even the smallest allowed instance clears more
+ * than 23 cm, so it cannot collapse into the black rings seen in the owner
+ * screenshots. The mature `sedge` recipe remains deliberately unchanged.
+ */
+export const YOUNG_SEDGE = {
+  height: 0.31,
+  bury: 0.008,
+  minVisibleHeight: 0.23,
+  bloomChanceMin: 0.32,
+  bloomChanceMax: 0.64,
+} as const
+
 export type VegetationCollider =
   | { kind: 'box'; center: Vector3; size: Vector3; yaw: number }
   | { kind: 'cylinder'; center: Vector3; radius: number; halfHeight: number }
@@ -78,20 +93,20 @@ interface Recipe {
   sedge: number
   fern: number
   broad: number
-  cover: number
+  young: number
   flower: number
 }
 
 /**
  * Four planting recipes, cycled with a seeded offset. The point is not
  * randomness — it is that walking the boulevard shows you four different beds
- * rather than one bed forty-two times.
+ * rather than one repeated bed all the way around the park.
  */
 const RECIPES: Recipe[] = [
-  { label: 'understory', sedge: 3.1, fern: 2.9, broad: 1.6, cover: 2.9, flower: 0.12 },
-  { label: 'sedge-bank', sedge: 5.8, fern: 1.0, broad: 0.55, cover: 2.3, flower: 0.06 },
-  { label: 'foreground', sedge: 2.3, fern: 2.1, broad: 2.6, cover: 3.1, flower: 0.19 },
-  { label: 'fernery', sedge: 2.0, fern: 3.7, broad: 1.2, cover: 2.7, flower: 0.05 },
+  { label: 'understory', sedge: 3.1, fern: 2.9, broad: 1.6, young: 2.9, flower: 0.12 },
+  { label: 'sedge-bank', sedge: 5.8, fern: 1.0, broad: 0.55, young: 2.3, flower: 0.06 },
+  { label: 'foreground', sedge: 2.3, fern: 2.1, broad: 2.6, young: 3.1, flower: 0.19 },
+  { label: 'fernery', sedge: 2.0, fern: 3.7, broad: 1.2, young: 2.7, flower: 0.05 },
 ]
 
 export interface PlantingStats {
@@ -103,7 +118,7 @@ export interface PlantingStats {
 }
 
 /**
- * One palette for the whole park: seven species, seven draw calls. Everything
+ * One palette for the whole park: eight species, eight draw calls. Everything
  * green — planters, the tree's collar, the garden beds — comes out of here, so
  * the planting reads as one designed system instead of three unrelated sets.
  */
@@ -111,10 +126,11 @@ export class PlantingPalette {
   readonly sedge: SpeciesInstances
   readonly fern: SpeciesInstances
   readonly broadleaf: SpeciesInstances
-  readonly cover: SpeciesInstances
   readonly trailing: SpeciesInstances
   readonly flower: SpeciesInstances
   readonly pine: SpeciesInstances
+  private readonly youngSedge: SpeciesInstances
+  private readonly grassBloom: SpeciesInstances
   readonly materials: Record<string, Material>
 
   constructor() {
@@ -176,23 +192,38 @@ export class PlantingPalette {
       true,
     )
 
-    this.cover = new SpeciesInstances(
-      'cover',
-      buildPlant(groundcoverMat(4, 0.24)),
-      createFoliageMaterial({
-        map: groundcoverTexture(),
-        seed: instanceSeed(),
-        depth: floatAttribute('aDepth'),
-        tintCool: new Color(0.62, 0.76, 0.66),
-        tintWarm: new Color(1.0, 1.02, 0.8),
-        transmit: new Color(0.26, 0.46, 0.15),
-        backlight: 0.5,
-        sway: 0.012,
-        alphaTest: 0.34,
-        far: 24,
+    this.youngSedge = new SpeciesInstances(
+      'young-sedge',
+      bladeCluster({
+        height: YOUNG_SEDGE.height,
+        width: 0.008,
+        segments: 5,
+        planes: 6,
+        lean: 0.095,
       }),
-      // Buried in a planter under everything else: its shadow is never seen,
-      // and 2 400 instances is a real shadow-pass cost.
+      createBladeMaterial({
+        height: YOUNG_SEDGE.height,
+        seed: instanceSeed(),
+        rootColor: new Color(0.045, 0.074, 0.03),
+        tipColor: new Color(0.13, 0.19, 0.064),
+        rootColorAlt: new Color(0.04, 0.078, 0.046),
+        tipColorAlt: new Color(0.1, 0.168, 0.078),
+        transmit: new Color(0.28, 0.43, 0.13),
+        backlight: 0.46,
+        bend: 0.24,
+        far: 28,
+      }),
+      // The low layer is buried under the mature canopy; omitting it from the
+      // shadow pass avoids thousands of tiny redundant casters.
+      false,
+    )
+
+    this.grassBloom = new SpeciesInstances(
+      'grass-bloom',
+      grassBloomCluster(),
+      createGrassBloomMaterial(),
+      // These are small accents below the mature canopy; the modeled form is
+      // visible in the main pass without paying for hundreds of tiny casters.
       false,
     )
 
@@ -273,7 +304,67 @@ export class PlantingPalette {
   }
 
   all(): SpeciesInstances[] {
-    return [this.sedge, this.fern, this.broadleaf, this.cover, this.trailing, this.flower, this.pine]
+    return [
+      this.sedge,
+      this.fern,
+      this.broadleaf,
+      this.youngSedge,
+      this.grassBloom,
+      this.trailing,
+      this.flower,
+      this.pine,
+    ]
+  }
+
+  /**
+   * Place one short rooted grass clump. Two random draws match the old cover
+   * call (yaw + scale), so fixing this layer does not reshuffle every plant
+   * and stone generated after it. Horizontal form and tilt derive from those
+   * same values, keeping variation clump-level and deterministic.
+   */
+  addYoungSedge(
+    soilPosition: Vector3,
+    rng: Rng,
+    minHeightScale = 0.84,
+    maxHeightScale = 1.34,
+  ): void {
+    const yaw = rng.range(0, Math.PI * 2)
+    const heightScale = rng.range(minHeightScale, maxHeightScale)
+    const form = Math.sin(yaw * 3.17 + heightScale * 5.31) * 0.5 + 0.5
+    const widthScale = 0.9 + form * 0.24
+    const depthScale = 0.92 + (1 - form) * 0.2
+    const tiltX = (form - 0.5) * 0.1
+    const tiltZ = Math.sin(yaw * 1.73) * 0.05
+    this.youngSedge.addStretched(
+      new Vector3(soilPosition.x, soilPosition.y - YOUNG_SEDGE.bury, soilPosition.z),
+      yaw,
+      new Vector3(widthScale, heightScale, depthScale),
+      tiltX,
+      tiltZ,
+    )
+
+    // Flowering is a deterministic trait of the clump, derived from the same
+    // two values as its form. No extra random draw means the improvement does
+    // not reshuffle later planting. The flower shares the grass root exactly.
+    const bloomSeed = Math.sin(yaw * 12.9898 + heightScale * 78.233) * 43758.5453
+    const bloomTrait = bloomSeed - Math.floor(bloomSeed)
+    // A smooth world-space field forms flowering colonies instead of an
+    // independent salt-and-pepper scatter. Local probability ranges from
+    // 32–64%, averaging roughly four times the former 11% share.
+    const patch = grassFertilityAt(soilPosition)
+    const localChance =
+      YOUNG_SEDGE.bloomChanceMin +
+      (YOUNG_SEDGE.bloomChanceMax - YOUNG_SEDGE.bloomChanceMin) * patch
+    if (bloomTrait < localChance) {
+      const bloomScale = 0.94 + (bloomTrait / localChance) * 0.18
+      this.grassBloom.addStretched(
+        new Vector3(soilPosition.x, soilPosition.y - YOUNG_SEDGE.bury, soilPosition.z),
+        yaw + (form - 0.5) * 0.35,
+        new Vector3(widthScale, bloomScale, depthScale),
+        tiltX * 0.45,
+        tiltZ * 0.45,
+      )
+    }
   }
 
   meshes(): InstancedMesh[] {
@@ -315,6 +406,116 @@ function soilAt(x: number, z: number, across: number): number {
   return slabTop(x, z) + SOIL_LIFT + Math.sin(Math.PI * across) * 0.03
 }
 
+/** Smooth world-space fertility shared by grass acceptance and daisies. */
+export function grassFertilityAt(point: Vector3): number {
+  const macro =
+    Math.sin(point.x * 0.19 + point.z * 0.13 + Math.sin(point.z * 0.09) * 1.8) * 0.5 +
+    0.5
+  const meso = Math.sin(point.x * 0.53 - point.z * 0.41 + 1.7) * 0.5 + 0.5
+  return Math.max(0, Math.min(1, Math.pow(macro * 0.72 + meso * 0.28, 1.28)))
+}
+
+export interface WeightedGrassSampleOptions {
+  rng: Rng
+  count: number
+  /** Available soil area in square metres. */
+  area: number
+  /** Area-correct candidate already seated on the soil surface. */
+  candidate: () => Vector3
+  /** Mature roots attract juvenile candidates without collapsing spacing. */
+  attractors?: readonly Vector3[]
+  spacingFactor?: number
+}
+
+/**
+ * Weighted Poisson-disk sampling for grass. Fertility rejects candidates in
+ * lean patches; the disk test prevents overlaps; juvenile attraction raises
+ * probability near mature roots while retaining its own exclusion radius.
+ */
+export function sampleWeightedGrassPoints(options: WeightedGrassSampleOptions): Vector3[] {
+  const {
+    rng,
+    count,
+    area,
+    candidate,
+    attractors = [],
+    spacingFactor = 0.62,
+  } = options
+  if (count <= 0) return []
+
+  const baseSpacing = Math.sqrt(Math.max(0.001, area) / count) * spacingFactor
+  const minimumSpacing = baseSpacing * 0.66
+  const cellSize = Math.max(0.001, minimumSpacing / Math.SQRT2)
+  const cells = new Map<string, Vector3[]>()
+  const accepted: Vector3[] = []
+  let spacing = baseSpacing
+  let dryAttempts = 0
+  let attempts = 0
+  const maxAttempts = Math.max(1_200, count * 320)
+
+  const cellOf = (value: number): number => Math.floor(value / cellSize)
+  const keyOf = (x: number, z: number): string => `${x}:${z}`
+  const separated = (point: Vector3): boolean => {
+    const cx = cellOf(point.x)
+    const cz = cellOf(point.z)
+    const radius = Math.ceil(spacing / cellSize)
+    const spacingSq = spacing * spacing
+    for (let dz = -radius; dz <= radius; dz++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const bucket = cells.get(keyOf(cx + dx, cz + dz))
+        if (!bucket) continue
+        for (const other of bucket) {
+          const ox = point.x - other.x
+          const oz = point.z - other.z
+          if (ox * ox + oz * oz < spacingSq) return false
+        }
+      }
+    }
+    return true
+  }
+
+  while (accepted.length < count && attempts < maxAttempts) {
+    attempts++
+    const point = candidate()
+    // Keep a small colonisation chance in lean soil, but make fertile bands
+    // decisively more likely so a fixed instance budget still reads patchy.
+    let weight = 0.08 + grassFertilityAt(point) * 0.92
+    if (attractors.length > 0) {
+      let nearestSq = Infinity
+      for (const root of attractors) {
+        const dx = point.x - root.x
+        const dz = point.z - root.z
+        nearestSq = Math.min(nearestSq, dx * dx + dz * dz)
+      }
+      const rootClearance = Math.max(baseSpacing * 0.32, 0.075)
+      if (nearestSq < rootClearance * rootClearance) weight = 0
+      // Root-family affinity should be local. A broad radius makes almost the
+      // whole bed equally attractive once mature grass is dense, reducing the
+      // blend back to an unrelated weighted scatter.
+      const attractionRadius = Math.max(baseSpacing * 1.05, 0.2)
+      const affinity = Math.exp(-nearestSq / (2 * attractionRadius * attractionRadius))
+      weight *= 0.34 + affinity * 0.66
+    }
+    if (weight <= 0 || rng.float() > weight || !separated(point)) {
+      dryAttempts++
+      if (dryAttempts > Math.max(80, count * 10)) {
+        spacing = Math.max(minimumSpacing, spacing * 0.9)
+        dryAttempts = 0
+      }
+      continue
+    }
+    accepted.push(point)
+    const cx = cellOf(point.x)
+    const cz = cellOf(point.z)
+    const key = keyOf(cx, cz)
+    const bucket = cells.get(key)
+    if (bucket) bucket.push(point)
+    else cells.set(key, [point])
+    dryAttempts = 0
+  }
+  return accepted
+}
+
 function place(planter: PlanterSpec, across: number, along: number): SectorSample {
   const { inner, outer } = fillBounds(planter)
   const r = inner + across * (outer - inner)
@@ -322,6 +523,30 @@ function place(planter: PlanterSpec, across: number, along: number): SectorSampl
   const x = planter.cx + Math.cos(angle) * r
   const z = planter.cz + Math.sin(angle) * r
   return { x, z, across, y: soilAt(x, z, across) }
+}
+
+function sectorArea(planter: PlanterSpec, acrossMin: number, acrossMax: number): number {
+  const { inner, outer } = fillBounds(planter)
+  const width = outer - inner
+  const minRadius = inner + width * acrossMin
+  const maxRadius = inner + width * acrossMax
+  return 0.5 * (planter.a1 - planter.a0) * (maxRadius * maxRadius - minRadius * minRadius)
+}
+
+function randomSectorGrassPoint(
+  planter: PlanterSpec,
+  rng: Rng,
+  acrossMin: number,
+  acrossMax: number,
+): Vector3 {
+  const { inner, outer } = fillBounds(planter)
+  const width = outer - inner
+  const minRadius = inner + width * acrossMin
+  const maxRadius = inner + width * acrossMax
+  const radius = Math.sqrt(rng.range(minRadius * minRadius, maxRadius * maxRadius))
+  const across = (radius - inner) / width
+  const sample = place(planter, across, rng.range(0.015, 0.985))
+  return new Vector3(sample.x, sample.y, sample.z)
 }
 
 /**
@@ -387,7 +612,7 @@ function sampleSector(
 
 /**
  * Fill every planter. Species are layered by height with the tall material
- * pulled off the edges, groundcover pushed INTO them, and trailing sprigs
+ * pulled off the edges, juvenile grass pushed INTO them, and trailing sprigs
  * rooted just inside the coping so the planting breaks the hard white line —
  * which is exactly what the reference image's beds do.
  */
@@ -410,9 +635,16 @@ export function plantPlanters(
     // Tall planting keeps clear of the tram side entirely.
     const outerLimit = planter.rOuter + 0.4 < TRAM_SWEPT_INNER ? 0.9 : 0.6
 
-    for (const sample of sampleSector(planter, rng, Math.round(area * recipe.sedge * lush), 0.06, 0.94, 0.5)) {
+    const matureGrassRoots = sampleWeightedGrassPoints({
+      rng,
+      count: Math.round(area * recipe.sedge * lush),
+      area: sectorArea(planter, 0.06, 0.94),
+      candidate: () => randomSectorGrassPoint(planter, rng, 0.06, 0.94),
+      spacingFactor: 0.58,
+    })
+    for (const root of matureGrassRoots) {
       palette.sedge.add(
-        new Vector3(sample.x, sample.y - 0.03, sample.z),
+        root.clone().add(new Vector3(0, -0.03, 0)),
         rng.range(0, Math.PI * 2),
         rng.range(0.78, 1.22),
         rng.range(-0.1, 0.1),
@@ -437,14 +669,20 @@ export function plantPlanters(
         rng.range(-0.08, 0.08),
       )
     }
-    // Groundcover is low and small — it may hug the walls far closer than
-    // the tall species without ever reaching through them.
-    for (const sample of sampleSector(planter, rng, Math.round(area * recipe.cover * lush), 0.02, 0.98, 0.55, 0.05)) {
-      palette.cover.add(
-        new Vector3(sample.x, sample.y - 0.02, sample.z),
-        rng.range(0, Math.PI * 2),
-        rng.range(0.95, 1.6),
-      )
+    // Juvenile sedge closes the soil without the flattened alpha-card mats
+    // that used to read as deformed plants. Its own Poisson radius prevents
+    // overlaps, while mature-root attraction blends both ages and their
+    // daisies into the same fertile colonies.
+    const youngGrassRoots = sampleWeightedGrassPoints({
+      rng,
+      count: Math.round(area * recipe.young * lush),
+      area: sectorArea(planter, 0.02, 0.98),
+      candidate: () => randomSectorGrassPoint(planter, rng, 0.02, 0.98),
+      attractors: matureGrassRoots,
+      spacingFactor: 0.54,
+    })
+    for (const root of youngGrassRoots) {
+      palette.addYoungSedge(root, rng, 0.9, 1.38)
     }
     const flowerCount = Math.round(area * recipe.flower)
     for (const sample of sampleSector(planter, rng, flowerCount, 0.25, outerLimit - 0.1, 0.3)) {
@@ -623,7 +861,7 @@ function emitDwarfPine(
  * The tree pit. The plaza is a continuous paved disc, so without this the
  * First Tree grows out of a slab. It is built from paving's own PLANTER
  * constants and its own concrete material, so it reads as one family with the
- * forty-two arc beds rather than as a separate object.
+ * generated arc beds rather than as a separate object.
  *
  * The wall is ONE closed swept shell (a loft that wraps in both u and v), so
  * there are no caps, no seams and nothing to z-fight. It is bedded 5 cm INTO
@@ -769,7 +1007,21 @@ export function plantTreeCollar(
     }
   }
 
-  scatter(Math.round(area * 8.4), innerClear, outerClear, (p) => {
+  const randomGrassPoint = (min: number, max: number): Vector3 => {
+    const angle = rng.range(0, Math.PI * 2)
+    const r = Math.sqrt(rng.range(min * min, max * max))
+    const x = cx + Math.cos(angle) * r
+    const z = cz + Math.sin(angle) * r
+    return new Vector3(x, soilY(x, z, r), z)
+  }
+  const matureGrassRoots = sampleWeightedGrassPoints({
+    rng,
+    count: Math.round(area * 8.4),
+    area,
+    candidate: () => randomGrassPoint(innerClear, outerClear),
+    spacingFactor: 0.58,
+  })
+  for (const p of matureGrassRoots) {
     palette.sedge.add(
       p.clone().add(new Vector3(0, -0.03, 0)),
       rng.range(0, Math.PI * 2),
@@ -777,14 +1029,16 @@ export function plantTreeCollar(
       rng.range(-0.1, 0.1),
       rng.range(-0.1, 0.1),
     )
+  }
+  const youngGrassRoots = sampleWeightedGrassPoints({
+    rng,
+    count: Math.round(area * 4.2),
+    area,
+    candidate: () => randomGrassPoint(innerClear, outerClear),
+    attractors: matureGrassRoots,
+    spacingFactor: 0.52,
   })
-  scatter(Math.round(area * 4.2), innerClear, outerClear, (p) => {
-    palette.cover.add(
-      p.clone().add(new Vector3(0, -0.02, 0)),
-      rng.range(0, Math.PI * 2),
-      rng.range(0.85, 1.5),
-    )
-  })
+  for (const p of youngGrassRoots) palette.addYoungSedge(p, rng, 0.88, 1.35)
   scatter(Math.round(area * 1.7), innerClear + 0.5, outerClear - 0.3, (p) => {
     palette.fern.add(
       p.clone().add(new Vector3(0, -0.03, 0)),
@@ -836,30 +1090,35 @@ export function plantBed(palette: PlantingPalette, rng: Rng, bed: BedSpec): void
   const local = (lx: number, lz: number): Vector3 =>
     new Vector3(bed.x + lx * cos + lz * sin, bed.y, bed.z - lx * sin + lz * cos)
 
-  const clumps = Math.max(2, Math.round(area * bed.density * 0.3))
-  for (let c = 0; c < clumps; c++) {
-    const cxLocal = rng.range(-bed.halfX + 0.25, bed.halfX - 0.25)
-    const czLocal = rng.range(-bed.halfZ + 0.25, bed.halfZ - 0.25)
-    const members = rng.int(2, 5)
-    for (let m = 0; m < members; m++) {
-      const p = local(
-        Math.min(bed.halfX - 0.15, Math.max(-bed.halfX + 0.15, cxLocal + rng.range(-0.35, 0.35))),
-        Math.min(bed.halfZ - 0.15, Math.max(-bed.halfZ + 0.15, czLocal + rng.range(-0.35, 0.35))),
-      )
-      palette.sedge.add(
-        p.clone().add(new Vector3(0, -0.03, 0)),
-        rng.range(0, Math.PI * 2),
-        rng.range(0.6, 1.15),
-        rng.range(-0.12, 0.12),
-        rng.range(-0.12, 0.12),
-      )
-      if (rng.float() < 0.3) {
-        palette.cover.add(
-          p.clone().add(new Vector3(rng.range(-0.2, 0.2), -0.02, rng.range(-0.2, 0.2))),
-          rng.range(0, Math.PI * 2),
-          rng.range(0.7, 1.1),
-        )
-      }
-    }
+  const margin = Math.min(0.25, bed.halfX * 0.2, bed.halfZ * 0.2)
+  const usableHalfX = Math.max(0.02, bed.halfX - margin)
+  const usableHalfZ = Math.max(0.02, bed.halfZ - margin)
+  const usableArea = usableHalfX * usableHalfZ * 4
+  const candidate = (): Vector3 =>
+    local(rng.range(-usableHalfX, usableHalfX), rng.range(-usableHalfZ, usableHalfZ))
+  const matureGrassRoots = sampleWeightedGrassPoints({
+    rng,
+    count: Math.max(4, Math.round(area * bed.density)),
+    area: usableArea,
+    candidate,
+    spacingFactor: 0.6,
+  })
+  for (const p of matureGrassRoots) {
+    palette.sedge.add(
+      p.clone().add(new Vector3(0, -0.03, 0)),
+      rng.range(0, Math.PI * 2),
+      rng.range(0.6, 1.15),
+      rng.range(-0.12, 0.12),
+      rng.range(-0.12, 0.12),
+    )
   }
+  const youngGrassRoots = sampleWeightedGrassPoints({
+    rng,
+    count: Math.round(matureGrassRoots.length * 0.3),
+    area: usableArea,
+    candidate,
+    attractors: matureGrassRoots,
+    spacingFactor: 0.52,
+  })
+  for (const p of youngGrassRoots) palette.addYoungSedge(p, rng, 0.82, 1.18)
 }

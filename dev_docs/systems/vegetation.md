@@ -9,7 +9,7 @@ Rebuilt from scratch against `ref_images/mars_park.png`. Files under
 `design.md` says vegetation is sparse and Mars-feeling; the reference image
 shows planters overflowing. Both are true at once, and the mechanism is the
 **wall**: green is lush *inside* raised planters and glass buildings, and open
-ground stays mineral. The plaza and boulevard read green because 42 walled
+ground stays mineral. The plaza and boulevard read green because the generated walled
 beds overflow — walk ten metres off the paving and you are on raked regolith
 with rock and a rationed steel-edged bed. Densifying the gardens, or thinning
 the planters, breaks the idea rather than balancing it.
@@ -24,7 +24,7 @@ the planters, breaks the idea rather than balancing it.
   by `planting.buildTreeRing`, not by paving — the plaza is a continuous paved
   disc and without the pit the tree grows out of a slab. It is built from
   paving's own `PLANTER` constants and `createConcreteMaterial()` so it reads
-  as one family with the 42 arc beds. **If the ground agent ever adds a tree
+  as one family with the generated arc beds. **If the ground agent ever adds a tree
   surround, delete this instead of having two.**
 - `farmside.ts` publishes `CROP_TRAY_SURFACES` / `MIST_NOZZLES`;
   `hydroTower.ts` publishes `HYDRO_SHELVES`. `greenhouse.ts` consumes them and
@@ -78,7 +78,7 @@ four resolved rings per junction, and enforces the one-site/one-leaf contract.
 
 ## Species and instancing
 
-Seven ornamental species + three crop species, one `InstancedMesh` each.
+Eight ornamental species + three crop species, one `InstancedMesh` each.
 `species.ts` has two construction families chosen by viewing distance:
 
 - `bladeCluster()` — real tapered strips for sedge and the tree collar, with
@@ -92,8 +92,62 @@ Seven ornamental species + three crop species, one `InstancedMesh` each.
 Both bake `aDepth` (0 outside the plant, 1 buried in its middle). The foliage
 material uses it to darken the interior and kill the backlight there — free
 self-occlusion, and the cheapest single thing that stops a shrub reading as a
-sticker. Placement is always clustered (parents seeding 2–4 children), never a
-uniform sprinkle.
+sticker. Ferns, broadleaf and trailing plants retain parent/child colonies;
+grass uses the weighted Poisson system below. Nothing uses a uniform sprinkle.
+
+### Grass layers and flowering clumps (2026-08-15)
+
+The mature `sedge` is intentionally byte-for-byte unchanged: 0.50 m tall,
+seven intersecting blade planes, 84 triangles per clump. It was already the
+successful fully grown grass in the owner screenshots.
+
+The malformed low plants were not that sedge. They were `cover`: four tilted
+alpha cards, each painting dozens of spatulate leaves, uniformly scaled as low
+as `0.7×` and buried 2 cm. Near the soil those cards collapsed into black
+rings. That recipe no longer participates in park planting. Every former
+cover site now calls `PlantingPalette.addYoungSedge()` and receives:
+
+- a real six-plane, 60-triangle blade cluster, 0.31 m authored height;
+- non-uniform clump-level width/depth/height variation derived from the same
+  two random values as the old placement, so downstream planting is not
+  reshuffled;
+- an 8 mm root burial against the exact supplied soil datum;
+- a guaranteed measured emergence of 0.246–0.420 m across the shipped scale
+  ranges, rather than a barely protruding card.
+
+The shared helper is the only low-grass entry point for the First Tree collar,
+all generated park planters, the four fountain bays and rationed garden beds. A smooth
+world-space fertility field drives a local `32–64%` flowering probability
+(49.0% in the fixed audit seed), roughly 4.5 times the former density. The
+eighth ornamental instance draw is one 267-triangle modeled daisy sharing the
+grass root: swept tapered stem, two stem leaves, five sepals, fourteen
+warm-white ray petals and a raised ochre disc. Its vertex colour and `aBloom`
+attributes drive a dedicated material with a restrained neutral emissive floor
+so the white survives deep planter shade; root-to-head UV drives one calm
+rooted sway. Flower selection derives from the grass yaw/height values and
+consumes no additional PRNG draw.
+
+Mature and juvenile grass placement uses `sampleWeightedGrassPoints()` across
+the same four site types:
+
+- polar beds draw radius with the square root of area, so candidates are
+  area-correct before weighting;
+- a smooth macro/meso fertility field biases accepted roots into broad natural
+  bands while retaining an 8% colonisation chance in lean soil;
+- a spatial hash enforces a Poisson exclusion radius, with bounded relaxation
+  only to 66% of the requested radius so fixed instance budgets cannot overlap
+  into collapsed black masses;
+- juvenile acceptance has a local Gaussian affinity ring around mature roots,
+  a separate mature-root footprint clearance, and its own Poisson exclusion
+  radius. The daisies inherit those juvenile roots and the same fertility
+  field, blending ages and blooms into one plant community rather than three
+  independent distributions.
+
+`tools/grass-audit.mjs` protects the mature geometry, juvenile normal and
+triangle health, the 0.23 m minimum emergence, exact 8 mm burial, modeled
+flower attributes and geometry, a bounded 42–56% flowering subset, warm-white
+ray-petal majority, shared flower/grass roots, fertility correlation, Poisson
+separation and full-count deployment in the tree collar and fountain bays.
 
 ## Materials
 
@@ -110,6 +164,10 @@ uniform sprinkle.
 - Wind is rooted (`rootWeight` weighting, three detuned sines) and lives in
   `positionNode`, which three reuses as the shadow position node — so shadows
   sway with the leaves for free.
+- Modeled grass flowers use vertex colour rather than an alpha sheet. Their
+  `aBloom` mask limits the neutral shade lift and backlight to the petal/head
+  vertices, while root-to-head UV keeps the swept stem, stem leaves and flower
+  moving as one rooted plant.
 
 ## Colliders
 

@@ -3848,3 +3848,37 @@ knowing generally:
   repetition and self-occlusion. Ginkgo short shoots now fan five separate
   sites, and every site maps to one cupped leaf whose `uv.y = 0` petiole stays
   rooted under wind.
+
+## Juvenile grass + rooted procedural flowers (2026-08-15)
+
+- Diagnose the species before tuning a screenshot. The successful upright
+  clumps were the 0.50 m geometric sedge; the arrowed failures were a separate
+  four-card ground-cover recipe, sometimes scaled to `0.7×` and buried 2 cm.
+  Replacing the low recipe preserved the mature grass instead of risking the
+  one layer the owner explicitly liked.
+- A grass scale range is not a visibility contract. Multiply authored height
+  by the minimum Y scale, subtract burial, and audit the result. Juvenile
+  sedge now measures 0.246–0.420 m above soil and roots only 8 mm below it.
+- A flower growing *from* grass must share its root transform, not merely land
+  nearby. Derive its flowering trait from the clump's existing yaw and height,
+  reuse its root, and consume no extra PRNG values; a shared fertility field
+  can then raise local probability without reshuffling the deterministic park.
+
+## Weighted grass colonies + white daisy readability (2026-08-15)
+
+- Independent uniform or parent-jitter scatters make grass ages and flowers
+  look like separate layers. Draw area-correct candidates, weight them with a
+  shared smooth fertility field, then apply a Poisson exclusion test. Bias
+  juvenile acceptance into an affinity ring around mature roots, but retain a
+  small mature-root footprint clearance; let daisies inherit the juvenile root
+  plus the same fertility value. The distribution then communicates one
+  growing community without overlaps.
+- Fixed-count Poisson placement needs a bounded relaxation contract. The grass
+  sampler may relax only to 66% of its area-derived radius, preserving a hard
+  minimum separation while still filling narrow fountain and annular beds.
+  Audit accepted count, minimum distance and fertility lift against a uniform
+  reference rather than judging the seed by eye.
+- A nominally pale petal can still render dark under dense foliage. Fourteen
+  warm-white ray petals (instead of seven dark rays), a yellow raised disc and
+  a small neutral head-only emissive floor keep the daisy identity legible in
+  shade without pushing it into the scene's bloom ladder.

@@ -402,3 +402,49 @@ export function createBladeMaterial(options: BladeOptions): MeshStandardNodeMate
   material.metalness = 0
   return material
 }
+
+/**
+ * Vertex-coloured material for the modeled flowers that emerge from a subset
+ * of juvenile sedge. `aBloom` limits petal transmission to the flower head;
+ * the complete stem still shares one petiole-rooted wind deformation.
+ */
+export function createGrassBloomMaterial(): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial()
+  const seed = instanceSeed()
+  const bloom = floatAttribute('aBloom')
+  const rootWeight = pow(saturate(uv().y), 1.45)
+  const keep = detailKeep(28)
+  const vertexColor = attribute('color', 'vec3') as unknown as Node<'vec3'>
+
+  // The stem base lives under the grass canopy; petal colour stays restrained
+  // until the authored vertex gradient reaches the flower margin.
+  const rootShade = mix(float(0.68), float(1), pow(saturate(uv().y), 0.72))
+  const instanceVariation = seed.mul(0.12).add(0.94)
+  material.colorNode = vec4(vertexColor.mul(rootShade).mul(instanceVariation), 1)
+
+  const back = pow(saturate(positionViewDirection.negate().dot(sunDirectionUniform)), 2.8)
+  // A small neutral lift keeps white petals white in the planter's deep
+  // self-shadow. It remains far below bloom; backlight adds only a little.
+  material.emissiveNode = vertexColor
+    .mul(bloom)
+    .mul(float(0.28).add(back.mul(0.14)))
+
+  // One calm sway for the whole flower. Weight is derived from root-to-head
+  // UV, so the soil contact is exact and the bloom receives the full motion.
+  const phase = seed.mul(TAU)
+  const t = time.mul(0.78)
+  const swing = sin(t.add(phase)).mul(0.7).add(sin(t.mul(1.73).add(phase.mul(1.41))).mul(0.3))
+  const cross = sin(t.mul(0.63).add(phase.mul(2.07)))
+  const amplitude = float(0.018)
+    .mul(foliageWind)
+    .mul(rootWeight)
+    .mul(keep.mul(0.65).add(0.35))
+  material.positionNode = positionLocal.add(
+    vec3(swing.mul(amplitude), swing.mul(amplitude).mul(-0.08), cross.mul(amplitude).mul(0.55)),
+  )
+
+  material.side = DoubleSide
+  material.roughness = 0.76
+  material.metalness = 0
+  return material
+}
