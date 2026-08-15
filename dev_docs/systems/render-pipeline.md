@@ -32,10 +32,13 @@ Choices beyond the code:
   write alpha 1 → exact replace, bit-identical to before; mist/vapour
   override `mrt({ normal: vec4(0) })` → zero authority, G-buffer untouched;
   glazing's `vec4(normalView, 0)` now PRESERVES the background pair
-  (consistent with the background depth glass never writes) instead of
-  forcing receiver 0 — AO seen through glass is the background's own, which
-  is the physically right answer. Any future transparent/additive billboard
-  MUST carry the `vec4(0)` override; the pass default writes alpha 1.
+  instead of forcing receiver 0. Glazing must also set `depthWrite = false`:
+  preserving a background normal while replacing its depth makes the two
+  G-buffer signals describe different surfaces, which GTAO reconstructs as a
+  dark sheet across the pane. With both preserved, AO seen through glass is
+  the background's own, which is the physically right answer. Any future
+  transparent/additive billboard MUST carry the `vec4(0)` override; the pass
+  default writes alpha 1.
 - **`hdrTransform` hook** is where aerial perspective and S4's interior haze
   + shafts transform the HDR image (depth-aware), keeping the pipeline file
   effect-agnostic. Its `HdrTransformContext` is the single owner of post-pass

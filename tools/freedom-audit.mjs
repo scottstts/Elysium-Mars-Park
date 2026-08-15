@@ -11,6 +11,7 @@
  *   - the cab + carrier envelope clears the deck aperture and the waist of
  *     the lattice through the whole travel;
  *   - portal + gallery headroom beats capsule + autostep (2.25 m);
+ *   - gallery glazing preserves the opaque depth/normal pair consumed by GTAO;
  *   - every emitted normal is finite and unit-length; no degenerate faces.
  */
 import { registerHooks } from 'node:module'
@@ -89,6 +90,24 @@ group.traverse((node) => {
 console.log(
   `build ${buildMs.toFixed(0)} ms · ${meshes} part meshes · ${Math.round(tris).toLocaleString()} triangles · ${services.colliders.length} colliders · ${services.seats.length} seats`,
 )
+
+// ---- glazing / GTAO contract ------------------------------------------
+// Glass leaves the normal MRT untouched via an alpha-zero material MRT. It
+// must also leave scene depth untouched or GTAO reconstructs a pane position
+// with the opaque surface's normal/receiver and paints a dark sheet over it.
+for (const name of ['freedom:glass', 'freedom:screen-glass']) {
+  const mesh = group.getObjectByName(name)
+  const material = mesh?.material
+  const valid =
+    mesh?.isMesh === true &&
+    !Array.isArray(material) &&
+    material?.depthWrite === false &&
+    material?.mrtNode != null
+  console.log(
+    `${name} GTAO contract: ${valid ? 'preserves depth + normal' : 'INVALID'}`,
+  )
+  if (!valid) process.exitCode = 1
+}
 
 // ---- normals / degenerates over every part ----------------------------
 let badNormals = 0

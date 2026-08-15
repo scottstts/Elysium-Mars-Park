@@ -100,11 +100,15 @@ system must be the polite one or captions clobber.
   only 2 mm above `Z_DECK`, while the old normalized depth bias represented
   roughly 114 mm in L0. The sun rig now authors 1.5 mm world-space depth and
   normal offsets, restoring contact without moving tower geometry.
-- `curtainGlassMaterial` and `shaftGlass` were missing the AO-receiver mask
-  (`mrt({ normal: vec4(normalView, 0) })`) that every other pane in the park
-  carries, so GTAO darkened the GLASS around the leaning rail, the mullions and
-  the head channel on every bay. Fixed at both materials — which also fixes the
-  Commons drum and the hydro tower, since they share the recipe.
+- Freedom glazing preserves the opaque surface that GTAO sees through it in
+  both buffers: `mrt({ normal: vec4(normalView, 0) })` leaves the background
+  normal/receiver untouched and `depthWrite = false` leaves its matching depth
+  untouched. The earlier receiver-only fix was incomplete: curtain glass still
+  replaced depth, so GTAO reconstructed pane positions with background normals
+  and painted a dark sheet around the leaning rail, mullions and head channel.
+  `curtainGlassMaterial` is shared by the Commons drum and hydro tower, so the
+  corrected pair is park-wide; `tools/freedom-audit.mjs` gates both Freedom
+  glazing materials against this contract.
 
 ## Contracts and consumers
 

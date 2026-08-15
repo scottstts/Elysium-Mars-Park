@@ -556,9 +556,15 @@ export function curtainGlassMaterial(): MeshPhysicalNodeMaterial {
   material.attenuationDistance = 3.2
   material.envMapIntensity = 1
   material.transparent = false
-  // Both faces, and it DOES write depth: the drum is seen through itself, so
-  // the near pane must occlude the far one. (A single Fresnel only — never
-  // stack an authored alpha on a lit material's own, see notes.md W1-dome.)
+  // Transmission is rendered after the opaque scene, but GTAO reconstructs
+  // positions from the scene depth while this material deliberately preserves
+  // the opaque normal/receiver pair below. Writing the pane's depth would make
+  // those two G-buffer signals describe different surfaces and produces the
+  // dark AO sheet seen across the Freedom gallery panes. Preserve BOTH parts
+  // of the opaque surface contract, as heroGlass and the dome shell do.
+  material.depthWrite = false
+  // Both faces. A single Fresnel only — never stack an authored alpha on a lit
+  // material's own, see notes.md W1-dome.
   material.side = DoubleSide
   // AO receiver mask 0, the same override every other glass in the park
   // carries (heroGlass, cabinGlass, milkyPanel, the dome shell). Without it a
@@ -567,8 +573,8 @@ export function curtainGlassMaterial(): MeshPhysicalNodeMaterial {
   // rail, the mullions and the head channel on every Freedom Tower gallery
   // bay (owner report). Occlusion belongs to what the pane is seen THROUGH,
   // never to the pane. The pass-level blend makes this attachment's own alpha
-  // the write authority, so alpha 0 leaves the G-buffer behind the glass
-  // exactly as the opaque world wrote it.
+  // the write authority, so alpha 0 leaves the opaque normal behind the glass;
+  // depthWrite=false above preserves its matching depth.
   material.mrtNode = mrt({ normal: vec4(normalView, 0) })
   return material
 }

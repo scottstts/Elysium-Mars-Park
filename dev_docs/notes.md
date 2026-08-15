@@ -3779,3 +3779,11 @@ knowing generally:
   measured peak 1,302 m / tan(27°) ≈ 2.6 km. A CPU sun-ray audit found 25–38%
   occluded terrain samples across every radial mountain band, so the proxy is
   producing broad lee/ravine shadow rather than merely allocating a texture.
+
+## Transmissive glass must preserve the whole GTAO surface (2026-08-15)
+
+- An alpha-zero normal MRT override is only half of the glass contract. If the
+  pane still writes scene depth, GTAO combines pane depth with the preserved
+  opaque background normal/receiver and produces a dark sheet across the
+  glazing. Transmissive glass that preserves the opaque normal must also set
+  `depthWrite = false`; audit the pair together.
