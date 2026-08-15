@@ -3787,3 +3787,11 @@ knowing generally:
   opaque background normal/receiver and produces a dark sheet across the
   glazing. Transmissive glass that preserves the opaque normal must also set
   `depthWrite = false`; audit the pair together.
+
+## Diagnostic URLs are loopback-only (2026-08-15)
+
+- Gate diagnostic query parameters once, at `parseFlags`, using the literal
+  loopback hostnames `localhost`, `127.0.0.1`, and `[::1]`. Every consumer must
+  use the parsed flags rather than re-reading `window.location.search`; a
+  second read in the render pipeline previously let `?pass=` bypass any
+  central policy. Hosted and lookalike hostnames receive shipped defaults.

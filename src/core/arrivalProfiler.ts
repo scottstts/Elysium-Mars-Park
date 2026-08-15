@@ -103,13 +103,12 @@ function frameScore(record: FrameRecord, gpuMs: number): number {
 }
 
 /**
- * Captures exactly one tram arrival when `?profile=arrival` is present.
+ * Captures exactly one tram arrival after the loopback-gated debug parser has
+ * accepted `?profile=arrival`.
  * Output is a hidden JSON script so browser automation can read it without
  * opening a devtools channel or perturbing the render loop during the shot.
  */
 export function installArrivalProfiler(options: ArrivalProfilerOptions): void {
-  if (new URLSearchParams(window.location.search).get('profile') !== 'arrival') return
-
   const { ctx, loop, registry, tramSnapshot, shadowSnapshot } = options
   const renderer = ctx.renderer as ProfileRenderer
   const records: FrameRecord[] = []

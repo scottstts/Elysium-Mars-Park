@@ -382,8 +382,7 @@ export class RenderPipelineSystem implements GameSystem {
     // Diagnostic taps. AO's raw gather, denoised half-res visibility,
     // full-res reconstruction, projected-radius competence, indirect share,
     // and applied term are all independently isolatable through PassName.
-    const passName =
-      new URLSearchParams(window.location.search).get('pass') ?? (flags.pass as string)
+    const passName = flags.pass
     const aoDebugUv = uv()
       .mul(aoResolution)
       .floor()

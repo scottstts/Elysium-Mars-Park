@@ -13,6 +13,7 @@ export type PassName =
   | 'shafts'
   | 'depth'
   | 'normal'
+  | 'worldray'
   | 'shadows'
   | 'bloom'
   | 'haze'
@@ -30,6 +31,8 @@ export interface DebugFlags {
   debug: boolean
   /** Halt the park clock for a frozen validation frame (?freeze). */
   freeze: boolean
+  /** Capture one instrumented tram arrival (?profile=arrival). */
+  profileArrival: boolean
 }
 
 const PASS_NAMES: readonly PassName[] = [
@@ -45,12 +48,39 @@ const PASS_NAMES: readonly PassName[] = [
   'shafts',
   'depth',
   'normal',
+  'worldray',
   'shadows',
   'bloom',
   'haze',
 ]
 
-export function parseFlags(search = window.location.search): DebugFlags {
+/**
+ * Diagnostic URLs are a local-development capability, never a hosted one.
+ * `window.location.hostname` excludes the port; keep this list to literal
+ * loopback names so lookalike hosted domains cannot opt into debug systems.
+ */
+export function isLocalDiagnosticHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
+
+function disabledFlags(): DebugFlags {
+  return {
+    view: null,
+    pass: 'final',
+    tier: null,
+    seed: null,
+    debug: false,
+    freeze: false,
+    profileArrival: false,
+  }
+}
+
+export function parseFlags(
+  search = window.location.search,
+  hostname = window.location.hostname,
+): DebugFlags {
+  if (!isLocalDiagnosticHost(hostname)) return disabledFlags()
+
   const params = new URLSearchParams(search)
   const passRaw = params.get('pass')
   const tierRaw = params.get('tier')
@@ -62,6 +92,7 @@ export function parseFlags(search = window.location.search): DebugFlags {
     seed: seedRaw !== null && Number.isFinite(Number(seedRaw)) ? Number(seedRaw) : null,
     debug: params.has('debug'),
     freeze: params.has('freeze'),
+    profileArrival: params.get('profile') === 'arrival',
   }
 }
 

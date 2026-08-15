@@ -46,6 +46,12 @@ Quality-neutral runtime rules established by the sweep:
   refreshes, and any lazy WebGPU program/pipeline creation into the hidden
   `#arrival-profile-data` JSON element after docking. Add `?debug` only when
   GPU timestamp queries are specifically required.
+- URL diagnostics are loopback-only. `parseFlags` is the single authority for
+  `view`, `pass`, `tier`, `seed`, `debug`, `freeze`, and `profile=arrival`; it
+  returns shipped defaults on every non-loopback hostname. Consumers must not
+  re-read `window.location.search`, because doing so bypasses the host gate.
+  `tools/diagnostic-gate-audit.mjs` covers localhost, IPv4/IPv6 loopback, and
+  hosted/lookalike hostnames.
 
 Broad static-transform freezing and render-quality reductions were explicitly
 rejected: their ownership or visual equivalence is not provable park-wide.

@@ -255,7 +255,7 @@ async function boot(): Promise<void> {
   if (
     import.meta.env.DEV
     && !validationMode
-    && new URLSearchParams(window.location.search).get('profile') === 'arrival'
+    && flags.profileArrival
   ) {
     const { installArrivalProfiler } = await import('./core/arrivalProfiler')
     installArrivalProfiler({
