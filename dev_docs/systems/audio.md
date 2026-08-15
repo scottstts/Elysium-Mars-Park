@@ -48,3 +48,8 @@
   (`tram.cars/speed/riding`, and `RobotAudioSource` in robotVoice.ts:
   `robots.robots[].rig.group.position / rig.wheelRadius / rig.spinners /
   state / toolPhase`).
+- THE FOUNTAIN retains inverse-distance/directional PannerNode placement but
+  adds a finite post-panner masking gate. Acoustic calibration is 55 dBA at 7
+  m against the 42 dBA dome bed: spherical spreading reaches equal level at
+  31.3 m and −6 dB at 62.4 m, so gain smoothsteps across that interval and is
+  exactly zero beyond it. Do not restore an arbitrary non-zero floor.

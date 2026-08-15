@@ -4,6 +4,7 @@ import {
   Fn, cameraProjectionMatrix, cameraPosition, cameraViewMatrix, float, instanceIndex, max, mix, mrt,
   modelWorldMatrix, mx_noise_float, normalize, positionGeometry, smoothstep, uniform, uv, vec2, vec3, vec4,
 } from 'three/tsl'
+import { DOME_CENTER_Y, DOME_SPHERE_RADIUS } from '../dome/latticeField'
 import { markParticle } from '../render/layers'
 import { ENVIRONMENT_INTENSITY, SUN_LIGHT_INTENSITY, sunColorUniform, sunDirectionUniform } from '../sky/sun'
 import { marsAmbientIrradiance } from '../sky/skyRadiance'
@@ -114,7 +115,25 @@ export function createStarshipPadBlast(center: Vector3, skirtRadius: number): St
     const y = rise.add(isSheet.oneMinus().mul(1.5))
 
     const grow = age.mul(mix(float(1.5), float(3.4), isSheet)).add(3.5)
-    return vec4(pos.x, y, pos.z, grow).toVar()
+
+    // Dome One is a sealed spherical cap. The radial sheet can travel farther
+    // than the 85 m between the pad axis and the glass, so an unconstrained
+    // parcel really does cross the shell. Project the whole billboard outside
+    // the exact dome sphere instead: `grow / sqrt(2)` is its half diagonal,
+    // hence every point of the camera-facing quad remains outside from every
+    // player view, not merely its centre. The projection also gives the
+    // physically expected result when the blast reaches a solid shell: dust
+    // is carried up and around the exterior rather than passing through it.
+    const world = vec3(pos.x.add(center.x), y.add(center.y), pos.z.add(center.z)).toVar()
+    const domeCenter = vec3(0, DOME_CENTER_Y, 0)
+    const fromDomeCenter = world.sub(domeCenter).toVar()
+    const billboardClearance = max(grow, 0).mul(Math.SQRT1_2).add(0.25)
+    const outsideRadius = float(DOME_SPHERE_RADIUS).add(billboardClearance)
+    const constrainedWorld = domeCenter.add(
+      normalize(fromDomeCenter).mul(max(fromDomeCenter.length(), outsideRadius)),
+    )
+    const constrainedLocal = constrainedWorld.sub(vec3(center.x, center.y, center.z))
+    return vec4(constrainedLocal.x, constrainedLocal.y, constrainedLocal.z, grow).toVar()
   })
 
   const ageOf = Fn(() => {
@@ -181,7 +200,10 @@ export function createStarshipPadBlast(center: Vector3, skirtRadius: number): St
   // cloud is; a bounding sphere big enough to hold it stands in for culling.
   mesh.frustumCulled = false
   mesh.boundingSphere = new Sphere(new Vector3(), 400)
-  mesh.renderOrder = 14
+  // Composite before the shell's outer/inner glass passes (orders 9/10). If
+  // transparent dust is drawn afterward it sits on top of the glass even when
+  // its world position is outside, which makes it read as air inside the dome.
+  mesh.renderOrder = 8
   mesh.visible = false
   markParticle(mesh)
 

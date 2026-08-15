@@ -597,6 +597,16 @@ Emission strength is **held and bled off over 26 s**, not tracked live.
 the cloud they already threw does not. Multiplying the particles by the live
 value snapped a 60 m dust column out of existence at engine cut.
 
+The sheet is constrained by Dome One's **exact spherical shell**, not a plan
+circle. Its unconstrained reach exceeds the 85 m gap from vehicle axis to
+glass, so inward parcels otherwise genuinely enter the sealed volume. Each
+parcel centre is projected to at least `DOME_SPHERE_RADIUS + grow / sqrt(2) +
+0.25 m`; `grow / sqrt(2)` is the camera-facing quad's half diagonal, which
+keeps every pixel of the puff outside from every player view while letting the
+blast turn upward around the exterior. The blast composites at render order 8,
+before the exterior/inner glass at 9/10, so the pane response remains visibly
+in front of the outside dust instead of dust alpha being painted over it.
+
 `markParticle` is not optional here — a camera-facing quad rasterises as its
 full rectangle in any depth or shadow pass, and a thousand of them under a
 shadow-casting sun paint a moving grey slab across the valley. That is the

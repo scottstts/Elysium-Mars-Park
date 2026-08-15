@@ -215,8 +215,14 @@ stripe from two metres; occlusion whispers (−18 %, dust only past 0.72).
   ticks once per lap; playback starts at `loopStart` so the first second is
   water, not lead-in. Distance does the mixing: an inverse-law PannerNode at
   the fountain axis under the engine's shared listener pose — audible swell
-  by the court, gone under the room tone by ~40 m. Starts on the same
-  user-gesture event as the rest of the soundscape.
+  by the court. The inverse panner is followed by a finite masking gate derived
+  from spherical spreading, `L(r) = L0 - 20 log10(r/r0)`: the loop is
+  calibrated to 55 dBA at its existing 7 m reference distance against a 42 dBA
+  dome ambient floor. The gate is fully open through 31.3 m (equal level),
+  fades smoothly through the −6 dB masking interval, and is **exactly zero at
+  62.4 m**; the inverse panner continues attenuating inside the open interval.
+  Direction remains the PannerNode's job. Starts on the same user-gesture event
+  as the rest of the soundscape.
 - Colliders: two walkable stylobate cylinders, the coping cylinder, one box
   per planter bay — plus the KEEP-OUT: a solid cylinder at the coping's
   INNER lip rising to 3.4 m. The coping alone stops a walker (0.525 m rise

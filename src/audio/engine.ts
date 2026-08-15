@@ -32,6 +32,39 @@ import type { RobotAudioSource } from './robotVoice'
 type Zone = 'park' | 'interior' | 'tram' | 'tube'
 const MASTER_GAIN = 0.72
 
+/**
+ * THE FOUNTAIN's finite audible field.
+ *
+ * Web Audio samples have no intrinsic dB SPL, so these are the acoustic
+ * calibration targets for this loop: 55 dBA at the existing 7 m panner
+ * reference, against Dome One's 42 dBA HVAC/room-tone floor. Direct water is
+ * considered masked once it is 6 dB below that broadband floor. For a point
+ * source, pressure level follows L(r) = L0 - 20 log10(r / r0), giving:
+ *
+ *   equal to ambient: 7 * 10^((55 - 42) / 20) = 31.3 m
+ *   masked cutoff:    7 * 10^((55 - 36) / 20) = 62.4 m
+ *
+ * The whole interval is a smooth perceptual gate. The PannerNode still owns
+ * inverse-distance attenuation and direction; this gate only supplies the
+ * finite zero that an inverse law can never reach by itself.
+ */
+const FOUNTAIN_REFERENCE_DISTANCE = 7
+const FOUNTAIN_REFERENCE_SPL_DB = 55
+const DOME_AMBIENT_SPL_DB = 42
+const FOUNTAIN_MASKING_MARGIN_DB = 6
+const fountainDistanceAtLevel = (levelDb: number): number =>
+  FOUNTAIN_REFERENCE_DISTANCE * 10 ** ((FOUNTAIN_REFERENCE_SPL_DB - levelDb) / 20)
+const FOUNTAIN_FULL_GAIN_DISTANCE = fountainDistanceAtLevel(DOME_AMBIENT_SPL_DB)
+const FOUNTAIN_CUTOFF_DISTANCE = fountainDistanceAtLevel(
+  DOME_AMBIENT_SPL_DB - FOUNTAIN_MASKING_MARGIN_DB,
+)
+
+function fountainAudibility(distance: number): number {
+  const span = FOUNTAIN_CUTOFF_DISTANCE - FOUNTAIN_FULL_GAIN_DISTANCE
+  const t = Math.max(0, Math.min(1, (FOUNTAIN_CUTOFF_DISTANCE - distance) / span))
+  return t * t * (3 - 2 * t)
+}
+
 export class AudioEngineSystem implements GameSystem {
   readonly id = 'audio'
 
@@ -55,6 +88,8 @@ export class AudioEngineSystem implements GameSystem {
   private tramOsc: OscillatorNode | null = null
   private mistGain: GainNode | null = null
   private ventGain: GainNode | null = null
+  private fountainDistanceGain: GainNode | null = null
+  private fountainSourceY = 0
   private audible = false
 
   private readonly player: PlayerSystem | null
@@ -289,14 +324,22 @@ export class AudioEngineSystem implements GameSystem {
       }
       const gain = context.createGain()
       gain.gain.value = 0.8
+      const distanceGain = context.createGain()
+      // Stay silent until the next listener update establishes the real
+      // source distance; this also prevents a one-frame far-field leak while
+      // the asset finishes decoding.
+      distanceGain.gain.value = 0
       const panner = context.createPanner()
       panner.distanceModel = 'inverse'
-      panner.refDistance = 7
+      panner.refDistance = FOUNTAIN_REFERENCE_DISTANCE
       panner.rolloffFactor = 1.5
+      panner.maxDistance = FOUNTAIN_CUTOFF_DISTANCE
       panner.positionX.value = FOUNTAIN.x
-      panner.positionY.value = interiorHeight(FOUNTAIN.x, FOUNTAIN.z) + 1.4
+      this.fountainSourceY = interiorHeight(FOUNTAIN.x, FOUNTAIN.z) + 1.4
+      panner.positionY.value = this.fountainSourceY
       panner.positionZ.value = FOUNTAIN.z
-      source.connect(gain).connect(panner).connect(master)
+      source.connect(gain).connect(panner).connect(distanceGain).connect(master)
+      this.fountainDistanceGain = distanceGain
       // Start on a loop-interior sample so the very first second is water,
       // not the encoder's lead-in.
       source.start(0, source.loopStart)
@@ -493,6 +536,24 @@ export class AudioEngineSystem implements GameSystem {
       listener.upZ.value = up.z
     }
 
+    // A physical inverse-distance field asymptotically approaches silence but
+    // never reaches it. Fade the direct water through its masking interval and
+    // make it exactly zero at the calculated 62.4 m acoustic cutoff.
+    if (this.fountainDistanceGain) {
+      const distance = Math.hypot(
+        position.x - FOUNTAIN.x,
+        position.y - this.fountainSourceY,
+        position.z - FOUNTAIN.z,
+      )
+      const target = fountainAudibility(distance)
+      const gain = this.fountainDistanceGain.gain
+      // `target === 0` is deliberately assigned, not smoothed: exponential
+      // convergence would recreate the exact non-zero tail this gate removes.
+      gain.value = target === 0
+        ? 0
+        : gain.value + (target - gain.value) * Math.min(1, dt * 4)
+    }
+
     // Zones + crossfades.
     this.zone = this.classifyZone(position)
     const wantInterior = this.zone === 'park' ? 0 : 1
@@ -560,6 +621,7 @@ export class AudioEngineSystem implements GameSystem {
   dispose(): void {
     this.context?.close()
     this.context = null
+    this.fountainDistanceGain = null
     this.audible = false
   }
 }

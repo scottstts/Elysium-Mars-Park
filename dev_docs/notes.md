@@ -3739,3 +3739,16 @@ knowing generally:
   WebAudio on BOARD with master gain zero; release it only on the event emitted
   after the first unpaused render submission. Starting the source graph on the
   gesture is browser policy, not permission for sound to outrun the image.
+
+## Sealed-dome VFX and finite fountain audibility (2026-08-15)
+
+- A world-space particle centre outside a sealed shell is insufficient when
+  the particle is a camera-facing quad: its corners can still cross the shell.
+  Pad-blast puffs are constrained against the exact dome sphere with their
+  half diagonal (`grow / sqrt(2)`) as clearance, and transparent outside dust
+  must composite before the glass or it reads as being inside despite correct
+  coordinates.
+- Inverse-distance audio never reaches zero at finite range. THE FOUNTAIN now
+  uses spherical SPL spreading from its 55 dBA-at-7 m calibration against the
+  42 dBA dome floor: equal at 31.3 m, −6 dB masked at 62.4 m, with a smooth
+  gate between and exact zero beyond.
