@@ -24,11 +24,14 @@ import {
   prismXZ,
   prismYZ,
   revolve,
+  roundedBoxMesh,
   rotX,
   roundedRect,
   smoothShade,
+  transform4,
   translate,
   tubeAlong,
+  writeInto,
   type Vec2,
   type Vec3,
 } from '../archkit/meshdata'
@@ -257,8 +260,12 @@ class Site {
 
   claim(family: string, x: number, z: number, r: number, options?: { offPath?: boolean }): boolean {
     if (this.place(family, x, z, r, options)) return true
-    this.rejects.set(family, (this.rejects.get(family) ?? 0) + 1)
+    this.reject(family)
     return false
+  }
+
+  reject(family: string): void {
+    this.rejects.set(family, (this.rejects.get(family) ?? 0) + 1)
   }
 
   /**
@@ -326,6 +333,14 @@ interface SignFace {
   height: number
   lit: boolean
   mirror?: boolean
+  /** Explicit world-space frame for a face that follows a non-horizontal
+   *  host. Ordinary wall signs use yaw/pitch; pavement markers share the
+   *  sampled frame of their rigid backing instead of re-deriving a tilt. */
+  basis?: {
+    right: Vector3
+    up: Vector3
+    normal: Vector3
+  }
 }
 
 interface AtlasRect {
@@ -542,14 +557,23 @@ function buildSignMeshes(
     for (const face of group.faces) {
       const rect = rects.get(face.art.id)
       if (!rect) continue
-      const cy = Math.cos(face.yaw)
-      const sy = Math.sin(face.yaw)
-      const right = new Vector3(cy, 0, -sy)
-      const n0 = new Vector3(sy, 0, cy)
-      const cp = Math.cos(face.pitch)
-      const sp = Math.sin(face.pitch)
-      const normal = new Vector3(n0.x * cp, sp, n0.z * cp)
-      const up = new Vector3(-n0.x * sp, cp, -n0.z * sp)
+      let right: Vector3
+      let normal: Vector3
+      let up: Vector3
+      if (face.basis) {
+        right = face.basis.right
+        normal = face.basis.normal
+        up = face.basis.up
+      } else {
+        const cy = Math.cos(face.yaw)
+        const sy = Math.sin(face.yaw)
+        right = new Vector3(cy, 0, -sy)
+        const n0 = new Vector3(sy, 0, cy)
+        const cp = Math.cos(face.pitch)
+        const sp = Math.sin(face.pitch)
+        normal = new Vector3(n0.x * cp, sp, n0.z * cp)
+        up = new Vector3(-n0.x * sp, cp, -n0.z * sp)
+      }
       const hw = face.width / 2
       const hh = face.height / 2
       const corner = (sx: number, sv: number): Vector3 =>
@@ -1818,6 +1842,15 @@ interface Dressing {
   banners: BannerSpec[]
   lensCount: Map<string, number>
   lensAnchor: Map<string, Vector3>
+  stencilAudits: GroundStencilAudit[]
+}
+
+interface GroundStencilAudit {
+  x: number
+  z: number
+  minTopClearance: number
+  maxTopClearance: number
+  normalY: number
 }
 
 function art(d: Dressing, spec: SignArt): SignArt {
@@ -1941,12 +1974,22 @@ function dressBoulevard(d: Dressing): void {
   }
 
   // Stencil markers on the boulevard at each stop: the service lane call-out.
+  // Furniture is already in the ledger by this point, so search a short arc
+  // around the desired tangent instead of silently dropping a marker when one
+  // lamp or waste point owns the exact candidate.
   for (const station of LOOP.stations) {
-    const angle = station.angle - 0.2
-    const x = Math.cos(angle) * 101.6
-    const z = Math.sin(angle) * 101.6
-    if (!d.site.claim('stencil', x, z, 1.0)) continue
-    groundStencil(d, x, z, Math.atan2(x, z), 'SERVICE LANE · KEEP CLEAR', 2.1)
+    const wanted = station.angle - 0.2
+    let placed = false
+    for (const offset of [0, -0.035, 0.035, -0.07, 0.07]) {
+      const angle = wanted + offset
+      const x = Math.cos(angle) * 101.6
+      const z = Math.sin(angle) * 101.6
+      if (pavedSignedDistance(x, z) > -0.6 || !d.site.place('stencil', x, z, 1.0)) continue
+      groundStencil(d, x, z, Math.atan2(x, z), 'SERVICE LANE · KEEP CLEAR', 2.1)
+      placed = true
+      break
+    }
+    if (!placed) d.site.reject('stencil')
   }
 }
 
@@ -2009,28 +2052,138 @@ function addEmergencyLabels(d: Dressing, spot: Vector3, yaw: number): void {
   })
 }
 
-/** A stencil marker: a plate bedded in the paving, legend lying face up. */
+const STENCIL_FRAME_DEPTH = 0.44
+const STENCIL_FRAME_THICKNESS = 0.09
+const STENCIL_TOP_CLEARANCE = 0.008
+const STENCIL_FACE_STANDOFF = 0.006
+
+interface GroundStencilFrame {
+  topCenter: Vector3
+  right: Vector3
+  forward: Vector3
+  normal: Vector3
+  minTopClearance: number
+  maxTopClearance: number
+}
+
+/**
+ * Fit one rigid local frame to the walkable surface, then raise that plane by
+ * the worst sampled residual over the complete marker footprint. Sampling
+ * only the centre was the buried-sign defect: the 2.2 m cabinet stayed level
+ * while the boulevard grade climbed through one end of it.
+ */
+function groundStencilFrame(x: number, z: number, yaw: number, width: number): GroundStencilFrame {
+  const frameWidth = width + 0.1
+  const halfWidth = frameWidth / 2
+  const halfDepth = STENCIL_FRAME_DEPTH / 2
+  const rightHorizontal = new Vector3(Math.cos(yaw), 0, -Math.sin(yaw))
+  const forwardHorizontal = new Vector3(Math.sin(yaw), 0, Math.cos(yaw))
+  const height = (u: number, v: number): number =>
+    interiorHeight(
+      x + rightHorizontal.x * u + forwardHorizontal.x * v,
+      z + rightHorizontal.z * u + forwardHorizontal.z * v,
+    )
+  const centerY = height(0, 0)
+  const rightSlope = (height(halfWidth, 0) - height(-halfWidth, 0)) / frameWidth
+  const forwardSlope = (height(0, halfDepth) - height(0, -halfDepth)) / STENCIL_FRAME_DEPTH
+  const right = rightHorizontal.clone().setY(rightSlope).normalize()
+  const forwardEstimate = forwardHorizontal.clone().setY(forwardSlope).normalize()
+  const normal = new Vector3().crossVectors(forwardEstimate, right).normalize()
+  if (normal.y < 0) normal.negate()
+  const forward = new Vector3().crossVectors(right, normal).normalize()
+
+  const planeY = (u: number, v: number, center = centerY): number => {
+    const dx = rightHorizontal.x * u + forwardHorizontal.x * v
+    const dz = rightHorizontal.z * u + forwardHorizontal.z * v
+    return center - (normal.x * dx + normal.z * dz) / normal.y
+  }
+
+  let residualLift = 0
+  for (let iu = 0; iu <= 8; iu++) {
+    const u = -halfWidth + (frameWidth * iu) / 8
+    for (let iv = 0; iv <= 4; iv++) {
+      const v = -halfDepth + (STENCIL_FRAME_DEPTH * iv) / 4
+      residualLift = Math.max(residualLift, height(u, v) - planeY(u, v))
+    }
+  }
+
+  const topCenter = new Vector3(x, centerY + residualLift + STENCIL_TOP_CLEARANCE, z)
+  let minTopClearance = Infinity
+  let maxTopClearance = -Infinity
+  for (let iu = 0; iu <= 8; iu++) {
+    const u = -halfWidth + (frameWidth * iu) / 8
+    for (let iv = 0; iv <= 4; iv++) {
+      const v = -halfDepth + (STENCIL_FRAME_DEPTH * iv) / 4
+      const clearance = planeY(u, v, topCenter.y) - height(u, v)
+      minTopClearance = Math.min(minTopClearance, clearance)
+      maxTopClearance = Math.max(maxTopClearance, clearance)
+    }
+  }
+
+  return { topCenter, right, forward, normal, minTopClearance, maxTopClearance }
+}
+
+/** A rigid, pavement-following stencil marker with its legend face-up. */
 function groundStencil(d: Dressing, x: number, z: number, readYaw: number, text: string, width: number): void {
   if (pavedSignedDistance(x, z) > -0.6) return
   const id = `stencil-${text.replace(/[^A-Z]/g, '').slice(0, 12)}`
   art(d, { id, style: 'stencil', lines: [text], aspect: width / 0.34 })
-  const y = interiorHeight(x, z)
-  d.writer.box({
-    center: new Vector3(x, y - 0.037, z),
-    size: new Vector3(width + 0.1, 0.09, 0.44),
-    rotationY: readYaw,
-    slot: 'dark',
-    chamfer: 0.014,
+  const frame = groundStencilFrame(x, z, readYaw, width)
+  if (frame.minTopClearance < STENCIL_TOP_CLEARANCE - 1e-5) {
+    throw new Error(
+      `ground stencil at ${x.toFixed(2)},${z.toFixed(2)} is buried: ` +
+        `${(frame.minTopClearance * 1000).toFixed(1)} mm clearance`,
+    )
+  }
+  d.stencilAudits.push({
+    x,
+    z,
+    minTopClearance: frame.minTopClearance,
+    maxTopClearance: frame.maxTopClearance,
+    normalY: frame.normal.y,
   })
+
+  // Local axes are X=width, Y=surface normal, Z=reading direction. The box
+  // remains one rigid manufactured plate with its existing 14 mm fillet; only
+  // its support datum changed.
+  const backing = roundedBoxMesh(
+    [
+      -(width + 0.1) / 2,
+      -STENCIL_FRAME_THICKNESS / 2,
+      -STENCIL_FRAME_DEPTH / 2,
+      (width + 0.1) / 2,
+      STENCIL_FRAME_THICKNESS / 2,
+      STENCIL_FRAME_DEPTH / 2,
+    ],
+    0.014,
+    2,
+  )
+  backing.frame = 'y-up'
+  const backingCenter = frame.topCenter
+    .clone()
+    .addScaledVector(frame.normal, -STENCIL_FRAME_THICKNESS / 2)
+  transform4(backing, [
+    [frame.right.x, frame.normal.x, frame.forward.x, backingCenter.x],
+    [frame.right.y, frame.normal.y, frame.forward.y, backingCenter.y],
+    [frame.right.z, frame.normal.z, frame.forward.z, backingCenter.z],
+    [0, 0, 0, 1],
+  ])
+  writeInto(d.writer, 'dark', backing)
   addFace(d, {
     art: d.arts.get(id)!,
-    // The plate faces up; `up` becomes −n0, so yaw points BACK at the reader.
-    center: new Vector3(x, y + 0.014, z),
+    center: frame.topCenter.clone().addScaledVector(frame.normal, STENCIL_FACE_STANDOFF),
     yaw: readYaw + Math.PI,
     pitch: Math.PI / 2,
     width,
     height: 0.34,
     lit: false,
+    // Preserve the existing reading convention: screen-right is opposite the
+    // backing's local +X and the tile's vertical points along +Z.
+    basis: {
+      right: frame.right.clone().negate(),
+      up: frame.forward,
+      normal: frame.normal,
+    },
   })
 }
 
@@ -2975,6 +3128,7 @@ export function buildAmenities(services: DistrictServices): void {
     banners: [],
     lensCount: new Map(),
     lensAnchor: new Map(),
+    stencilAudits: [],
   }
 
   dressGates(d)
@@ -3063,6 +3217,10 @@ export function buildAmenities(services: DistrictServices): void {
       position: [anchor.x, anchor.y, anchor.z],
     })
   }
+
+  // Kept on the build group for the headless amenity gate: all three shared
+  // placements report their actual support clearance, not a boolean.
+  services.group.userData.groundStencilAudits = d.stencilAudits
 
 }
 

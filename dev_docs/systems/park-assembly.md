@@ -133,6 +133,13 @@ a `mirror` flag for a back face: the quad's right vector already flips with the
 yaw. The banner cloth is the one exception — both of its layers share one
 authored right vector, so its back layer does need the u flip.
 
+Ground stencils are the non-horizontal exception: their rigid backing and atlas
+face share one frame fitted from `interiorHeight` across the complete footprint.
+The frame is raised by the largest sampled surface residual plus an 8 mm top
+reveal. `tools/amenity-audit.mjs` requires all three service-lane placements to
+report that clearance, so a centre-height sample cannot bury an end on a cross
+slope again.
+
 ### Ambient motion
 
 Banners and festoons ride a baked `sway` vec3 attribute — `(dirX·w, dirZ·w,

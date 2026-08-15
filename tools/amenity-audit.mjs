@@ -130,6 +130,22 @@ const t0 = Date.now()
 amenities.buildAmenities(services)
 console.log(`buildAmenities: ${Date.now() - t0} ms, ${services.colliders.length} colliders`)
 
+const stencilAudits = group.userData.groundStencilAudits ?? []
+if (stencilAudits.length !== 3) {
+  console.log(`ground stencils: expected 3 placement reports, got ${stencilAudits.length}   <-- FAIL`)
+  failures++
+}
+for (const audit of stencilAudits) {
+  const passes = audit.minTopClearance >= 0.008 - 1e-5
+  console.log(
+    `ground stencil ${audit.x.toFixed(2)},${audit.z.toFixed(2)}` +
+      `  clearance ${(audit.minTopClearance * 1000).toFixed(1)}` +
+      `..${(audit.maxTopClearance * 1000).toFixed(1)} mm` +
+      `  normalY ${audit.normalY.toFixed(5)}${passes ? '' : '   <-- FAIL'}`,
+  )
+  if (!passes) failures++
+}
+
 const built = emit(writer, 'park')
 console.log('writer triangles:', auditGeometry(built, { clash: false }).triangles)
 failures += report('amenities (writer)', built)

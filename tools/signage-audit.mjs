@@ -196,8 +196,8 @@ const extras = [
     system.init({ scene: { add: (o) => group.add(o), remove: () => {} } })
   }],
   ['tramStations', async () => {
-    const { buildStations } = await import('../src/tram/track.ts')
-    buildStations(writer, group, nullPhysics)
+    const { buildSideStations } = await import('../src/world/sideStations.ts')
+    buildSideStations(writer, group, nullPhysics)
   }],
 ]
 

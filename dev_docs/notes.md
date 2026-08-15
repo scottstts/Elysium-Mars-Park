@@ -3824,3 +3824,14 @@ knowing generally:
   property detachment alone is insufficient because the cached target data
   still owns the old depth resource; dynamic resolution can otherwise destroy
   a freshly rendered depth attachment mid-frame.
+
+## Ground-marker support + tram chime spatialization (2026-08-15)
+
+- A wide rigid ground marker cannot use one `interiorHeight` sample. Fit its
+  local frame from width/depth samples, then raise the top plane by the largest
+  full-footprint residual plus the intended reveal; otherwise a cross-slope
+  buries one end while the centre remains numerically correct. The shared
+  service-lane builder records minimum/maximum clearance for all three stops.
+- A world event does not imply world-space audio. The `tram/docked` two-note
+  chime must enter an HRTF `PannerNode` at the car pose before the master bus;
+  direct oscillator-to-master wiring makes the cue uniform and non-directional.

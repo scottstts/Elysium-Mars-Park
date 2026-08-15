@@ -9,6 +9,7 @@ import {
   FARMSIDE,
   FOUNTAIN,
   FREEDOM_TOWER,
+  LOOP,
   OVERLOOK_LOUNGE,
   PORTAL_STATION,
   RESIDENTIAL,
@@ -257,7 +258,7 @@ export class AudioEngineSystem implements GameSystem {
     this.tramPanner = tramPanner
     this.tramOsc = tramOsc
 
-    ctx.events.on('tram/docked', () => this.doorChime())
+    ctx.events.on('tram/docked', ({ station }) => this.doorChime(station))
 
     // Greenhouse mist + reclaimer vents: hiss beds behind panners.
     this.mistGain = this.hissSource(context, master, noiseBuffer, 2600, {
@@ -377,11 +378,43 @@ export class AudioEngineSystem implements GameSystem {
     return gain
   }
 
-  private doorChime(): void {
+  /** The two-note door signal is a source in the tram cabin, not a UI cue. */
+  private doorChime(stationId: string): void {
     const context = this.context
     const master = this.master
     if (!context || !master) return
     const now = context.currentTime
+    const tram = this.tram as unknown as {
+      cars?: Array<{ group: { position: Vector3 } }>
+    } | null
+    const car = tram?.cars?.[0]
+    const station = LOOP.stations.find((candidate) => candidate.id === stationId)
+    const source = car
+      ? new Vector3(car.group.position.x, car.group.position.y + 1.7, car.group.position.z)
+      : station
+        ? new Vector3(
+            Math.cos(station.angle) * LOOP.radius,
+            interiorHeight(
+              Math.cos(station.angle) * LOOP.radius,
+              Math.sin(station.angle) * LOOP.radius,
+            ) + 1.7,
+            Math.sin(station.angle) * LOOP.radius,
+          )
+        : null
+    if (!source) return
+
+    const panner = context.createPanner()
+    panner.panningModel = 'HRTF'
+    panner.distanceModel = 'inverse'
+    panner.refDistance = 4
+    panner.rolloffFactor = 1.5
+    panner.maxDistance = 80
+    panner.positionX.setValueAtTime(source.x, now)
+    panner.positionY.setValueAtTime(source.y, now)
+    panner.positionZ.setValueAtTime(source.z, now)
+    panner.connect(master)
+
+    let playingNotes = 2
     for (const [frequency, offset] of [
       [988, 0],
       [740, 0.16],
@@ -393,7 +426,11 @@ export class AudioEngineSystem implements GameSystem {
       gain.gain.setValueAtTime(0, now + offset)
       gain.gain.linearRampToValueAtTime(0.09, now + offset + 0.02)
       gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.6)
-      osc.connect(gain).connect(master)
+      osc.connect(gain).connect(panner)
+      osc.addEventListener('ended', () => {
+        playingNotes--
+        if (playingNotes === 0) panner.disconnect()
+      }, { once: true })
       osc.start(now + offset)
       osc.stop(now + offset + 0.7)
     }

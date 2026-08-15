@@ -42,7 +42,11 @@
   brush carriage with, so stroke and sound are one event.
 - Sparse thermal glass ticks: 3.4 kHz pings with random stereo pan every
   8–25 s (sim-clock hashed, deterministic).
-- Tram door chime: two-tone (988/740 Hz) on `tram/docked`.
+- Tram door chime: two-tone (988/740 Hz) on `tram/docked`. It is an HRTF
+  inverse-distance point source at the front car's cabin speaker height
+  (`refDistance = 4 m`, `rolloffFactor = 1.5`), so it carries both direction
+  and range instead of behaving like a park-wide UI notification. The station
+  datum is only a fallback if the car pose is unavailable.
 - Private-field peeks into tram/robots use runtime casts — TS `private`
   is compile-time only; keep field names in sync if refactoring
   (`tram.cars/speed/riding`, and `RobotAudioSource` in robotVoice.ts:
