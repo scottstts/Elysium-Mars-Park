@@ -3752,3 +3752,15 @@ knowing generally:
   uses spherical SPL spreading from its 55 dBA-at-7 m calibration against the
   42 dBA dome floor: equal at 31.3 m, −6 dB masked at 62.4 m, with a smooth
   gate between and exact zero beyond.
+
+## Exterior mountain ridge erosion (2026-08-15)
+
+- A squared raw `1−abs(gradientNoise)` ridge still has a cusp at the noise
+  zero-crossing; feedback-stacked octaves turned those cusps into repeated
+  stalagmite silhouettes. Ease the ridge distance before squaring so both the
+  crown and foot have zero slope.
+- Geometry bands after the first three now receive a `0.62`-per-octave erosion
+  taper. On the 24 m CPU audit grid this cut sharp local peaks from 1,170 to
+  205 and reduced skyline variation by 28%, while the height-field checksum
+  stayed within 0.1%, the near field stayed byte-equivalent, and the sun
+  bearing remained 12.5° below a 27° sun.

@@ -66,6 +66,12 @@ the floor of a valley ringed by rocky mountains in every direction
   a CPU hillshade render). Gradient noise is linear through zero and creases
   into a real ridgeline. Value noise is still used for the smooth terms
   (massif envelope, valley floor swells) where it is cheaper and adequate.
+- **The ridge response is erosion-rounded.** The gradient-noise distance is
+  eased before the crest is squared, giving the ridge crown and foot zero
+  slope instead of preserving the cusp in raw `1−|n|`. Octaves after the
+  first three are attenuated by `0.62` per octave: the broad bands own the
+  silhouette, while short 38–70 m bands only fracture it and cannot stack
+  into isolated stalagmite-like spikes.
 - Ridged multifractal uses PARTIAL weight feedback (`0.34 + signal*1.7`).
   Full Musgrave feedback starves the slopes and the range melts into lobes.
 - **Detail is radius-gated** (`fineDetail`, `midDetail`) so the field is
@@ -90,9 +96,9 @@ the floor of a valley ringed by rocky mountains in every direction
   groundworks floor mesh must keep its outer radius at 132** —
   `TERRAIN_INNER_RADIUS` is the single constant on this side.
 
-Verified numerically: seam delta 0.000 m; skyline from eye height p10 12°,
-median 14.8°, max 21.6°, and 3.6° only in the south pass; max apparent ridge
-elevation along the sun bearing 14.1° (sun sits at 27°).
+Verified numerically after the erosion pass: seam delta 0.000 m; skyline from
+eye height p10 11.7°, median 14.4°, max 21.2°, and 3.6° only in the south pass;
+max apparent ridge elevation along the sun bearing 12.5° (sun sits at 27°).
 
 ### The mesh (`exteriorTerrain.ts`)
 

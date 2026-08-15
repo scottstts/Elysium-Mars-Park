@@ -130,17 +130,30 @@ function ridged(
   let px = x
   let pz = z
   let scale = 1
+  let erosionWeight = 1
   for (let i = 0; i < octaves; i++) {
     const n = gradientNoise(px * scale, pz * scale, wavelength)
-    let signal = 1 - (n < 0 ? -n : n) * 1.62
-    if (signal < 0) signal = 0
-    signal *= signal * weight
+    const ridgeDistance = (n < 0 ? -n : n) * 1.62
+    let signal = 0
+    if (ridgeDistance < 1) {
+      // Round the zero-crossing before squaring it. The old linear
+      // `1 - abs(n)` crest retained a cusp at its maximum, and stacked
+      // octaves turned those cusps into repeated stalagmite-like needles.
+      // This erosion shoulder has zero slope at both the crown and foot, so
+      // it keeps a fractured ridge network without a field of sharp spires.
+      const roundedCrest = 1 - smooth(ridgeDistance)
+      signal = roundedCrest * roundedCrest * weight * 0.9
+    }
     // Partial feedback: full feedback starves the slopes of detail and the
     // range melts into smooth lobes. Detail is boosted on the crests, not
     // erased everywhere else.
     weight = 0.34 + signal * 1.7
     if (weight > 1) weight = 1
-    sum += i < 3 ? signal * amplitude : signal * amplitude * detail
+    if (i >= 3) erosionWeight *= 0.62
+    // The first three octaves own the mountain silhouette. Progressively
+    // suppress shorter geometric bands as talus/erosion would, especially
+    // the 38–70 m bands that otherwise resolve as isolated mesh needles.
+    sum += i < 3 ? signal * amplitude : signal * amplitude * detail * erosionWeight
     norm += amplitude
     amplitude *= 0.56
     scale *= 2.11
