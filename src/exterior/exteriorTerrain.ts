@@ -37,6 +37,7 @@ import { applyMarsAerialPerspective } from './marsAerialPerspective'
 import { TERRAIN_INNER_RADIUS, exteriorHeight, mountainMask } from './terrainHeight'
 import { insideStarshipPad } from '../starship/starshipSite'
 import { markStaticShadowProxy } from '../render/layers'
+import { createDistantTerrainShadowProxy } from './terrainShadowProxy'
 
 /**
  * Boulders inside this radius get a shadow stand-in. The camera never leaves
@@ -124,6 +125,12 @@ export class ExteriorSystem implements GameSystem {
     terrain.frustumCulled = false
     terrain.renderOrder = -50
     this.group.add(terrain)
+
+    // The visible 735k-triangle valley remains receiver-only. A separate
+    // coarse annulus feeds one frozen, low-resolution shadow map so the
+    // mountain ring can shadow its own ravines and lee slopes without being
+    // submitted to the camera-centred clipmaps or any gameplay frame.
+    this.group.add(createDistantTerrainShadowProxy())
 
     // ---- Boulder fields: valley floor scatter + talus at the mountain feet.
     this.buildBoulders(ctx)

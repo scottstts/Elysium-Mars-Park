@@ -10,6 +10,7 @@ import type { DirectionalLight, DirectionalLightShadow } from 'three'
 import { NodeUpdateType, ShadowBaseNode, ShadowNode } from 'three/webgpu'
 import type { Node, NodeBuilder, NodeFrame } from 'three/webgpu'
 import {
+  BasicShadowFilter,
   Fn,
   abs,
   float,
@@ -112,6 +113,22 @@ interface DynamicCasterLevel {
   renderCount: number
 }
 
+interface DistantTerrainLevel {
+  halfWidth: number
+  mapSize: number
+  lightMargin: number
+  depthBiasWorld: number
+  normalBias: number
+  light: ClipmapLight
+  shadowNode: BoundedShadowNode
+  texelWidth: number
+  depthBias: number
+  valid: boolean
+  forceDirty: boolean
+  renderCount: number
+  lastCpuMs: number
+}
+
 export interface ShadowClipmapOptions {
   camera: Object3D
   levelMapSizes: readonly number[]
@@ -143,6 +160,18 @@ export interface ShadowClipmapOptions {
   dynamicCasterHalfWidth?: number
   /** @deprecated Use `dynamicCasterMapSizes`. */
   dynamicCasterMapSize?: number
+  /** Shadow-only layer containing the immutable coarse mountain heightfield. */
+  distantTerrainCasterLayer?: number
+  /** Fixed light-space half-width covering the mountain ring and its shadows. */
+  distantTerrainShadowHalfWidth?: number
+  /** Low-resolution one-shot map size for kilometre-scale terrain shadows. */
+  distantTerrainShadowMapSize?: number
+  /** Up-sun reach for the tallest mountain in the fixed map. */
+  distantTerrainShadowLightMargin?: number
+  /** World-space receiver normal offset for the coarse terrain proxy. */
+  distantTerrainShadowNormalBias?: number
+  /** World-space depth offset for the coarse terrain proxy. */
+  distantTerrainShadowDepthBiasWorld?: number
 }
 
 export interface ShadowClipmapSnapshot {
@@ -163,6 +192,17 @@ export interface ShadowClipmapSnapshot {
   lastStaticRefreshCpuMs: number
   maxStaticRefreshCpuMs: number
   depthBiasWorld: number | null
+  distantTerrain: null | {
+    layer: number
+    renderedHalfWidth: number
+    mapSize: number
+    texelWidth: number
+    depthBias: number
+    normalBias: number
+    valid: boolean
+    renderCount: number
+    lastCpuMs: number
+  }
   dynamicCaster: null | {
     layer: number
     halfWidth: number
@@ -250,6 +290,12 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   /** Outermost level, retained for snapshot/API compatibility. */
   readonly dynamicCasterMapSize: number
   readonly depthBiasWorld: number | null
+  readonly distantTerrainCasterLayer: number | null
+  readonly distantTerrainShadowHalfWidth: number
+  readonly distantTerrainShadowMapSize: number
+  readonly distantTerrainShadowLightMargin: number
+  readonly distantTerrainShadowNormalBias: number
+  readonly distantTerrainShadowDepthBiasWorld: number
 
   private readonly levelMapSizes: readonly number[]
   private readonly levelFilterRadii: readonly number[]
@@ -264,6 +310,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   private readonly velocityLight = new Vector3()
   private readonly dynamicLevelData: Vector4[] = []
   private readonly dynamicCasterLevels: DynamicCasterLevel[] = []
+  private distantTerrainLevel: DistantTerrainLevel | null = null
   private readonly directionCos: number
   private dynamicRenderCount = 0
   private baseBias = 0
@@ -323,6 +370,31 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     this.dynamicCasterMapSizes = dynamicMapSizes
     this.dynamicCasterHalfWidth = dynamicHalfWidths[dynamicHalfWidths.length - 1]
     this.dynamicCasterMapSize = dynamicMapSizes[dynamicMapSizes.length - 1]
+    this.distantTerrainCasterLayer = options.distantTerrainCasterLayer ?? null
+    this.distantTerrainShadowHalfWidth = Math.max(
+      1,
+      options.distantTerrainShadowHalfWidth ?? this.maxDistance,
+    )
+    this.distantTerrainShadowMapSize = Math.max(
+      128,
+      Math.round(
+        options.distantTerrainShadowMapSize
+          ?? this.levelMapSizes[this.levelMapSizes.length - 1]
+          ?? 1_024,
+      ),
+    )
+    this.distantTerrainShadowLightMargin = Math.max(
+      0,
+      options.distantTerrainShadowLightMargin ?? this.lightMargin,
+    )
+    this.distantTerrainShadowNormalBias = Math.max(
+      0,
+      options.distantTerrainShadowNormalBias ?? this.light.shadow.normalBias,
+    )
+    this.distantTerrainShadowDepthBiasWorld = Math.max(
+      0,
+      options.distantTerrainShadowDepthBiasWorld ?? this.depthBiasWorld ?? 0,
+    )
     this.directionCos = Math.cos(options.directionEpsilon ?? 0.002)
     // These world-space clipmaps are camera-independent once rendered, so
     // every render pass in one app frame must reuse the committed maps.
@@ -337,6 +409,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   /** Use a sealed, render-bundled proxy scene for immutable clipmap levels. */
   setStaticCasterScene(scene: StaticShadowScene): void {
     this.staticCasterScene = scene
+    if (this.distantTerrainLevel) this.distantTerrainLevel.forceDirty = true
   }
 
   /** Zero-allocation live counters for per-frame hitch attribution. */
@@ -416,7 +489,13 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         accumulated.addAssign(shadowSample.mul(weight))
         remaining.mulAssign(float(1).sub(fade))
       }
-      const staticShadow = accumulated.add(vec4(remaining))
+      const clipmapShadow = accumulated.add(vec4(remaining))
+      const staticShadow = this.distantTerrainLevel
+        ? min(
+            clipmapShadow,
+            vec4(this.distantTerrainLevel.shadowNode as unknown as Node<'float'>),
+          )
+        : clipmapShadow
       if (this.dynamicCasterLevels.length > 0) {
         const dynamicAccumulated = vec4(0).toVar()
         const dynamicRemaining = float(1).toVar()
@@ -478,6 +557,11 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       if (level.light.parent) continue
       this.light.parent.add(level.light.target)
       this.light.parent.add(level.light)
+    }
+    const distantTerrain = this.distantTerrainLevel
+    if (distantTerrain && !distantTerrain.light.parent) {
+      this.light.parent.add(distantTerrain.light.target)
+      this.light.parent.add(distantTerrain.light)
     }
 
     LIGHT_DIRECTION.subVectors(this.light.target.position, this.light.position).normalize()
@@ -608,6 +692,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         )
       }
     }
+    this.updateDistantTerrainShadow(frame, directionChanged)
     const dynamicFrame = Object.assign(Object.create(frame), { scene: liveScene }) as NodeFrame
     this.updateDynamicCasterShadow(dynamicFrame)
     this.budgetAfter = budget
@@ -695,8 +780,9 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
 
   debugSnapshot(): ShadowClipmapSnapshot {
     const outerDynamicLevel = this.dynamicCasterLevels[this.dynamicCasterLevels.length - 1]
+    const distantTerrain = this.distantTerrainLevel
     return {
-      textureCount: this.levels + this.dynamicCasterLevels.length,
+      textureCount: this.levels + this.dynamicCasterLevels.length + (distantTerrain ? 1 : 0),
       staticCasterBundle: this.staticCasterScene
         ? {
             casterCount: this.staticCasterScene.casterCount,
@@ -715,6 +801,19 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       lastStaticRefreshCpuMs: this.lastStaticRefreshCpuMs,
       maxStaticRefreshCpuMs: this.maxStaticRefreshCpuMs,
       depthBiasWorld: this.depthBiasWorld,
+      distantTerrain: distantTerrain && this.distantTerrainCasterLayer !== null
+        ? {
+            layer: this.distantTerrainCasterLayer,
+            renderedHalfWidth: distantTerrain.halfWidth,
+            mapSize: distantTerrain.mapSize,
+            texelWidth: distantTerrain.texelWidth,
+            depthBias: distantTerrain.depthBias,
+            normalBias: distantTerrain.normalBias,
+            valid: distantTerrain.valid,
+            renderCount: distantTerrain.renderCount,
+            lastCpuMs: distantTerrain.lastCpuMs,
+          }
+        : null,
       dynamicCaster: this.dynamicCasterLayer === null
         ? null
         : {
@@ -777,6 +876,13 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       level.light.shadow.dispose()
       level.light.parent?.remove(level.light)
       level.light.target.parent?.remove(level.light.target)
+    }
+    if (this.distantTerrainLevel) {
+      this.distantTerrainLevel.shadowNode.dispose()
+      this.distantTerrainLevel.light.shadow.dispose()
+      this.distantTerrainLevel.light.parent?.remove(this.distantTerrainLevel.light)
+      this.distantTerrainLevel.light.target.parent?.remove(this.distantTerrainLevel.light.target)
+      this.distantTerrainLevel = null
     }
     this.dynamicCasterLevels.length = 0
     this.dynamicLevelData.length = 0
@@ -852,6 +958,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       })
     }
     this.initDynamicCasterShadow()
+    this.initDistantTerrainShadow()
   }
 
   private initDynamicCasterShadow(): void {
@@ -957,6 +1064,90 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         this.dynamicRenderCount++
       }
     }
+  }
+
+  private initDistantTerrainShadow(): void {
+    if (this.distantTerrainCasterLayer === null || this.distantTerrainLevel) return
+    const target = new Object3D()
+    const shadow = this.light.shadow.clone()
+    const halfWidth = this.distantTerrainShadowHalfWidth
+    const mapSize = this.distantTerrainShadowMapSize
+    shadow.mapSize.set(mapSize, mapSize)
+    shadow.radius = 0
+    shadow.camera.left = -halfWidth
+    shadow.camera.right = halfWidth
+    shadow.camera.top = halfWidth
+    shadow.camera.bottom = -halfWidth
+    shadow.camera.near = this.shadowCameraNear
+    shadow.camera.far = Math.max(
+      this.shadowCameraNear + 1,
+      this.distantTerrainShadowLightMargin + halfWidth * 2 + DEPTH_REACH,
+    )
+    shadow.camera.layers.set(this.distantTerrainCasterLayer)
+    shadow.camera.updateProjectionMatrix()
+    // One hardware-filtered comparison is enough at kilometre scale. The
+    // ordinary PCF path would spend five samples softening an edge whose
+    // single texel already spans tens of metres on the ground.
+    ;(shadow as DirectionalLightShadow & {
+      filterNode?: typeof BasicShadowFilter
+    }).filterNode = BasicShadowFilter
+    shadow.autoUpdate = false
+    shadow.needsUpdate = false
+    const light = Object.assign(new Object3D(), {
+      target,
+      castShadow: true as const,
+      shadow,
+    }) as ClipmapLight
+    const depthRange = Math.max(1e-6, shadow.camera.far - shadow.camera.near)
+    this.distantTerrainLevel = {
+      halfWidth,
+      mapSize,
+      lightMargin: this.distantTerrainShadowLightMargin,
+      depthBiasWorld: this.distantTerrainShadowDepthBiasWorld,
+      normalBias: this.distantTerrainShadowNormalBias,
+      light,
+      shadowNode: new BoundedShadowNode(light, shadow),
+      texelWidth: (halfWidth * 2) / mapSize,
+      depthBias: -this.distantTerrainShadowDepthBiasWorld / depthRange,
+      valid: false,
+      forceDirty: true,
+      renderCount: 0,
+      lastCpuMs: 0,
+    }
+  }
+
+  /** Render the fixed-sun mountain map once, or again after explicit invalidation. */
+  private updateDistantTerrainShadow(frame: NodeFrame, directionChanged: boolean): void {
+    const level = this.distantTerrainLevel
+    if (!level || (level.valid && !level.forceDirty && !directionChanged)) return
+    const { light: levelLight, shadowNode } = level
+    const shadow = levelLight.shadow
+    LEVEL_CENTER.set(0, 0, level.halfWidth + level.lightMargin).applyMatrix4(LIGHT_ORIENTATION)
+    levelLight.position.copy(LEVEL_CENTER)
+    levelLight.target.position.copy(LEVEL_CENTER).add(LIGHT_DIRECTION)
+    levelLight.updateMatrixWorld(true)
+    levelLight.target.updateMatrixWorld(true)
+    shadow.bias = level.depthBias
+    shadow.normalBias = level.normalBias
+    shadow.needsUpdate = true
+    const internalNode = shadowNode as unknown as InternalShadowNode
+    if (!internalNode.shadowMap) return
+
+    const started = performance.now()
+    if (this.staticCasterScene) {
+      this.staticCasterScene.selectBundles(0, 0, level.halfWidth, this.worldToLight)
+      const staticFrame = Object.assign(Object.create(frame), {
+        scene: this.staticCasterScene.scene,
+      }) as NodeFrame
+      internalNode.updateShadow(staticFrame)
+    } else {
+      internalNode.updateShadow(frame)
+    }
+    level.lastCpuMs = performance.now() - started
+    level.valid = true
+    level.forceDirty = false
+    level.renderCount++
+    shadow.needsUpdate = false
   }
 
   /**

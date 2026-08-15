@@ -290,6 +290,14 @@ have grown L3's texel ~46 % for one object's benefit. Cost is one more cached
 map at the coarsest tier size and one more sample per lit pixel; static maps
 re-render only on recentre.
 
+The mountain ring is intentionally **not** another camera-centred rung. It has
+one fixed 1024² map covering ±10.5 km in light space, fed only by an 86 k-triangle
+coarse heightfield on layer 5. The frozen sun lets it render once during loading;
+its low-quality path is one hardware-filtered comparison rather than five-tap
+PCF. The complete sun-shadow graph is therefore five cached static clipmaps,
+three live moving-caster maps, and one immutable terrain map (nine textures).
+Union is still `min(visibility)`, so overlapping caster sets never double-darken.
+
 Static refresh submission is spatial without changing shadow content. The old
 single render bundle disabled proxy culling and therefore submitted every
 park caster on every recenter; the arrival probe counted 408 static refreshes

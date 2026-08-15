@@ -3764,3 +3764,18 @@ knowing generally:
   205 and reduced skyline variation by 28%, while the height-field checksum
   stayed within 0.1%, the near field stayed byte-equivalent, and the sun
   bearing remained 12.5° below a 27° sun.
+
+## Frozen mountain self-shadows (2026-08-15)
+
+- A camera-centred 440 m clipmap cannot make mountains beginning around 500 m
+  shadow themselves. Do not stretch that ladder: add one fixed, park-centred
+  far map because both the sun and terrain are immutable.
+- The caster is a separate layer-5 proxy (43,392 verts / 86,016 tris, r 480–
+  7,200 m), never the visible 735 k-triangle valley. A 1024² ±10.5 km map is
+  ~20.5 m/texel and uses `BasicShadowFilter` (one hardware-filtered compare),
+  so it renders once at load and adds one cheap persistent sample rather than
+  five PCF taps or recurring mountain draws.
+- Keep the map beyond the caster by at least the tallest possible shadow:
+  measured peak 1,302 m / tan(27°) ≈ 2.6 km. A CPU sun-ray audit found 25–38%
+  occluded terrain samples across every radial mountain band, so the proxy is
+  producing broad lee/ravine shadow rather than merely allocating a texture.

@@ -5,8 +5,15 @@ import {
   CachedShadowClipmapNode,
   type ShadowClipmapSnapshot,
 } from '../render/cachedShadowClipmaps'
-import { DYNAMIC_SHADOW_LAYER } from '../render/layers'
+import { DISTANT_TERRAIN_SHADOW_LAYER, DYNAMIC_SHADOW_LAYER } from '../render/layers'
 import { createStaticShadowScene } from '../render/staticShadowScene'
+import {
+  DISTANT_TERRAIN_SHADOW_DEPTH_BIAS_WORLD,
+  DISTANT_TERRAIN_SHADOW_HALF_WIDTH,
+  DISTANT_TERRAIN_SHADOW_LIGHT_MARGIN,
+  DISTANT_TERRAIN_SHADOW_MAP_SIZE,
+  DISTANT_TERRAIN_SHADOW_NORMAL_BIAS,
+} from '../exterior/terrainShadowProxy'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
 import { installLightFixtures, type LightFixtureRig } from '../world/lightFixtures'
@@ -119,7 +126,7 @@ export class SkySystem implements GameSystem {
     scene.add(sun)
     scene.add(sun.target)
 
-    // The quality tier ships three map sizes; the ladder wants four levels.
+    // The quality tier ships four map sizes; the ladder wants five levels.
     // Extend with the coarsest size rather than adding a tier field — the
     // outermost level is the cheapest one to leave slightly soft.
     const tierSizes = quality.params.shadowMapSizes
@@ -185,6 +192,16 @@ export class SkySystem implements GameSystem {
       // streak at all.
       dynamicCasterHalfWidths: [12, 90, 440],
       dynamicCasterMapSizes: [tierSizes[0], tierSizes[0], tierSizes[0]],
+      // Mountains and sun are immutable. A separate coarse heightfield on an
+      // isolated layer renders into this fixed map once during loading, then
+      // every lit receiver reuses it. One basic comparison sample is enough:
+      // at this scale a single texel already covers ~21 m in light space.
+      distantTerrainCasterLayer: DISTANT_TERRAIN_SHADOW_LAYER,
+      distantTerrainShadowHalfWidth: DISTANT_TERRAIN_SHADOW_HALF_WIDTH,
+      distantTerrainShadowMapSize: DISTANT_TERRAIN_SHADOW_MAP_SIZE,
+      distantTerrainShadowLightMargin: DISTANT_TERRAIN_SHADOW_LIGHT_MARGIN,
+      distantTerrainShadowNormalBias: DISTANT_TERRAIN_SHADOW_NORMAL_BIAS,
+      distantTerrainShadowDepthBiasWorld: DISTANT_TERRAIN_SHADOW_DEPTH_BIAS_WORLD,
     }).attach()
 
     // Fixed sky → bake the environment exactly once. The bake dome reuses

@@ -157,7 +157,7 @@ max apparent ridge elevation along the sun bearing 12.5° (sun sits at 27°).
   and an unlit billboard tornado has no honest fix at that distance. The
   valley's weather is the aerial dust medium.
 
-### The valley RECEIVES shadows (2026-08-12) — and boulders cast a cheap proxy
+### The valley receives and self-casts shadows
 
 `terrain.receiveShadow` was `false` until the launch site landed on it. It had
 to change: that asset is metalness 1.0 / 0.64, so it barely self-shades and its
@@ -176,9 +176,18 @@ Consequences worth knowing:
   instances: the cached bundle is `frustumCulled = false`, so every instance
   pays its vertex stage on every refresh. Limited to r < 510 (camera ≤ 122 +
   outermost clipmap 440). 1 365 of 2 600 rocks, 109 k tris instead of 832 k.
-- **`terrain.receiveShadow` is the single revert** if terrain shadow sampling
-  turns out to cost too much: it is a large slice of the frame near the glass,
-  bounded only by the clipmaps' 440 m reach.
+- Mountains cast through a separate **43,392-vertex / 86,016-triangle coarse
+  annulus** on `DISTANT_TERRAIN_SHADOW_LAYER`. The visible 735 k-triangle
+  valley remains receiver-only and never enters a shadow pass. The proxy
+  carries the same deterministic height field from r=480–7,200 m, so its
+  broad ridges agree with the visible mesh while fine geometry stays visual.
+- The fixed-sun terrain map is 1024² over a 10.5 km light-space half-width
+  (~20.5 m texels), with a 3.2 km up-sun margin for the measured 1,302 m peak.
+  It renders once during loading and uses one hardware-filtered depth compare,
+  not the five-sample PCF used by the local clipmaps. A 120 m CPU ray audit
+  found real terrain occlusion across 25–38% of samples in each mountain band.
+  Its projection outlives the 7.2 km caster by enough distance for the tallest
+  peak's ~2.6 km shadow to end without a hard map boundary.
 
 ### The graded launch platform (`starship/starshipSite.ts`)
 

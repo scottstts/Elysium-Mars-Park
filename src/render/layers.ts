@@ -27,6 +27,10 @@ export const PARTICLE_LAYER = 3
  * stable and cheap, and the main view is free to swap detail underneath it.
  */
 export const STATIC_SHADOW_PROXY_LAYER = 4
+/** Coarse exterior heightfield used only by the frozen, park-wide mountain
+ * shadow map. Keeping it separate prevents the kilometre-scale caster from
+ * entering the camera-centred clipmaps or the main view. */
+export const DISTANT_TERRAIN_SHADOW_LAYER = 5
 
 export function enableMainDetailLayer(camera: Camera): void {
   camera.layers.enable(MAIN_DETAIL_LAYER)
@@ -48,6 +52,13 @@ export function markMainDetail(object: Object3D): void {
 export function markStaticShadowProxy(object: Object3D): void {
   object.traverse((node) => {
     node.layers.set(STATIC_SHADOW_PROXY_LAYER)
+  })
+}
+
+/** Confine a coarse mountain mesh to the one-shot distant terrain map. */
+export function markDistantTerrainShadowProxy(object: Object3D): void {
+  object.traverse((node) => {
+    node.layers.set(DISTANT_TERRAIN_SHADOW_LAYER)
   })
 }
 
