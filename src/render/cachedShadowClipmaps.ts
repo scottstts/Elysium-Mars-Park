@@ -160,17 +160,17 @@ export interface ShadowClipmapOptions {
   dynamicCasterHalfWidth?: number
   /** @deprecated Use `dynamicCasterMapSizes`. */
   dynamicCasterMapSize?: number
-  /** Shadow-only layer containing the immutable coarse mountain heightfield. */
+  /** Shadow-only layer containing the immutable mountain geometry twin. */
   distantTerrainCasterLayer?: number
   /** Fixed light-space half-width covering the mountain ring and its shadows. */
   distantTerrainShadowHalfWidth?: number
-  /** Low-resolution one-shot map size for kilometre-scale terrain shadows. */
+  /** One-shot map size for kilometre-scale terrain shadows. */
   distantTerrainShadowMapSize?: number
   /** Up-sun reach for the tallest mountain in the fixed map. */
   distantTerrainShadowLightMargin?: number
-  /** World-space receiver normal offset for the coarse terrain proxy. */
+  /** World-space receiver normal offset for the exact terrain twin. */
   distantTerrainShadowNormalBias?: number
-  /** World-space depth offset for the coarse terrain proxy. */
+  /** World-space depth offset for the exact terrain twin. */
   distantTerrainShadowDepthBiasWorld?: number
 }
 

@@ -79,7 +79,10 @@ export function attachInteriorShafts(
   pipeline: RenderPipelineSystem,
   steps: number,
 ): void {
-  const previous = pipeline.hdrTransform
+  // Interior air is between the camera and the glazing, so it must remain
+  // after the transparent composite. Exterior aerial perspective owns the
+  // pre-glass transform separately in `pipeline.hdrTransform`.
+  const previous = pipeline.postTransparencyHdrTransform
 
   /** Marches the medium once; returns the veil colour and its weight. */
   const mediumFor = (extras: HdrTransformContext): Node<'vec4'> =>
@@ -141,7 +144,7 @@ export function attachInteriorShafts(
       return vec4(inscatter, amount)
     })() as unknown as Node<'vec4'>
 
-  pipeline.hdrTransform = (hdrColor, extras) => {
+  pipeline.postTransparencyHdrTransform = (hdrColor, extras) => {
     const base = previous(hdrColor, extras) as Node<'vec4'>
     const medium = mediumFor(extras)
     const inscatter = medium.xyz

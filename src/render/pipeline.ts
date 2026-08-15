@@ -44,6 +44,10 @@ import { ENVIRONMENT_INTENSITY, SUN_LIGHT_INTENSITY, sunColor, sunDirectionUnifo
 import { gtaoVisibility, type GtaoVisibilityNode } from './gtaoVisibility'
 import { gradeParams, marsGrade } from './grade'
 import { recommendedPixelRatio } from './renderer'
+import {
+  transparentComposite,
+  type TransparentCompositeNode,
+} from './transparentComposite'
 
 /**
  * Scene-camera coordinates reconstructed once for fullscreen HDR effects.
@@ -107,11 +111,14 @@ const BLOOM_SMOOTH_WIDTH = 0.08
 
 /**
  * The one owner of the final image (plan §4).
- * Signal order: scene MRT (color/normal/albedo, MSAA 4×) → GTAO (half-res,
+ * Signal order: opaque scene MRT (color/normal, MSAA 4×) → GTAO (half-res,
  * bilateral-reconstructed, applied to reconstructed INDIRECT only) →
- * hdrTransform hook (aerial medium + interior dust/shafts) → bloom (HDR,
- * pre-tonemap) → fixed authored exposure → Neutral tone map + sRGB via
- * renderOutput → Mars grade LUT + vignette + dither.
+ * hdrTransform hook (exterior aerial medium) → transparent scene composite
+ * against an independently-owned copy of the opaque depth →
+ * postTransparencyHdrTransform
+ * (interior dust/shafts) → bloom (HDR, pre-tonemap) → fixed authored
+ * exposure → Neutral tone map + sRGB via renderOutput → Mars grade LUT +
+ * vignette + dither.
  */
 export class RenderPipelineSystem implements GameSystem {
   readonly id = 'render-pipeline'
@@ -123,6 +130,7 @@ export class RenderPipelineSystem implements GameSystem {
   private basePixelRatio = recommendedPixelRatio()
   private context: GameContext | null = null
   private gtaoNode: GtaoVisibilityNode | null = null
+  private transparentCompositeNode: TransparentCompositeNode | null = null
 
   /**
    * The scene pass — exposed so loading-time warmup precompiles materials
@@ -131,10 +139,20 @@ export class RenderPipelineSystem implements GameSystem {
   scenePass: PassNode | null = null
 
   /**
-   * HDR atmosphere hook. Interior haze/shafts transform the lit HDR color
-   * using reconstructed view depth before bloom sees the image.
+   * Pre-transparency HDR atmosphere hook. Exterior aerial perspective
+   * transforms the opaque world before glazing sees it as a backdrop.
    */
   hdrTransform: (
+    hdrColor: object,
+    extras: HdrTransformContext,
+  ) => object = (c) => c
+
+  /**
+   * Medium applied after the transparent render list. Interior haze belongs
+   * here: it lies between the camera and both glazing and the opaque world,
+   * whereas exterior aerial perspective must resolve before glazing.
+   */
+  postTransparencyHdrTransform: (
     hdrColor: object,
     extras: HdrTransformContext,
   ) => object = (c) => c
@@ -145,12 +163,18 @@ export class RenderPipelineSystem implements GameSystem {
     ctx.events.on('render/resized', ({ width, height }) => {
       this.basePixelRatio = recommendedPixelRatio(width, height)
       renderer.setPixelRatio(this.basePixelRatio * ctx.quality.renderScale)
+      this.transparentCompositeNode?.syncSize(renderer)
     })
 
     // The renderer itself NEVER tone-maps: side targets stay linear HDR.
     renderer.toneMapping = NoToneMapping
 
     const scenePass = pass(scene, camera, { samples: 4 })
+    // Transparency is composed only after the depth-based medium. Rendering
+    // glazing into this pass first made MSAA silhouette pixels contain glazed
+    // sky while aerial perspective later supplied unglazed sky radiance — a
+    // thin contrast contour that appeared only from inside the dome.
+    scenePass.transparent = false
     // depth32float, not the 24-bit default (r185 PassNode ships FloatType
     // commented out). Under reversed-z, 24-bit fixed depth quantizes the
     // mid-field ground into iso-depth plateaus, and every consumer that
@@ -355,18 +379,40 @@ export class RenderPipelineSystem implements GameSystem {
     const aoApplied = mix(float(1), aoAmount, indirectFraction)
     const occluded = vec4(sceneColor.rgb.mul(aoApplied), sceneColor.a)
 
-    const withMedium = this.hdrTransform(occluded, {
+    const hdrContext: HdrTransformContext = {
       viewZNode,
       sceneDepthNode,
       viewPositionNode: footprintView,
       cameraWorldPositionNode,
       worldDirectionNode,
       surfaceWorldNode: surfaceWorld,
-    }) as typeof occluded
+    }
+    const withMedium = this.hdrTransform(occluded, hdrContext) as typeof occluded
 
-    const bloomNode = bloom(withMedium, BLOOM_STRENGTH, BLOOM_RADIUS, BLOOM_THRESHOLD)
+    const transparentInput = flags.pass === 'nopost' ? sceneColor : withMedium
+    const composited = transparentComposite(
+      transparentInput,
+      scene,
+      camera,
+      sceneDepth,
+      scenePass.renderTarget.samples,
+    )
+    this.transparentCompositeNode = composited
+    composited.syncSize(renderer)
+    const sceneWithTransparency = composited.getTextureNode()
+    const withPostTransparencyMedium = this.postTransparencyHdrTransform(
+      sceneWithTransparency,
+      hdrContext,
+    ) as typeof occluded
+
+    const bloomNode = bloom(
+      withPostTransparencyMedium,
+      BLOOM_STRENGTH,
+      BLOOM_RADIUS,
+      BLOOM_THRESHOLD,
+    )
     bloomNode.smoothWidth.value = BLOOM_SMOOTH_WIDTH
-    const hdr = withMedium.add(bloomNode)
+    const hdr = withPostTransparencyMedium.add(bloomNode)
 
     // Neutral (Khronos PBR Neutral) replaces AgX here. AgX desaturates hard
     // across the whole mid-range, and on a palette that is ALREADY one hue
@@ -449,7 +495,11 @@ export class RenderPipelineSystem implements GameSystem {
         outputNode = mapped
         break
       case 'nopost':
-        outputNode = renderOutput(sceneColor, NeutralToneMapping, SRGBColorSpace)
+        outputNode = renderOutput(
+          sceneWithTransparency,
+          NeutralToneMapping,
+          SRGBColorSpace,
+        )
         break
       default:
         outputNode = graded
@@ -476,7 +526,17 @@ export class RenderPipelineSystem implements GameSystem {
   async compileSceneAsync(): Promise<void> {
     const renderer = this.context?.renderer
     if (!renderer || !this.scenePass) return
-    await this.scenePass.compileAsync(renderer)
+    this.transparentCompositeNode?.syncSize(renderer)
+    const previousTransparent = renderer.transparent
+    try {
+      // PassNode.compileAsync() binds MRT/target but not its opaque/transparent
+      // flags, so mirror the live opaque-only scene pass explicitly.
+      renderer.transparent = false
+      await this.scenePass.compileAsync(renderer)
+      await this.transparentCompositeNode?.compileAsync(renderer)
+    } finally {
+      renderer.transparent = previousTransparent
+    }
   }
 
   /**
@@ -528,12 +588,15 @@ export class RenderPipelineSystem implements GameSystem {
     if (Math.abs(target - this.appliedScale) > 0.01) {
       this.appliedScale = target
       ctx.renderer.setPixelRatio(this.basePixelRatio * target)
+      this.transparentCompositeNode?.syncSize(ctx.renderer)
     }
   }
 
   dispose(): void {
     this.gtaoNode?.dispose()
     this.gtaoNode = null
+    this.transparentCompositeNode?.dispose()
+    this.transparentCompositeNode = null
     this.pipeline?.dispose()
     this.pipeline = null
     this.context = null

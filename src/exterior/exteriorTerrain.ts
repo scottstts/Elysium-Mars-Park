@@ -96,7 +96,8 @@ export class ExteriorSystem implements GameSystem {
     }
 
     // ---- The valley: one graded polar mesh from the park floor edge out.
-    const terrain = new Mesh(buildValleyGeometry(), createValleyMaterial())
+    const valleyGeometry = buildValleyGeometry()
+    const terrain = new Mesh(valleyGeometry, createValleyMaterial())
     // THE VALLEY RECEIVES. It did not until the launch site landed on it, and
     // the reason it has to now is the whole point of putting a 147 m stack out
     // there: the vehicle is metalness 1.0 and the tower 0.64, so neither has
@@ -126,11 +127,12 @@ export class ExteriorSystem implements GameSystem {
     terrain.renderOrder = -50
     this.group.add(terrain)
 
-    // The visible 735k-triangle valley remains receiver-only. A separate
-    // coarse annulus feeds one frozen, low-resolution shadow map so the
-    // mountain ring can shadow its own ravines and lee slopes without being
-    // submitted to the camera-centred clipmaps or any gameplay frame.
-    this.group.add(createDistantTerrainShadowProxy())
+    // The visible valley remains receiver-only. A shadow-only twin shares its
+    // exact geometry, which keeps the caster skyline identical to the rendered
+    // ridge and avoids elevated-view light/dark contours. It feeds one frozen
+    // far map during loading, never the camera-centred clipmaps or a gameplay
+    // frame, and sharing the buffer does not duplicate terrain vertex memory.
+    this.group.add(createDistantTerrainShadowProxy(valleyGeometry))
 
     // ---- Boulder fields: valley floor scatter + talus at the mountain feet.
     this.buildBoulders(ctx)

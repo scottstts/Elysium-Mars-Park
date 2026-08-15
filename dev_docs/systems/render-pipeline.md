@@ -5,10 +5,13 @@ image; `pipeline.outputColorTransform = false` and the one output transform is
 the explicit `renderOutput(exposed, Neutral, sRGB)` in the graph. Renderer never
 tone-maps (side targets stay linear HDR).
 
-Signal order: scene MRT (color + normal/aoReceiver-alpha, MSAA 4×) → GTAO
-(half-res R16F six-slice gather → separable bilateral denoise) → full-res joint
-bilateral reconstruction → hdrTransform hook → bloom → fixed EV exposure →
-Neutral → 32³ Mars LUT + vignette.
+Signal order: **opaque-only** scene MRT (color + normal/aoReceiver-alpha,
+MSAA 4×) → GTAO (half-res R16F six-slice gather → separable bilateral
+denoise) → full-res joint bilateral reconstruction → pre-transparency
+`hdrTransform` (exterior aerial perspective) → transparent render-list
+composite against the preserved opaque MSAA depth →
+`postTransparencyHdrTransform` (interior haze/shafts) → bloom → fixed EV
+exposure → Neutral → 32³ Mars LUT + vignette.
 
 Choices beyond the code:
 
@@ -31,17 +34,17 @@ Choices beyond the code:
   `setBlendMode('normal', new BlendMode(NormalBlending))`: opaque materials
   write alpha 1 → exact replace, bit-identical to before; mist/vapour
   override `mrt({ normal: vec4(0) })` → zero authority, G-buffer untouched;
-  glazing's `vec4(normalView, 0)` now PRESERVES the background pair
-  instead of forcing receiver 0. Glazing must also set `depthWrite = false`:
-  preserving a background normal while replacing its depth makes the two
-  G-buffer signals describe different surfaces, which GTAO reconstructs as a
-  dark sheet across the pane. With both preserved, AO seen through glass is
-  the background's own, which is the physically right answer. Any future
-  transparent/additive billboard MUST carry the `vec4(0)` override; the pass
-  default writes alpha 1.
-- **`hdrTransform` hook** is where aerial perspective and S4's interior haze
-  + shafts transform the HDR image (depth-aware), keeping the pipeline file
-  effect-agnostic. Its `HdrTransformContext` is the single owner of post-pass
+  glazing's `vec4(normalView, 0)` preserved the background pair instead of
+  forcing receiver 0. The main MRT is now opaque-only, which removes
+  transparent materials from this buffer by construction; the blend and
+  per-material overrides remain the defensive contract for auxiliary or
+  future mixed passes. Glazing must still set `depthWrite = false` in every
+  pass where it preserves the background normal.
+- **The atmosphere has two explicit transform phases.** `hdrTransform` owns
+  exterior aerial perspective before transparency. `postTransparencyHdrTransform`
+  owns S4's interior haze + shafts after transparency, because the dome's air
+  lies between the camera and both the glazing and opaque world. Their shared
+  `HdrTransformContext` is the single owner of post-pass
   scene-camera reconstruction: depth, view position/Z, camera world origin,
   world ray, and surface world position all come from the explicit player
   camera uniforms in `pipeline.ts`. A `RenderPipeline` draws the final graph
@@ -54,11 +57,12 @@ Choices beyond the code:
   boost so scarce vegetation pops (design pillar "green is currency").
 - `compileAsync()` adapter reaches into `RenderPipeline._quadMesh` (guarded,
   throws on upgrade) because r185 lacks a public async compile for it.
-- Scene warmup separately uses the public `PassNode.compileAsync(renderer)` so
-  materials compile against the exact scene MRT/MSAA render context. The
-  arrival seat and three broad park poses are awaited before BOARD; the real
-  arrival pose is restored, all static clipmaps are forced there, and the GPU
-  queue is settled before the entry plate releases.
+- Scene warmup uses the public `PassNode.compileAsync(renderer)` with
+  `renderer.transparent = false`, then compiles the atmosphere-backdrop quad
+  and the scene's transparent-only render context separately. The arrival
+  seat and three broad park poses are awaited before BOARD; the real arrival
+  pose is restored, all static clipmaps are forced there, and the GPU queue is
+  settled before the entry plate releases.
 - `?pass=` views: final · nopost · ao · aoraw · aodenoised · aoradius ·
   aoshare · aoapplied · bloom · depth · normal · worldray · shafts · shadows
   (last two filled by S4 via `pipeline.debugNodes`). `worldray` encodes the
@@ -67,6 +71,43 @@ Choices beyond the code:
   AO gather is fully competent.
 - Gallery scene (`?view=gallery`) is the standing calibration set: PBR
   sweeps, emissive bloom bar, thin-member AO sentinel, contact boxes.
+
+## Atmosphere / glazing handoff (2026-08-15)
+
+The one-pixel dark contour on distant mountain skylines was not a terrain
+shadow halo. It appeared from ground and Freedom Tower views inside the dome,
+but the identical ridges were clean in the exterior overview. That A/B result
+isolated the fault to the inside-to-outside transparent path.
+
+Previously the 4× scene pass rendered opaque terrain, sky, and dome glass
+together. Aerial perspective then used the opaque depth to transform that
+already-glazed resolved colour toward raw `marsSkyRadiance`. At mountain/sky
+coverage pixels, the two sides of the blend therefore disagreed about whether
+the pane had been applied. Atmospheric fade makes the distant mountain nearly
+equal to its background, so even a tiny glass-colour mismatch becomes a dark
+outline.
+
+`TransparentCompositeNode` makes ordering and ownership explicit:
+
+1. `PassNode.transparent = false`; opaque colour, normal and depth are the
+   only signals entering GTAO and exterior aerial perspective.
+2. A full-resolution half-float target is filled with the processed opaque HDR
+   image. It uses the same sample count and the exact depth texture owned by
+   the opaque pass, so transparent fragments retain per-sample occlusion at
+   silhouettes rather than consulting a reconstructed depth approximation.
+3. Three renders only its normal transparent list into that target
+   (`renderer.opaque = false`). This preserves transparent sorting, blending,
+   double-sided transmission and framebuffer-backed refraction for dome
+   panes, architectural glass, water, particles and future materials. Opaque
+   geometry is traversed for list construction but is not drawn again.
+4. Interior haze/shafts remain after transparency; bloom, exposure, tone map
+   and grade remain after both.
+
+The shared depth remains owned and disposed by the opaque pass. The composite
+temporarily detaches it before its own colour target resizes or disposes, and
+refreshes Three's renderer-side attachment cache first. This is required for
+dynamic render scale: a naïve shared `RenderTarget.setSize()` can free the
+opaque depth after it has already been rendered that frame.
 
 ## Fullscreen scene-camera ownership (2026-08-13)
 
@@ -294,12 +335,16 @@ map at the coarsest tier size and one more sample per lit pixel; static maps
 re-render only on recentre.
 
 The mountain ring is intentionally **not** another camera-centred rung. It has
-one fixed 1024² map covering ±10.5 km in light space, fed only by an 86 k-triangle
-coarse heightfield on layer 5. The frozen sun lets it render once during loading;
-its low-quality path is one hardware-filtered comparison rather than five-tap
-PCF. The complete sun-shadow graph is therefore five cached static clipmaps,
-three live moving-caster maps, and one immutable terrain map (nine textures).
-Union is still `min(visibility)`, so overlapping caster sets never double-darken.
+one fixed 2048² map covering ±14.5 km in light space, fed by a layer-5 mesh
+that shares the visible terrain's exact `BufferGeometry`. That parity matters:
+the previous decimated caster had a different skyline and printed light/dark
+contours around ridges from elevated views. The frozen sun still renders this
+735 k-triangle twin only once during loading, and sharing the buffer adds no
+second geometry allocation. Its runtime path remains one hardware-filtered
+comparison rather than five-tap PCF. The complete sun-shadow graph is therefore
+five cached static clipmaps, three live moving-caster maps, and one immutable
+terrain map (nine textures). Union is still `min(visibility)`, so overlapping
+caster sets never double-darken.
 
 Static refresh submission is spatial without changing shadow content. The old
 single render bundle disabled proxy culling and therefore submitted every

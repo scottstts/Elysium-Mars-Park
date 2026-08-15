@@ -192,10 +192,11 @@ export class SkySystem implements GameSystem {
       // streak at all.
       dynamicCasterHalfWidths: [12, 90, 440],
       dynamicCasterMapSizes: [tierSizes[0], tierSizes[0], tierSizes[0]],
-      // Mountains and sun are immutable. A separate coarse heightfield on an
-      // isolated layer renders into this fixed map once during loading, then
-      // every lit receiver reuses it. One basic comparison sample is enough:
-      // at this scale a single texel already covers ~21 m in light space.
+      // Mountains and sun are immutable. A shadow-only mesh sharing the exact
+      // visible-terrain geometry renders on an isolated layer once during
+      // loading, then every lit receiver reuses it. Exact caster/receiver
+      // parity prevents ridge halos; the 2048 map remains a single cheap
+      // hardware-filtered comparison during play.
       distantTerrainCasterLayer: DISTANT_TERRAIN_SHADOW_LAYER,
       distantTerrainShadowHalfWidth: DISTANT_TERRAIN_SHADOW_HALF_WIDTH,
       distantTerrainShadowMapSize: DISTANT_TERRAIN_SHADOW_MAP_SIZE,

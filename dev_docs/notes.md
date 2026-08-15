@@ -3770,15 +3770,21 @@ knowing generally:
 - A camera-centred 440 m clipmap cannot make mountains beginning around 500 m
   shadow themselves. Do not stretch that ladder: add one fixed, park-centred
   far map because both the sun and terrain are immutable.
-- The caster is a separate layer-5 proxy (43,392 verts / 86,016 tris, r 480–
-  7,200 m), never the visible 735 k-triangle valley. A 1024² ±10.5 km map is
-  ~20.5 m/texel and uses `BasicShadowFilter` (one hardware-filtered compare),
-  so it renders once at load and adds one cheap persistent sample rather than
-  five PCF taps or recurring mountain draws.
-- Keep the map beyond the caster by at least the tallest possible shadow:
-  measured peak 1,302 m / tan(27°) ≈ 2.6 km. A CPU sun-ray audit found 25–38%
-  occluded terrain samples across every radial mountain band, so the proxy is
-  producing broad lee/ravine shadow rather than merely allocating a texture.
+- The caster is a separate layer-5 mesh sharing the visible valley's exact
+  368,256-vertex / 734,720-triangle `BufferGeometry`. It remains invisible and
+  renders only once at load, while sharing avoids both a second terrain buffer
+  and any caster/receiver ridge disagreement. The original decimated proxy was
+  measurably cheaper at load but produced dark/bright silhouette outlines from
+  the Freedom Tower; heightfield shadow casters cannot decimate a judged
+  skyline independently from their receivers.
+- A 2048² ±14.5 km map covers the complete terrain at ~14.2 m/texel and still
+  uses `BasicShadowFilter` (one hardware-filtered compare), so runtime cost is
+  one cheap persistent sample rather than five PCF taps or recurring mountain
+  draws. Exact geometry permits 0.75 m normal / 0.10 m depth offsets; the old
+  5 m normal bias projected an approximately 10 m bright gap at a 27° sun.
+- A CPU sun-ray audit found 25–38% occluded terrain samples across every radial
+  mountain band, so the far map produces broad lee/ravine shadow rather than
+  merely allocating a texture.
 
 ## Transmissive glass must preserve the whole GTAO surface (2026-08-15)
 
@@ -3795,3 +3801,26 @@ knowing generally:
   use the parsed flags rather than re-reading `window.location.search`; a
   second read in the render pipeline previously let `?pass=` bypass any
   central policy. Hosted and lookalike hostnames receive shipped defaults.
+
+## Atmospheric glass cannot precede depth-based aerial perspective (2026-08-15)
+
+- The residual dark mountain outline was visible from inside the dome but not
+  in the exterior overview on the same ridges. That rules out terrain geometry,
+  the far shadow map and atmospheric source colour; the differing system is
+  the inside-to-outside glass composite.
+- Rendering glass into the scene MRT before aerial perspective makes
+  silhouette pixels mix a glazed sky with an atmosphere operator whose source
+  is raw `marsSkyRadiance`. A far mountain is intentionally almost the same
+  colour as that sky, so the tiny glass-space disagreement becomes the most
+  visible feature in the pixel: a false contour.
+- Split by render list, not by material identity: opaque MRT/GTAO/exterior
+  medium first; all normal Three transparency over an atmosphere-correct HDR
+  backdrop with the exact shared 4× opaque depth; interior haze, bloom and the
+  output chain afterward. This keeps transmission, sorting, particles, water
+  and future transparent materials on the engine path and redraws no opaque
+  geometry.
+- A RenderTarget that borrows another target's depth must detach it and update
+  Three's renderer-side attachment cache before resizing or disposal. Public
+  property detachment alone is insufficient because the cached target data
+  still owns the old depth resource; dynamic resolution can otherwise destroy
+  a freshly rendered depth attachment mid-frame.

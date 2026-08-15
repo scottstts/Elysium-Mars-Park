@@ -20,6 +20,14 @@
 - ONE continuous dust medium, applied screen-space in `pipeline.hdrTransform`
   (SeaPark pattern), start 55 m. Interior sightlines (≤500 m) get a
   just-perceptible cue from the same function — deliberate.
+- It is evaluated on the opaque HDR world **before** the transparent render
+  list. Dome glass then refracts/blends an already atmosphere-correct mountain
+  and sky, while interior haze is applied afterward. Do not fold glazing back
+  into the opaque pass: applying the depth-based medium to an already-glazed
+  MSAA edge produces a dark skyline contour wherever a distant ridge nearly
+  dissolves into the sky. Exterior-overview views were clean while
+  inside-to-outside views showed the line, which is the diagnostic signature
+  of this ordering fault rather than a terrain-shadow bias.
 - Its source direction comes from `HdrTransformContext.worldDirectionNode`,
   reconstructed once from the explicit scene camera by the render pipeline.
   Do not import TSL's implicit camera nodes here: during the final post graph
@@ -176,18 +184,23 @@ Consequences worth knowing:
   instances: the cached bundle is `frustumCulled = false`, so every instance
   pays its vertex stage on every refresh. Limited to r < 510 (camera ≤ 122 +
   outermost clipmap 440). 1 365 of 2 600 rocks, 109 k tris instead of 832 k.
-- Mountains cast through a separate **43,392-vertex / 86,016-triangle coarse
-  annulus** on `DISTANT_TERRAIN_SHADOW_LAYER`. The visible 735 k-triangle
-  valley remains receiver-only and never enters a shadow pass. The proxy
-  carries the same deterministic height field from r=480–7,200 m, so its
-  broad ridges agree with the visible mesh while fine geometry stays visual.
-- The fixed-sun terrain map is 1024² over a 10.5 km light-space half-width
-  (~20.5 m texels), with a 3.2 km up-sun margin for the measured 1,302 m peak.
+- Mountains cast through a separate mesh on
+  `DISTANT_TERRAIN_SHADOW_LAYER` that shares the visible valley's exact
+  368,256-vertex / 734,720-triangle `BufferGeometry`. The visible mesh remains
+  receiver-only; the twin is excluded from the main camera and local
+  clipmaps. Sharing the buffer adds no duplicate vertex/index allocation and,
+  critically, gives the frozen map the identical ridge silhouette. The former
+  86 k-triangle approximation produced dark outer contours and bright inner
+  fringes from the Freedom Tower because its projected skyline disagreed with
+  the rendered terrain.
+- The fixed-sun terrain map is 2048² over a 14.5 km light-space half-width
+  (~14.2 m texels), covering the complete 13.6 km polar mesh with headroom.
   It renders once during loading and uses one hardware-filtered depth compare,
-  not the five-sample PCF used by the local clipmaps. A 120 m CPU ray audit
-  found real terrain occlusion across 25–38% of samples in each mountain band.
-  Its projection outlives the 7.2 km caster by enough distance for the tallest
-  peak's ~2.6 km shadow to end without a hard map boundary.
+  not the five-sample PCF used by the local clipmaps. Normal/depth offsets are
+  0.75 m / 0.10 m: enough for numerical separation on the exact twin without
+  the former 5 m normal bias projecting an approximately 10 m ridge halo at
+  the 27° sun angle. A 120 m CPU ray audit found real terrain occlusion across
+  25–38% of samples in each mountain band.
 
 ### The graded launch platform (`starship/starshipSite.ts`)
 

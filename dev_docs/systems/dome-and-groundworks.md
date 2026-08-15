@@ -16,10 +16,12 @@
   Panewalker swath uniform `panewalkerPhi`) + portal arch cut (`portalCut`
   shared for S9's frame/iris). No physical transmission on the big shell —
   hero panes elsewhere may use it. `mrt normal.a = 0` (no AO on glass).
-- Interior shafts: march that accumulates the DIFFERENCE the lattice makes
-  (negative carve + tiny glow), NOT absolute inscatter — the aerial medium
-  owns base haze. Net-zero in open sun, so the "wash the whole frame"
-  defect class is structurally impossible. Forward-scatter phase on both.
+- Interior shafts: one bounded density/light march, capped at 18% veil, with
+  the analytic lattice controlling the sunlit fraction. It runs in the
+  pipeline's post-transparency phase: exterior aerial perspective resolves on
+  the opaque world, dome glass composites that correct backdrop, then the
+  interior air attenuates both. This ordering prevents skyline contours while
+  retaining haze and shafts on the glazing seen from inside.
 
 ## The lattice-shadow saga (read before touching ANY shadow code)
 

@@ -38,8 +38,8 @@ export class DomeSystem implements GameSystem {
 
     scene.add(this.group)
 
-    // Interior shafts splice into the hdrTransform chain after the aerial
-    // medium (ExteriorSystem registered it first).
+    // Interior air is the post-transparency medium: exterior aerial
+    // perspective resolves first, then glass, then these haze/shaft terms.
     attachInteriorShafts(this.pipeline, quality.params.shaftSteps)
   }
 
