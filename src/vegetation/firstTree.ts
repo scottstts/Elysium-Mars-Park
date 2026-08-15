@@ -10,7 +10,7 @@ import {
 } from 'three'
 import type { Rng } from '../core/prng'
 import { createBarkMaterial, createFoliageMaterial, floatAttribute } from './foliageMaterial'
-import { ginkgoSprayTexture } from './leafTextures'
+import { ginkgoLeafTexture } from './leafTextures'
 import { CardSink } from './species'
 
 /**
@@ -45,11 +45,16 @@ import { CardSink } from './species'
  *      project already learned this on the ground (notes.md S14: "ground art
  *      needs GEOMETRY"); a fissure painted only in albedo dies under the
  *      grade at 2 m.
- *   5. Root flare and branch collars are radius laws on the branch's OWN
- *      rings, not applied parts. Nothing is assembled, so there is nothing to
- *      z-fight, gap or overlap — the whole defect class is designed out.
+ *   5. Root flare and branch grafts are radius laws on the branch's OWN
+ *      rings. A lateral starts as a narrow ring buried inside its parent,
+ *      resolves a restrained 1.16× shoulder over three short spans, then
+ *      settles to its branch radius. The former exposed 2.45× base ring made
+ *      the pointed wedges visible at every major fork.
  *   6. Short shoots (spurs) are added. They are not in the ash preset and
  *      they are the single most ginkgo-specific feature of the tree.
+ *   7. Each growth site authors one cupped, individually painted ginkgo leaf.
+ *      The short-shoot topology forms the clusters; crossed cards containing
+ *      entire painted sprays made the crown opaque and hid the branching.
  */
 
 export interface FirstTreeResult {
@@ -60,7 +65,16 @@ export interface FirstTreeResult {
   soilTop: number
   /** Crown centre and radius — the audit camera and the collar both want it. */
   crown: { center: Vector3; radius: number }
-  stats: { branchTriangles: number; leafTriangles: number; leafCards: number; spurs: number }
+  stats: {
+    branchTriangles: number
+    leafTriangles: number
+    leafCards: number
+    leafSites: number
+    junctions: number
+    junctionRings: number
+    maxJunctionScale: number
+    spurs: number
+  }
 }
 
 const GINKGO = {
@@ -76,8 +90,8 @@ const GINKGO = {
     length: [6.3, 4.1, 2.36, 1.27],
     /** Level 0 is an ABSOLUTE base radius; the rest multiply the parent. */
     radius: [0.235, 0.56, 0.62, 0.66],
-    sections: [16, 9, 7, 5],
-    segments: [24, 11, 7, 5],
+    sections: [20, 13, 9, 9],
+    segments: [30, 18, 12, 8],
     /** Emergence angle from the parent, degrees. */
     angle: [0, 44, 56, 47],
     children: [6, 4, 3, 0],
@@ -92,8 +106,8 @@ const GINKGO = {
     count: 14,
     start: 0.16,
     angle: 54,
-    size: 0.34,
-    sizeVariance: 0.3,
+    size: 0.275,
+    sizeVariance: 0.22,
   },
   spurs: {
     /** Short shoots per branch, by level. Older wood carries more. */
@@ -101,12 +115,16 @@ const GINKGO = {
     start: 0.22,
     length: [0, 0, 0.062, 0.045],
     radius: 0.0125,
-    sitesEach: 3,
+    sitesEach: 5,
   },
   /** Root flare: extra radius decaying with height, plus buttress lobes. */
   flare: { amount: 0.66, decay: 1.05, lobes: 3, lobeAmount: 0.5, lobeDecay: 0.72 },
-  /** Branch collar: the swelling where a limb leaves its parent. */
-  collar: { amount: 1.45, reach: 1.7, sink: 0.55 },
+  /**
+   * Concealed branch graft. The first ring is small and buried, grows into a
+   * restrained shoulder, then settles to the branch radius. A uniformly
+   * oversized base ring makes a polygonal wedge where it cuts the parent.
+   */
+  collar: { hiddenScale: 0.42, shoulderScale: 1.16, reach: 1.8, sink: 0.38 },
 } as const
 
 const UP = new Vector3(0, 1, 0)
@@ -169,6 +187,8 @@ function growGinkgo(rng: Rng): {
   sites: LeafSite[]
   triangles: number
   spurs: number
+  junctions: number
+  junctionRings: number
   height: number
 } {
   const preset = GINKGO
@@ -181,6 +201,8 @@ function growGinkgo(rng: Rng): {
   const indices: number[] = []
   const sites: LeafSite[] = []
   let spurCount = 0
+  let junctionCount = 0
+  let junctionRingCount = 0
   let maxHeight = 0
 
   const jobs: BranchJob[] = [
@@ -291,10 +313,23 @@ function growGinkgo(rng: Rng): {
     const segmentCount = branch.segmentCount
     const stride = segmentCount + 1
     // Level 0 bunches its sections at the base so the root flare resolves.
-    const sectionT = (index: number): number =>
-      branch.level === 0
-        ? Math.pow(index / branch.sectionCount, 1.35)
-        : index / branch.sectionCount
+    // A lateral reserves three short spans for its concealed graft; without
+    // those rings the entire collar transition lands in one long triangle.
+    const sectionT = (index: number): number => {
+      const t = index / branch.sectionCount
+      if (branch.level === 0) return Math.pow(t, 1.35)
+      if (branch.continuation || branch.collarRadius <= 0) return t
+      const graftSections = Math.min(3, Math.max(1, Math.floor(branch.sectionCount / 3)))
+      const graftFraction = Math.min(
+        0.24,
+        (branch.collarRadius * preset.collar.reach) / branch.length,
+      )
+      if (index <= graftSections) return (index / graftSections) * graftFraction
+      return (
+        graftFraction +
+        ((index - graftSections) / (branch.sectionCount - graftSections)) * (1 - graftFraction)
+      )
+    }
     // Fissures scale with the branch: a twig has no corky ridges.
     const ridgeAmplitude = Math.min(0.012, branch.radius * 0.075)
     let run = 0
@@ -308,8 +343,9 @@ function growGinkgo(rng: Rng): {
         sectionRadius = 0.0015
       }
 
-      // Root flare (trunk only) and branch collar (laterals) are radius laws
-      // on THIS branch's rings, so the join is a tangency, never an assembly.
+      // Root flare (trunk only) and branch graft (laterals) are radius laws on
+      // THIS branch's rings. The graft begins narrow and hidden inside the
+      // parent, reaches one modest shoulder, then settles to the limb radius.
       const heightAboveBase = origin.y
       let flare = 1
       let flareDTheta = 0
@@ -319,9 +355,19 @@ function growGinkgo(rng: Rng): {
       }
       let collar = 1
       if (!branch.continuation && branch.collarRadius > 0) {
-        collar +=
-          preset.collar.amount *
-          Math.exp(-run / (branch.collarRadius * preset.collar.reach))
+        const graftRun = Math.max(1e-4, branch.collarRadius * preset.collar.reach)
+        const graftT = Math.min(1, run / graftRun)
+        if (run <= graftRun + 1e-4) junctionRingCount++
+        const shoulderAt = 0.42
+        if (graftT < shoulderAt) {
+          const rise = smoothstep01(graftT / shoulderAt)
+          collar =
+            preset.collar.hiddenScale +
+            (preset.collar.shoulderScale - preset.collar.hiddenScale) * rise
+        } else {
+          const settle = smoothstep01((graftT - shoulderAt) / (1 - shoulderAt))
+          collar = preset.collar.shoulderScale + (1 - preset.collar.shoulderScale) * settle
+        }
       }
 
       for (let radial = 0; radial <= segmentCount; radial++) {
@@ -467,8 +513,9 @@ function growGinkgo(rng: Rng): {
           Math.PI * 2 * (radialOffset + (slots[slot] + rng.range(-0.5, 0.5)) / count)
         const emergence = (preset.branch.angle[nextLevel] * Math.PI) / 180
         const childOrientation = emergent(parent.orientation, azimuth, emergence)
-        // Seat the child INSIDE the parent so the collar swell emerges from
-        // solid wood: no gap at the union and no coincident faces.
+        // Seat the child's small first ring inside solid wood. Its resolved
+        // graft rings emerge gradually; an exposed oversized ring is the
+        // source of the triangular fins that used to mark every major fork.
         const childOrigin = parent.origin
           .clone()
           .addScaledVector(
@@ -486,6 +533,7 @@ function growGinkgo(rng: Rng): {
           continuation: false,
           collarRadius: parent.radius,
         })
+        junctionCount++
       }
     } else {
       // Terminal long shoot: one leaf at the tip, then alternate sites along
@@ -513,7 +561,20 @@ function growGinkgo(rng: Rng): {
   geometry.setIndex(indices)
   geometry.computeBoundingSphere()
 
-  return { geometry, sites, triangles: indices.length / 3, spurs: spurCount, height: maxHeight }
+  return {
+    geometry,
+    sites,
+    triangles: indices.length / 3,
+    spurs: spurCount,
+    junctions: junctionCount,
+    junctionRings: junctionRingCount,
+    height: maxHeight,
+  }
+}
+
+function smoothstep01(value: number): number {
+  const t = Math.max(0, Math.min(1, value))
+  return t * t * (3 - 2 * t)
 }
 
 function shuffledSlots(count: number, rng: Rng): number[] {
@@ -566,27 +627,27 @@ export function buildFirstTree(base: Vector3, rng: Rng): FirstTreeResult {
   const spin = new Quaternion()
   grown.sites.forEach((site, index) => {
     const depth = Math.pow(Math.max(0, 1 - distances[index] / hull), 0.85)
-    // Two perpendicular cards per site (the ash contract's double card).
-    for (const cardRotation of [0, Math.PI * 0.5]) {
-      spin.setFromAxisAngle(UP, cardRotation)
-      cardQuaternion.copy(site.quaternion).multiply(spin)
-      canopy.push(site.position, cardQuaternion, {
-        width: site.size,
-        height: site.size,
-        cup: 0.16,
-        droop: -0.03,
-        depth,
-        columns: 2,
-        rows: 3,
-        round: 0.55,
-        seed: site.seed,
-      })
-    }
+    // One growth site is one leaf. Short shoots already cluster five sites,
+    // so crossing two cards that each paint a whole spray multiplies the
+    // canopy into a dark knot. A small local roll breaks repeated alignment.
+    spin.setFromAxisAngle(UP, (site.seed - 0.5) * 0.72)
+    cardQuaternion.copy(site.quaternion).multiply(spin)
+    canopy.push(site.position, cardQuaternion, {
+      width: site.size * 0.94,
+      height: site.size * 1.16,
+      cup: 0.1,
+      droop: -0.018,
+      depth,
+      columns: 3,
+      rows: 4,
+      round: 0.46,
+      seed: site.seed,
+    })
   })
 
   const leafGeometry = canopy.build()
   const leafMaterial = createFoliageMaterial({
-    map: ginkgoSprayTexture(),
+    map: ginkgoLeafTexture(),
     seed: floatAttribute('aSeed'),
     depth: floatAttribute('aDepth'),
     // Ginkgo's ramp: cool jade in the shaded interior, golden-green where the
@@ -627,6 +688,10 @@ export function buildFirstTree(base: Vector3, rng: Rng): FirstTreeResult {
       branchTriangles: grown.triangles,
       leafTriangles: leafGeometry.getIndex()?.count ? leafGeometry.getIndex()!.count / 3 : 0,
       leafCards: canopy.cardCount,
+      leafSites: grown.sites.length,
+      junctions: grown.junctions,
+      junctionRings: grown.junctionRings,
+      maxJunctionScale: GINKGO.collar.shoulderScale,
       spurs: grown.spurs,
     },
   }

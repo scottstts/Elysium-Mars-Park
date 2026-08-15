@@ -53,17 +53,28 @@ Declared divergences from the ash contract (§11 of its reference):
    periodic fissure field (integer θ harmonics so it closes) with an analytic
    θ-derivative feeding the normal. `aRidge` is baked per vertex so the
    material's colour and the geometry's form cannot disagree.
-5. Root flare and branch collars are **radius laws on the branch's own rings**
-   — flare decays with height, collars decay with run and the child is seated
-   `0.55 × parentRadius` INSIDE the parent. Nothing is assembled, so the
-   z-fight / gap / overlap defect class is designed out rather than policed.
+5. Root flare and branch grafts are **radius laws on the branch's own rings**.
+   Every lateral begins at `0.42 × childRadius`, seated
+   `0.38 × parentRadius` inside the parent; three short spans grow it into a
+   restrained `1.16×` shoulder before it settles to the limb radius. The old
+   collar started as one exposed `2.45×` ring, so low-sided branch tubes made
+   pointed wedges at their forks. Major radial resolution is now 30/18/12/8
+   sides instead of 24/11/7/5.
 6. **Short shoots (spurs)** added — 700 of them, knobbly alternating ring
-   radii, three leaf sprays each. Not in the ash preset; the single most
-   ginkgo-specific feature of the tree.
+   radii, five individually oriented leaf sites each. Not in the ash preset;
+   the single most ginkgo-specific feature of the tree.
+7. **One growth site is one leaf.** Each site emits one 3×4 cupped card with a
+   single fan-shaped ginkgo painting, rounded crown-aware normals and
+   petiole-rooted wind. The earlier canopy crossed two cards per site and
+   painted ten leaves on each card; that multiplicative representation made
+   close foliage read as dark, repeated clumps and concealed the branches.
 
-Measured: 139 174 tris (38 374 wood + 100 800 canopy), 8 400 leaf cards, crown
-8.4 × 7.6 m, lowest leaves at 4.0 m so the player walks under it. Zero NaN,
-zero degenerate, zero non-unit normals.
+Mechanical audit (`tools/first-tree-audit.mjs`, fixed seed): 195 840 tris
+(61 440 wood + 134 400 canopy), 5 600 individual leaves, 139 lateral junctions
+with 556 graft rings, crown footprint 6.9 × 8.8 m, lowest leaf at 3.6 m. Zero
+invalid attributes, degenerate faces, duplicate leaf faces, or non-unit
+normals. The audit also caps the graft shoulder at `1.2×`, requires at least
+four resolved rings per junction, and enforces the one-site/one-leaf contract.
 
 ## Species and instancing
 

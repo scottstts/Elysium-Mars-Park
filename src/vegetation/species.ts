@@ -21,7 +21,7 @@ import type { Material } from 'three'
  *     the stylized-meadow-grass system; it is the reason close-range grass
  *     reads as grass and not as cardboard.
  *   • `buildPlant()` — cupped alpha cards for anything with a leaf shape too
- *     complex to model (ferns, broadleaf, flowers, ginkgo sprays, needles).
+ *     complex to model (ferns, broadleaf, flowers, ginkgo leaves, needles).
  *     Every card carries the ash system's ROUNDED NORMAL,
  *     `normalize(cardNormal + (vertex − origin))`, which fakes the volume of
  *     the plant the card stands for. Flat card normals are what make a bush

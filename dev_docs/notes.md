@@ -3835,3 +3835,16 @@ knowing generally:
 - A world event does not imply world-space audio. The `tram/docked` two-note
   chime must enter an HRTF `PannerNode` at the car pose before the master bus;
   direct oscillator-to-master wiring makes the cue uniform and non-directional.
+
+## First Tree grafts + leaf topology (2026-08-15)
+
+- Burying a branch base does not make an oversized collar smooth. A circular
+  `2.45×` first ring still protrudes beyond the parent and low radial counts
+  turn its intersection into a pointed wedge. Begin narrow inside the parent,
+  reserve several short axial spans for a restrained shoulder, and only then
+  settle to the child radius; audit both ring count and maximum scale.
+- Leaf clustering belongs to growth topology. Crossing two cards at every
+  site while painting a whole ten-leaf spray on each card multiplies density,
+  repetition and self-occlusion. Ginkgo short shoots now fan five separate
+  sites, and every site maps to one cupped leaf whose `uv.y = 0` petiole stays
+  rooted under wind.

@@ -87,13 +87,14 @@ function leafFill(
 // ───────────────────────────────────────────────────────── the First Tree ──
 
 /**
- * A ginkgo short-shoot spray: 4–6 flabellate leaves on their petioles, the
- * way ginkgo actually presents — clustered off a stubby spur, not spread
- * along a twig. Dichotomous venation radiates from the petiole to the margin
- * and forks once, which is the single feature that says "ginkgo" at a glance.
- * Attachment is bottom-centre (v = 0) so the wind term roots the card.
+ * One ginkgo leaf, rooted at its petiole. Short-shoot clustering belongs to
+ * growth topology, not to the texture: painting ten leaves on one card and
+ * then crossing two such cards makes an opaque blob at close range.
+ * Dichotomous venation radiates from the petiole and forks once, which is the
+ * single feature that says "ginkgo" at a glance. Attachment is bottom-centre
+ * (v = 0), so the wind term roots the card at the wood.
  */
-export function ginkgoSprayTexture(seed = 91, size = 512): CanvasTexture {
+export function ginkgoLeafTexture(seed = 91, size = 512): CanvasTexture {
   const { canvas, g } = sheet(size)
   const random = seeded(seed)
   const s = size / 512
@@ -177,25 +178,7 @@ export function ginkgoSprayTexture(seed = 91, size = 512): CanvasTexture {
   }
 
   withBleed(g, () => {
-    // The spur itself, then leaves back-to-front so the near ones overlap.
-    g.strokeStyle = 'hsl(38, 16%, 26%)'
-    g.lineWidth = 9 * s
-    g.beginPath()
-    g.moveTo(256 * s, 508 * s)
-    g.quadraticCurveTo(258 * s, 460 * s, 256 * s, 424 * s)
-    g.stroke()
-
-    const count = 5
-    for (let layer = 0; layer < 2; layer++) {
-      for (let i = 0; i < count; i++) {
-        const f = (i + (layer ? 0.5 : 0)) / count
-        const angle = (f - 0.5) * 2.15 + (random() - 0.5) * 0.22
-        const radius = (128 + random() * 52) * s * (layer ? 0.86 : 1)
-        const cx = 256 * s + Math.sin(angle) * 34 * s
-        const cy = (426 - layer * 26 - random() * 30) * s
-        fanLeaf(cx, cy, radius, angle * 0.92, layer * 0.45 + random() * 0.45)
-      }
-    }
+    fanLeaf(256 * s, 500 * s, 286 * s, 0, 0.24 + random() * 0.36)
   })
   return finish(canvas)
 }
