@@ -3882,3 +3882,19 @@ knowing generally:
   warm-white ray petals (instead of seven dark rays), a yellow raised disc and
   a small neutral head-only emissive floor keep the daisy identity legible in
   shade without pushing it into the scene's bloom ladder.
+
+## Double-sided foliage winding + direct sunlight (2026-08-15)
+
+- A plausible authored normal is still wrong when it opposes the triangle's
+  geometric winding. Three orients `DoubleSide` normals from the front-face
+  flag, so the shared cards' local `+Z` rounded normals combined with local
+  `-Z` winding made grass-like plants and tree leaves reject direct sun on both
+  visible sides. The blade strips had the same sign mismatch on four of seven
+  planes.
+- Audit the actual face normal against the average authored vertex normal,
+  then test a fixed sun-behind-camera direction. The project regression now
+  requires 100% hemisphere agreement and broad positive direct-light response
+  for the First Tree, planter cards and mature grass.
+- Fix winding or authored-normal orientation before touching albedo, ambient
+  intensity or emissive. A material lift can hide the defect, but it also
+  flattens real shadowing and leaves directional lighting physically wrong.

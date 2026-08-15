@@ -82,12 +82,15 @@ Eight ornamental species + three crop species, one `InstancedMesh` each.
 `species.ts` has two construction families chosen by viewing distance:
 
 - `bladeCluster()` — real tapered strips for sedge and the tree collar, with
-  the meadow-grass **hand-authored hemispherical normal `(sin, 0.34, cos)`** so
-  a tuft lights like a mound instead of like five fins.
+  a meadow-grass **hand-authored hemispherical normal
+  `(-sin, 0.34, cos)`** so a tuft lights like a mound instead of like five
+  fins. The negative sine matches the strip's actual triangle winding.
 - `buildPlant()` / `CardSink` — cupped alpha cards carrying the ash system's
   **rounded normal** `normalize(cardNormal + (vertex − origin))`, which fakes
   the volume the card stands for. Flat card normals are what make a bush read
-  as a decal.
+  as a decal. Card triangles use the same local `+Z` hemisphere as that
+  authored normal; Three's `DoubleSide` correction depends on the geometric
+  front-face flag, so winding and authored normals must agree.
 
 Both bake `aDepth` (0 outside the plant, 1 buried in its middle). The foliage
 material uses it to darken the interior and kill the backlight there — free
@@ -97,9 +100,10 @@ grass uses the weighted Poisson system below. Nothing uses a uniform sprinkle.
 
 ### Grass layers and flowering clumps (2026-08-15)
 
-The mature `sedge` is intentionally byte-for-byte unchanged: 0.50 m tall,
-seven intersecting blade planes, 84 triangles per clump. It was already the
-successful fully grown grass in the owner screenshots.
+The mature `sedge` keeps its 0.50 m silhouette, seven intersecting blade
+planes and 84 triangles per clump. Its authored normal now follows the strip's
+actual winding; placement and geometry remain otherwise unchanged. It was
+already the successful fully grown grass in the owner screenshots.
 
 The malformed low plants were not that sedge. They were `cover`: four tilted
 alpha cards, each painting dozens of spatulate leaves, uniformly scaled as low
@@ -116,8 +120,8 @@ cover site now calls `PlantingPalette.addYoungSedge()` and receives:
   ranges, rather than a barely protruding card.
 
 The shared helper is the only low-grass entry point for the First Tree collar,
-all generated park planters, the four fountain bays and rationed garden beds. A smooth
-world-space fertility field drives a local `32–64%` flowering probability
+all generated park planters, the four fountain bays and rationed garden beds.
+A smooth world-space fertility field drives a local `32–64%` flowering probability
 (49.0% in the fixed audit seed), roughly 4.5 times the former density. The
 eighth ornamental instance draw is one 267-triangle modeled daisy sharing the
 grass root: swept tapered stem, two stem leaves, five sepals, fourteen
@@ -153,6 +157,14 @@ separation and full-count deployment in the tree collar and fountain bays.
 
 `foliageMaterial.ts` owns every foliage/bark/rock material.
 
+- **Direct-light correctness begins in geometry.** Rounded card normals and
+  mound blade normals must occupy the same hemisphere as their triangle
+  winding. `DoubleSide` uses the geometric front-face flag to orient the
+  interpolated normal; opposing them makes the visible surface reject the sun
+  from either side. `tools/foliage-lighting-audit.mjs` checks winding agreement
+  and a fixed sun-behind-camera view for the First Tree, planter cards and
+  grass. This is intentionally a PBR-lighting fix, not an emissive lift, so
+  genuine cast shadows stay dark.
 - **Backlight** is the Frostbite translucency approximation
   `pow(saturate(dot(−V, L)), k)` with no normal term, because a double-sided
   card has no meaningful side. It is the park's second postcard: the low frozen

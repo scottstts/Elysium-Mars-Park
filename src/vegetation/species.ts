@@ -16,7 +16,7 @@ import type { Material } from 'three'
  *
  *   • `bladeCluster()` — real tapered strips for anything the player can
  *     stand over (sedge, the tree's ground collar). Five intersecting planes
- *     with a HAND-AUTHORED hemispherical normal `(sin, 0.34, cos)`, so a
+ *     with a HAND-AUTHORED hemispherical normal `(-sin, 0.34, cos)`, so a
  *     cluster lights like a soft mound instead of five flat fins. Lifted from
  *     the stylized-meadow-grass system; it is the reason close-range grass
  *     reads as grass and not as cardboard.
@@ -63,7 +63,11 @@ export function bladeCluster(options: BladeClusterOptions = {}): BufferGeometry 
     const cos = Math.cos(angle)
     const sin = Math.sin(angle)
     // The mound normal: never the plane's true normal.
-    const normal = new Vector3(sin, 0.34, cos).normalize()
+    // The strip's winding points horizontally along (-sin, 0, cos). Keeping
+    // the authored mound normal in that same hemisphere is essential:
+    // DoubleSide flips normals from the geometric front-face flag, so the old
+    // +sin normal became anti-lit for four of seven blade planes.
+    const normal = new Vector3(-sin, 0.34, cos).normalize()
     const base = positions.length / 3
 
     for (let segment = 0; segment <= segments; segment++) {
@@ -442,7 +446,10 @@ export class CardSink {
         const b = a + 1
         const c = a + stride
         const d = b + stride
-        this.indices.push(a, c, b, b, c, d)
+        // +Z winding, matching the +Z basis used by the rounded normal above.
+        // The old -Z winding made Three's DoubleSide correction preserve a
+        // normal facing away from the viewer on both visible sides.
+        this.indices.push(a, b, c, b, d, c)
       }
     }
     this.cards++
