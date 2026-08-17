@@ -19,20 +19,17 @@ import { sunDirectionUniform } from '../sky/sun'
 
 /**
  * Dome One's gridshell as MATH. ONE definition of the member families lives
- * here and is consumed three ways:
+ * here and is consumed two ways:
  *
  *  1. `latticeCoverage` — the members' silhouette, used for the analytic sun
  *     shadow net (multiplied into the sun inside CachedShadowClipmapNode) and
  *     the interior shaft march.
- *  2. `latticeGlassSeams` — the same STRUCTURAL families at gasket width,
- *     drawn by the glass shell directly under the real members. There is no
- *     independent pane-subdivision grid on the glazing: the heavy ribs and
- *     ring beams are the only visible grid grammar.
- *  3. `latticeSunVisibility` — (1) projected along the sun ray for any world
+ *  2. `latticeSunVisibility` — (1) projected along the sun ray for any world
  *     point, with physically growing penumbra from the 0.35° Mars sun.
  *
- * Because domeGeometry builds from the same constants, the built ribs, the
- * shadow net on the floor and the seams on the glass can never disagree.
+ * Because domeGeometry builds from the same constants, the built ribs and the
+ * shadow net on the floor can never disagree. The glass itself draws no grid
+ * or seam pattern at all.
  *
  * THE GRID IS ONE GRAMMAR, EVERYWHERE THE SAME (this replaced a tiered
  * gridshell whose glazing bars doubled at ring 8 and again at ring 16 — one
@@ -99,9 +96,6 @@ export const DOME_COLLAR_PROUD = 0.2
 /** Crane rail: section radius, and its clearance over the node collars. */
 export const DOME_RAIL_RADIUS = 0.08
 export const DOME_RAIL_CLEARANCE = 0.04
-/** Structural-silicone joint between panes: the glass's OWN line family. */
-const SEAM_HALF_WIDTH = 0.016
-
 /** Linear taper helper shared by geometry and the analytic field. */
 export function domeTaper(range: readonly [number, number], theta: number): number {
   const t = Math.min(1, Math.max(0, theta / DOME_THETA_BASE))
@@ -157,16 +151,6 @@ const MEMBER_WIDTHS: FamilyWidths = {
   hubCap: DOME_HUB_RADIUS,
 }
 
-const GLASS_SEAM_WIDTHS: FamilyWidths = {
-  rib: [SEAM_HALF_WIDTH, SEAM_HALF_WIDTH],
-  ring: [SEAM_HALF_WIDTH, SEAM_HALF_WIDTH],
-  oculus: SEAM_HALF_WIDTH,
-  hub: SEAM_HALF_WIDTH,
-  // The hub cap is opaque plate, not glass: it has no silicone joint of its
-  // own and the cap geometry covers this disc anyway.
-  hubCap: SEAM_HALF_WIDTH,
-}
-
 /**
  * Coverage of one line family set at a point on the shell.
  *
@@ -192,8 +176,8 @@ const latticeField = (
    * Distance to the nearest line of a periodic family. The `+0.5` before
    * `fract` is load-bearing: without it the family's lines land on HALF
    * indices (φ = (i+½)·2π/N, θ = (k+½)·step), i.e. exactly mid-bay, and the
-   * whole shadow net — and every silicone seam on the glass — sits half a bay
-   * out of register with the built members. Geometry builds ribs at
+    * whole shadow net sits half a bay out of register with the built members.
+    * Geometry builds ribs at
    * φ = i·2π/N and rings at θ = k·step, so the field must too.
    */
   const meridianDistance = (count: number): Node<'float'> =>
@@ -249,12 +233,6 @@ const latticeField = (
 export const latticeCoverage = /*@__PURE__*/ Fn(
   ([local, softMeters]: [Node<'vec3'>, Node<'float'>]) =>
     latticeField(local, softMeters, MEMBER_WIDTHS),
-)
-
-/** Structural sealing lines only; there is no independent pane-grid pattern. */
-export const latticeGlassSeams = /*@__PURE__*/ Fn(
-  ([local, softMeters]: [Node<'vec3'>, Node<'float'>]) =>
-    latticeField(local, softMeters, GLASS_SEAM_WIDTHS),
 )
 
 /**

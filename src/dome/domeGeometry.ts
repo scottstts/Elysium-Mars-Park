@@ -53,9 +53,8 @@ import {
  * mullion families that DOUBLED at ring 8 and again at ring 16, so one
  * structural bay carried 1 intermediate bar near the crown and 3 near the
  * foot: the grid changed grammar three times down the same rib, which is what
- * made the dome read as a spider net. The glass now draws only the narrow
- * sealing line directly beneath these structural families; there is no
- * independent pane-grid pattern between members.
+ * made the dome read as a spider net. The glass now draws no grid or seam
+ * pattern at all; every visible subdivision is real structural geometry.
  *
  * Members cast NO shadow maps: the analytic net owns all dome shadowing, so
  * the two systems can never double-darken.

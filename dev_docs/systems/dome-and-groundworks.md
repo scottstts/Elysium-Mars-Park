@@ -237,13 +237,11 @@ Everything derived from `DOME_RINGS = 36` (θ_base/36 = 4.168 m of arc) and
 
 ## One field, two widths
 
-`latticeCoverage` (members) and `latticeGlassSeams` (16 mm structural sealing
-lines) are two width sets over ONE internal family definition. The glass only
-draws the narrow seal directly beneath the actual ribs/rings; there is no
-independent pane-subdivision grid between them. This keeps the visible dome
-grammar entirely structural while still letting the physical sealing line sit
-in the glass plane. If you add a structural family, add it once in
-`latticeField` and both consumers plus the shadow net follow.
+`latticeCoverage` is the one analytic line field for the real structural
+members. The glass draws no line field at all — not between bays and not under
+the members — so every visible dome subdivision is actual gridshell geometry.
+If you add a structural family, add it once in `latticeField` and keep the
+matching geometry in `domeGeometry` in sync.
 
 ## Assembly rule that keeps the shell clean
 
@@ -316,14 +314,12 @@ were 4896. Bays run 3.0 × 11.5 m at the oculus to 34.0 × 11.5 m at the foot:
 the aspect ratio is deliberately *allowed* to drift, because that is what a
 single rule produces on a sphere, and it is the drift-free thing to look at.
 
-The glazing deliberately carries **no secondary pane grid**. The 24 ribs and
-13 ring parallels are the only visible subdivision lines on the shell; adding
-hairline meridians/parallels inside each bay made the dome read as a fine net
-again even though those lines were not geometry. `GLASS_SEAM_WIDTHS` therefore
-uses only the structural families at 16 mm sealing width, while
-`MEMBER_WIDTHS` retains the real member widths for the shadow/shaft field.
-The seals remain absent from the analytic shadow field: they are far too thin
-to deserve a separate world-scale shadow signal.
+The glazing deliberately carries **no drawn grid or seam lines whatsoever**.
+The 24 ribs and 13 ring parallels are the only visible subdivision lines on
+the shell. Even the former narrow glass-plane seals directly beneath those
+members are omitted, because their overlap could still peek out beside the
+real geometry under grazing/parallax views. `MEMBER_WIDTHS` remains only for
+the real member shadow/shaft field.
 
 ## Thick means WIDE here, not deep
 

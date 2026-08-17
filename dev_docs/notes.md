@@ -3948,3 +3948,6 @@ knowing generally:
   Clip along the attempted movement to first contact and cancel upward velocity
   on a shell hit; do not project the remaining jump motion tangentially, because
   that visibly shoves the camera sideways instead of cutting the jump short.
+
+### Dome glass carries zero line pattern (2026-08-17)
+- Removing only the secondary pane grid was not sufficient: narrow glass-plane seals beneath the real ribs/rings could still become visible at grazing angles because the glass and structural geometry are on different surfaces. The glass shell must draw no lattice/seam field at all. All visible subdivision is real `domeGeometry` structure; `latticeField` remains only for structural shadow/shaft coverage.

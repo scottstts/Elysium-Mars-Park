@@ -10,7 +10,6 @@ import {
   clamp,
   dot,
   float,
-  fwidth,
   max,
   min,
   mix,
@@ -37,7 +36,6 @@ import {
   DOME_CENTER_Y,
   DOME_SPHERE_RADIUS,
   DOME_THETA_BASE,
-  latticeGlassSeams,
   panewalkerPhi,
 } from './latticeField'
 
@@ -62,10 +60,9 @@ import {
  *   dust film    exterior soiling, heavy at the foot, minus the Panewalker's
  *                trailing clean swath. It is LIT (regolith albedo × sun),
  *                which is what makes a dirty pane glow rather than grey out.
- *   glass seams  only the structural silicone seal directly under the built
- *                ribs/rings. There is deliberately no secondary hairline
- *                pane grid on the glazing; the real gridshell is the only
- *                visible subdivision pattern.
+ *   subdivisions none. The glass itself carries no drawn grid or seam lines;
+ *                every visible dome subdivision comes only from the real
+ *                gridshell geometry in domeGeometry.
  *
  * Unlit on purpose (MeshBasicNodeMaterial): a lit material would apply its
  * own Fresnel-weighted env specular UNDER our Fresnel alpha and the pane
@@ -82,9 +79,7 @@ const FLOOR_RADIANCE = /*@__PURE__*/ vec3(0.115, 0.073, 0.048)
 const DUST_ALBEDO = /*@__PURE__*/ vec3(0.44, 0.315, 0.205)
 /** Peak alpha the dust film may add on the dirtiest unswept pane. */
 const FILM_OPACITY = 0.13
-/** Silicone joint alpha (its own coverage already anti-aliases the width). */
-const SEAM_OPACITY = 0.92
-/** Ambient sky fill used to light the film and the seams. */
+/** Ambient sky fill used to light the film. */
 const SKY_FILL = /*@__PURE__*/ vec3(0.2, 0.14, 0.088)
 
 /** Connector-tube penetration: axis (0, 4.6) along z, matching the iris. */
@@ -183,27 +178,10 @@ export function createGlassShell(): { mesh: Mesh; exteriorMesh: Mesh } {
       (sunColorUniform as unknown as Node<'vec3'>).mul(sunOnFilm.mul(1.15)).add(SKY_FILL),
     )
 
-    // ── Structural silicone joints ────────────────────────────────────────
-    // Pixel-footprint softening keeps the structural seals anti-aliased at every
-    // range — and correctly vanishing past ~120 m, where a 32 mm joint is
-    // far below one pixel.
-    const paramMeters = vec2(
-      phi.mul(DOME_SPHERE_RADIUS).mul(max(theta.sin(), 1e-3)),
-      theta.mul(DOME_SPHERE_RADIUS),
-    )
-    const pixelSoft = fwidth(paramMeters).length().mul(0.7).add(0.012)
-    const seam = latticeGlassSeams(local, pixelSoft)
-    const seamColor = vec3(0.05, 0.047, 0.045).mul(SKY_FILL.add(0.35))
-
     // ── Composite: one alpha, one weighted colour ─────────────────────────
     const filmWeight = film.mul(FILM_OPACITY)
-    const seamWeight = seam.mul(SEAM_OPACITY)
-    const coverage = clamp(reflectance.add(filmWeight).add(seamWeight), 0, 0.985)
-    material.colorNode = reflected
-      .mul(reflectance)
-      .add(dustLit.mul(filmWeight))
-      .add(seamColor.mul(seamWeight))
-      .div(max(coverage, 1e-4))
+    const coverage = clamp(reflectance.add(filmWeight), 0, 0.985)
+    material.colorNode = reflected.mul(reflectance).add(dustLit.mul(filmWeight)).div(max(coverage, 1e-4))
     material.opacityNode = coverage.mul(float(1).sub(portalCut(positionWorld)))
 
     // Alpha 0 = zero write authority under the pass-level normal-target
