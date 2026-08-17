@@ -9,8 +9,11 @@ export const MARS_GRAVITY = 3.71
 
 /**
  * Rapier world at fixed 60 Hz (stepped by the game loop), plus the immutable
- * base colliders: the park floor heightfield and the dome wall ring. Systems
- * that add colliders receive this via constructor wiring in main.ts.
+ * base colliders: the park floor heightfield and the dome springing ring.
+ * The standing player's curved-shell containment is analytic (see
+ * domeContainment.ts) so a jump that reaches the glass stops at first contact
+ * instead of being projected sideways by a character-controller slide.
+ * Systems that add colliders receive this via constructor wiring in main.ts.
  */
 export class PhysicsSystem implements GameSystem {
   readonly id = 'physics'
@@ -50,8 +53,9 @@ export class PhysicsSystem implements GameSystem {
       floorBody,
     )
 
-    // Dome wall: a ring of boxes just inside the glass. Physical containment,
-    // no invisible walls anywhere else (plan §1).
+    // Dome springing: a ring of boxes just inside the glass handles ordinary
+    // ground-level contact. The curved shell overhead is enforced against the
+    // player's full capsule by physics/domeContainment.ts.
     const wallSegments = 56
     const wallBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
     for (let i = 0; i < wallSegments; i++) {

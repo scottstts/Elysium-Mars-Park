@@ -237,13 +237,13 @@ Everything derived from `DOME_RINGS = 36` (θ_base/36 = 4.168 m of arc) and
 
 ## One field, two widths
 
-`latticeCoverage` (members) and `latticePaneSeams` (16 mm silicone joints)
-are two width sets over ONE internal family definition. The split exists
-because the members are now real geometry: painting them on the glass as
-well would double every line with up to a metre of parallax. What the glass
-legitimately owns is the joint, which really does lie in the glass plane.
-If you add a family, add it once in `latticeField` and both consumers plus
-the shadow net follow.
+`latticeCoverage` (members) and `latticeGlassSeams` (16 mm structural sealing
+lines) are two width sets over ONE internal family definition. The glass only
+draws the narrow seal directly beneath the actual ribs/rings; there is no
+independent pane-subdivision grid between them. This keeps the visible dome
+grammar entirely structural while still letting the physical sealing line sit
+in the glass plane. If you add a structural family, add it once in
+`latticeField` and both consumers plus the shadow net follow.
 
 ## Assembly rule that keeps the shell clean
 
@@ -316,29 +316,14 @@ were 4896. Bays run 3.0 × 11.5 m at the oculus to 34.0 × 11.5 m at the foot:
 the aspect ratio is deliberately *allowed* to drift, because that is what a
 single rule produces on a sphere, and it is the drift-free thing to look at.
 
-**A bay is glazed, not filled with one pane.** A structural bay is far too
-big to be a single sheet (34 × 11.5 m at the foot), so each bay carries a
-pane grid — `DOME_PANE_COLUMNS = 4` × `DOME_PANE_ROWS = 2`, i.e. 3 vertical
-seams and 1 horizontal mid-seam per bay — drawn as **hairlines by the glass**
-(`latticePaneSeams`) and never as 3-D bars. 96 meridian and 26 parallel seam
-lines over the shell, 2304 panes, 8.5 × 5.8 m at the springing down to
-~0.8 × 5.8 m at the compression ring.
-
-The rule that makes this safe is that the counts are **per bay and constant
-over the whole dome**. The killed defect was not "many lines", it was a
-subdivision count that *changed with height*; a constant count merely
-converges toward the crown, which the eye reads as perspective. Both counts
-are exact multiples of the member counts (96 = 24×4, 26 = 13×2), so every
-4th meridian seam and every 2nd parallel seam lands ON a member's own joint —
-the `max()` can never draw a doubled line and the pane grid can never drift
-out of its bay. **If you ever retune the grid, keep that divisibility.**
-
-Seams are in `SEAM_WIDTHS` only, not in `MEMBER_WIDTHS`: they are drawn on
-the glass but deliberately absent from the shadow field. A 32 mm silicone
-joint contributes ~0.9 % of *patternless* coverage that the 0.35° penumbra
-smears into precisely the uniform grey wash this rewrite removed, and it
-would be paid for per step inside the interior shaft march. One constant
-(`pane:` in `MEMBER_WIDTHS`) flips it back if seam shadows are ever wanted.
+The glazing deliberately carries **no secondary pane grid**. The 24 ribs and
+13 ring parallels are the only visible subdivision lines on the shell; adding
+hairline meridians/parallels inside each bay made the dome read as a fine net
+again even though those lines were not geometry. `GLASS_SEAM_WIDTHS` therefore
+uses only the structural families at 16 mm sealing width, while
+`MEMBER_WIDTHS` retains the real member widths for the shadow/shaft field.
+The seals remain absent from the analytic shadow field: they are far too thin
+to deserve a separate world-scale shadow signal.
 
 ## Thick means WIDE here, not deep
 

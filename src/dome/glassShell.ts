@@ -37,7 +37,7 @@ import {
   DOME_CENTER_Y,
   DOME_SPHERE_RADIUS,
   DOME_THETA_BASE,
-  latticePaneSeams,
+  latticeGlassSeams,
   panewalkerPhi,
 } from './latticeField'
 
@@ -62,14 +62,10 @@ import {
  *   dust film    exterior soiling, heavy at the foot, minus the Panewalker's
  *                trailing clean swath. It is LIT (regolith albedo × sun),
  *                which is what makes a dirty pane glow rather than grey out.
- *   pane seams   the structural silicone joints: the gasket line under every
- *                member, plus the pane grid inside each structural bay (4
- *                columns × 2 rows, constant everywhere — latticeField owns
- *                the counts). This is the ONLY place that subdivision
- *                exists: it is a joint in the glass plane, never a bar. The
- *                members themselves are real geometry (domeGeometry), so
- *                drawing them here as members too would double every one of
- *                them with up to a metre of parallax.
+ *   glass seams  only the structural silicone seal directly under the built
+ *                ribs/rings. There is deliberately no secondary hairline
+ *                pane grid on the glazing; the real gridshell is the only
+ *                visible subdivision pattern.
  *
  * Unlit on purpose (MeshBasicNodeMaterial): a lit material would apply its
  * own Fresnel-weighted env specular UNDER our Fresnel alpha and the pane
@@ -188,7 +184,7 @@ export function createGlassShell(): { mesh: Mesh; exteriorMesh: Mesh } {
     )
 
     // ── Structural silicone joints ────────────────────────────────────────
-    // Pixel-footprint softening keeps the seam grid anti-aliased at every
+    // Pixel-footprint softening keeps the structural seals anti-aliased at every
     // range — and correctly vanishing past ~120 m, where a 32 mm joint is
     // far below one pixel.
     const paramMeters = vec2(
@@ -196,7 +192,7 @@ export function createGlassShell(): { mesh: Mesh; exteriorMesh: Mesh } {
       theta.mul(DOME_SPHERE_RADIUS),
     )
     const pixelSoft = fwidth(paramMeters).length().mul(0.7).add(0.012)
-    const seam = latticePaneSeams(local, pixelSoft)
+    const seam = latticeGlassSeams(local, pixelSoft)
     const seamColor = vec3(0.05, 0.047, 0.045).mul(SKY_FILL.add(0.35))
 
     // ── Composite: one alpha, one weighted colour ─────────────────────────

@@ -24,12 +24,10 @@ import { sunDirectionUniform } from '../sky/sun'
  *  1. `latticeCoverage` — the members' silhouette, used for the analytic sun
  *     shadow net (multiplied into the sun inside CachedShadowClipmapNode) and
  *     the interior shaft march.
- *  2. `latticePaneSeams` — the same families at gasket width PLUS the pane
- *     grid inside each bay, drawn by the glass shell. The members themselves
- *     are real geometry (domeGeometry), so painting them on the glass a
- *     second time would double every line with up to a metre of parallax;
- *     what the glass owns is the silicone joint, which really does lie in the
- *     glass plane — and the pane grid, which has no member at all.
+ *  2. `latticeGlassSeams` — the same STRUCTURAL families at gasket width,
+ *     drawn by the glass shell directly under the real members. There is no
+ *     independent pane-subdivision grid on the glazing: the heavy ribs and
+ *     ring beams are the only visible grid grammar.
  *  3. `latticeSunVisibility` — (1) projected along the sun ray for any world
  *     point, with physically growing penumbra from the 0.35° Mars sun.
  *
@@ -46,9 +44,8 @@ import { sunDirectionUniform } from '../sky/sun'
  *   13 ring parallels 11.54 m of arc apart. Ring 1 IS the oculus compression
  *   ring; rings 2…12 are the built ring beams; ring 13 is the springing,
  *   where the plinth and the glazing boot take over from a beam.
- *   NO glazing bars — no 3-D member subdivides a bay. The glazing inside a
- *   bay is a grid of panes whose joints the GLASS draws as hairlines
- *   (latticePaneSeams), 4 columns × 2 rows per bay everywhere on the shell.
+ *   NO glazing bars and NO hairline pane grid — no secondary pattern
+ *   subdivides a structural bay visually.
  *
  * Bays run 3.0 m × 11.5 m at the oculus to 34.0 m × 11.5 m at the springing —
  * deliberately large, because the members that remain are heavy enough to
@@ -95,26 +92,6 @@ export const DOME_OCULUS_HALF_WIDTH = 0.8
 export const DOME_OCULUS_DEPTH = 1.85
 export const DOME_HUB_BAR_HALF_WIDTH = 0.16
 export const DOME_HUB_BAR_DEPTH = 0.42
-/**
- * GLAZING SUBDIVISION — the glass's own joints, and the ONLY thing in this
- * file that is not a member. A structural bay is far too big to be one cast
- * pane (34 × 11.5 m at the springing), so each bay is glazed as a grid of
- * panes whose joints are drawn as hairlines by the glass shell and are never,
- * ever built as 3-D bars.
- *
- * The counts are PER BAY and CONSTANT over the whole dome — that is the whole
- * point. The defect this shell was rebuilt to kill was a subdivision count
- * that CHANGED with height (bars doubling at ring 8 and again at ring 16), so
- * the eye met three different grammars walking down one rib. A constant count
- * simply converges toward the crown, which reads as perspective rather than
- * as a rule change.
- */
-export const DOME_PANE_COLUMNS = 4 // 3 vertical seams inside every bay
-export const DOME_PANE_ROWS = 2 // 1 horizontal mid-seam in every ring band
-/** Meridian / parallel seam-line counts over the whole shell (derived). */
-export const DOME_PANE_MERIDIANS = DOME_RIBS * DOME_PANE_COLUMNS // 96
-export const DOME_PANE_PARALLELS = DOME_RINGS * DOME_PANE_ROWS // 26
-
 /** Inner face of every member, radially proud of the glass. */
 export const DOME_MEMBER_INSET = 0.06
 /** Cast node collar's radial overhang past the rib's outer face. */
@@ -164,18 +141,12 @@ const TWO_PI = Math.PI * 2
 /** Ring index of the compression ring's inner face (where the oculus starts). */
 const OCULUS_INNER_INDEX =
   (DOME_OCULUS_THETA - DOME_OCULUS_HALF_WIDTH / DOME_SPHERE_RADIUS) / DOME_RING_STEP
-/** …and of its outer face, where the shell glazing (and its seams) begins. */
-const OCULUS_OUTER_INDEX =
-  (DOME_OCULUS_THETA + DOME_OCULUS_HALF_WIDTH / DOME_SPHERE_RADIUS) / DOME_RING_STEP
-
 interface FamilyWidths {
   rib: readonly [number, number]
   ring: readonly [number, number]
   oculus: number
   hub: number
   hubCap: number
-  /** Glazing joints inside a bay; null = this consumer does not draw them. */
-  pane: number | null
 }
 
 const MEMBER_WIDTHS: FamilyWidths = {
@@ -184,15 +155,9 @@ const MEMBER_WIDTHS: FamilyWidths = {
   oculus: DOME_OCULUS_HALF_WIDTH,
   hub: DOME_HUB_BAR_HALF_WIDTH,
   hubCap: DOME_HUB_RADIUS,
-  // The structural net owns the shadow; a 32 mm silicone joint would add
-  // ~0.9 % of PATTERNLESS coverage that the 0.35° penumbra smears into
-  // exactly the uniform grey wash this field was rewritten to avoid — and it
-  // would pay for it in the interior shaft march, which evaluates this per
-  // step. Flip to SEAM_HALF_WIDTH if seam shadows are ever wanted.
-  pane: null,
 }
 
-const SEAM_WIDTHS: FamilyWidths = {
+const GLASS_SEAM_WIDTHS: FamilyWidths = {
   rib: [SEAM_HALF_WIDTH, SEAM_HALF_WIDTH],
   ring: [SEAM_HALF_WIDTH, SEAM_HALF_WIDTH],
   oculus: SEAM_HALF_WIDTH,
@@ -200,7 +165,6 @@ const SEAM_WIDTHS: FamilyWidths = {
   // The hub cap is opaque plate, not glass: it has no silicone joint of its
   // own and the cap geometry covers this disc anyway.
   hubCap: SEAM_HALF_WIDTH,
-  pane: SEAM_HALF_WIDTH,
 }
 
 /**
@@ -278,23 +242,7 @@ const latticeField = (
   // The hub cap is a solid plate, so it is a disc of coverage, not a line.
   const hubCap = line(theta.mul(DOME_SPHERE_RADIUS), widths.hubCap).mul(insideOculus)
 
-  const structure = max(max(ribs, rings), max(oculusRing, max(hubSpokes, hubCap)))
-  if (widths.pane === null) return structure
-
-  /**
-   * Glazing joints. Both counts are exact multiples of the member counts
-   * (96 = 24 ribs × 4, 26 = 13 rings × 2), so every 4th meridian seam and
-   * every 2nd parallel seam lands ON a member's own joint instead of beside
-   * it — the `max()` below can never draw a doubled line, and the pane grid
-   * can never drift out of the structural bay it belongs to.
-   */
-  const paneMeridians = line(meridianDistance(DOME_PANE_MERIDIANS), widths.pane)
-  const paneParallels = line(ringDistance(DOME_PANE_PARALLELS), widths.pane)
-  // Shell glazing only: the oculus is glazed by the hub spokes, not by this
-  // grid, so the seams start at the compression ring's outer face.
-  const panes = max(paneMeridians, paneParallels).mul(outboardOf(OCULUS_OUTER_INDEX))
-
-  return max(structure, panes)
+  return max(max(ribs, rings), max(oculusRing, max(hubSpokes, hubCap)))
 }
 
 /** Structural members' silhouette — shadow net + volumetric shafts. */
@@ -303,10 +251,10 @@ export const latticeCoverage = /*@__PURE__*/ Fn(
     latticeField(local, softMeters, MEMBER_WIDTHS),
 )
 
-/** The same grid at silicone-joint width — the glass shell's own lines. */
-export const latticePaneSeams = /*@__PURE__*/ Fn(
+/** Structural sealing lines only; there is no independent pane-grid pattern. */
+export const latticeGlassSeams = /*@__PURE__*/ Fn(
   ([local, softMeters]: [Node<'vec3'>, Node<'float'>]) =>
-    latticeField(local, softMeters, SEAM_WIDTHS),
+    latticeField(local, softMeters, GLASS_SEAM_WIDTHS),
 )
 
 /**

@@ -1,5 +1,6 @@
 import { Vector3 } from 'three'
 import type RAPIER from '@dimforge/rapier3d-compat'
+import { clipCapsuleMovementToDome } from '../physics/domeContainment'
 import { MARS_GRAVITY, PhysicsSystem } from '../physics/physicsWorld'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
@@ -71,6 +72,7 @@ export class PlayerSystem implements GameSystem {
   private seatYawCarry: number | null = null
   private readonly walkEye = new Vector3()
   private readonly desiredMovement = { x: 0, y: 0, z: 0 }
+  private readonly resolvedMovement = { x: 0, y: 0, z: 0 }
   private readonly nextTranslation = { x: 0, y: 0, z: 0 }
 
   /** Locomotion gate for camera rigs; look stays live regardless. */
@@ -326,13 +328,38 @@ export class PlayerSystem implements GameSystem {
     desiredMovement.x = this.velocity.x * dt
     desiredMovement.y = this.velocity.y * dt
     desiredMovement.z = this.velocity.z * dt
+    // The springing wall is vertical, but the pressure glass curves inward
+    // above it. Clip the capsule's actual attempted motion to that sphere
+    // before Rapier can turn an upward shell impact into a sideways slide.
+    const attemptedUpwardMovement = desiredMovement.y > 0
+    const hitDomeBeforeController = clipCapsuleMovementToDome(
+      body.translation(),
+      desiredMovement,
+      CAPSULE_HALF_HEIGHT,
+      CAPSULE_RADIUS,
+    )
+    if (hitDomeBeforeController && attemptedUpwardMovement) this.velocity.y = 0
+
     controller.computeColliderMovement(collider, desiredMovement)
     const movement = controller.computedMovement()
     const translation = body.translation()
+    const resolvedMovement = this.resolvedMovement
+    resolvedMovement.x = movement.x
+    resolvedMovement.y = movement.y
+    resolvedMovement.z = movement.z
+    const controllerMovedUpward = resolvedMovement.y > 0
+    const hitDomeAfterController = clipCapsuleMovementToDome(
+      translation,
+      resolvedMovement,
+      CAPSULE_HALF_HEIGHT,
+      CAPSULE_RADIUS,
+    )
+    if (hitDomeAfterController && controllerMovedUpward) this.velocity.y = 0
+
     const next = this.nextTranslation
-    next.x = translation.x + movement.x
-    next.y = translation.y + movement.y
-    next.z = translation.z + movement.z
+    next.x = translation.x + resolvedMovement.x
+    next.y = translation.y + resolvedMovement.y
+    next.z = translation.z + resolvedMovement.z
     body.setTranslation(next, false)
 
     this.grounded = controller.computedGrounded()

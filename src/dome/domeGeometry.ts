@@ -32,8 +32,8 @@ import {
 } from './latticeField'
 
 /**
- * The BUILT gridshell of Dome One — every line the analytic field in
- * latticeField.ts describes is real geometry here, at the same θ/φ:
+ * The BUILT gridshell of Dome One — every structural line described by
+ * `latticeCoverage` in latticeField.ts is real geometry here, at the same θ/φ:
  *
  *   ribs      24 continuous lofted FLANGED sections, foundation → oculus,
  *             tapering 0.84 × 1.55 m at the springing to 0.36 × 0.62 m at the
@@ -53,9 +53,9 @@ import {
  * mullion families that DOUBLED at ring 8 and again at ring 16, so one
  * structural bay carried 1 intermediate bar near the crown and 3 near the
  * foot: the grid changed grammar three times down the same rib, which is what
- * made the dome read as a spider net. One bay is now one pane, and the pane
- * joint is a silicone line the glass draws (latticeField.latticePaneSeams),
- * not a member.
+ * made the dome read as a spider net. The glass now draws only the narrow
+ * sealing line directly beneath these structural families; there is no
+ * independent pane-grid pattern between members.
  *
  * Members cast NO shadow maps: the analytic net owns all dome shadowing, so
  * the two systems can never double-darken.

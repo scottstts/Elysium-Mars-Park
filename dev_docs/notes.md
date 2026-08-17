@@ -3935,3 +3935,16 @@ knowing generally:
 
 ### Three r185 internal ShadowNode typing caveat (2026-08-17)
 - `ShadowNode.setupRenderTarget(...)` exists in the r185 runtime implementation but is not declared on the published `ShadowNode` TypeScript type. The compatibility shadow subclass must invoke the stock implementation through a narrowly typed `ShadowNode.prototype.setupRenderTarget.call(...)`; a direct `super.setupRenderTarget(...)` fails `tsc -b` with TS2339. This preserves the stock non-Windows/Mac path without augmenting Three's package types.
+
+## Dome glazing grid removal + curved-shell jump containment (2026-08-17)
+
+- The glass no longer draws any independent pane-subdivision grid. Keep the
+  24-rib × 13-ring structural grammar as the only visible dome grid; the glass
+  may draw only the narrow sealing line directly beneath those real members.
+- The springing ring collider is not enough to contain a jumping capsule near
+  the rim because the spherical glass curves inward above it. Standing-player
+  motion is now clipped analytically against the full spherical pressure shell,
+  shrinking the sphere by capsule radius and offsetting for capsule half-height.
+  Clip along the attempted movement to first contact and cancel upward velocity
+  on a shell hit; do not project the remaining jump motion tangentially, because
+  that visibly shoves the camera sideways instead of cutting the jump short.
