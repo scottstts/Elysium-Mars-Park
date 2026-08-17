@@ -2145,6 +2145,14 @@ export function buildPaving(): PavingBuild {
   }
   const triangles = writer.triangleCount()
   const group = writer.build(materials, { castShadow: false })
+  // Most paving stays shadowless: the slabs are the receiving surface and do
+  // not need to spend shadow budget casting onto each other. The raised
+  // concrete package includes the planter walls, curbs and steps, and those do
+  // need to shade the ground so the sun read matches the vegetation growing in
+  // them.
+  for (const child of group.children) {
+    if (child.name === 'ground:concrete') child.castShadow = true
+  }
   group.name = 'paving'
   return { group, colliders, triangles }
 }

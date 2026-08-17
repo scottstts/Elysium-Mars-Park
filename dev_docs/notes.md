@@ -3898,3 +3898,12 @@ knowing generally:
 - Fix winding or authored-normal orientation before touching albedo, ambient
   intensity or emissive. A material lift can hide the defect, but it also
   flattens real shadowing and leaves directional lighting physically wrong.
+
+
+## Paving concrete shadow policy (2026-08-17)
+
+- The shared paving build still disables casting for the broad slab surfaces,
+  but the raised `ground:concrete` mesh must cast sun shadows. That single
+  mesh contains the planter walls, curbs and steps; leaving it shadowless made
+  grass appear anchored in light while the surrounding concrete containers read
+  flat against the paving.
