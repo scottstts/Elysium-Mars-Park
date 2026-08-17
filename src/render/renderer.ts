@@ -33,10 +33,13 @@ export async function createRenderer(
     throw new Error('webgpu-backend-unavailable')
   }
 
-  renderer.setPixelRatio(recommendedPixelRatio())
   // Hidden panes/minimized windows report 0x0 at boot; a 0-sized canvas
-  // makes an invalid swapchain. Start at 1x1 and let resize catch up.
-  renderer.setSize(Math.max(1, window.innerWidth), Math.max(1, window.innerHeight))
+  // makes an invalid swapchain. Start at 1x1 and let resize catch up. Commit
+  // logical size + DPR atomically so large render-target graphs are not
+  // reallocated once for setPixelRatio() and again for setSize().
+  const width = Math.max(1, window.innerWidth)
+  const height = Math.max(1, window.innerHeight)
+  renderer.setDrawingBufferSize(width, height, recommendedPixelRatio(width, height))
   // Never tone-map at the renderer — the pipeline's explicit renderOutput()
   // is the single output transform (side targets must stay linear).
   renderer.toneMapping = NoToneMapping
@@ -44,7 +47,7 @@ export async function createRenderer(
   return renderer
 }
 
-/** CLAUDE.md DPR policy: cap DPR and total drawing-buffer pixels. */
+/** AGENTS.md DPR policy: cap DPR and total drawing-buffer pixels. */
 export function recommendedPixelRatio(
   width = window.innerWidth,
   height = window.innerHeight,
@@ -55,5 +58,7 @@ export function recommendedPixelRatio(
     1.7,
     Math.sqrt(maxPixels / Math.max(1, width * height)),
   )
-  return Math.max(1, dpr)
+  // Do not floor at DPR 1: on a CSS viewport larger than maxPixels (common
+  // on 4K Windows desktops at 100% scaling), doing so defeats the pixel cap.
+  return Number.isFinite(dpr) && dpr > 0 ? dpr : 1
 }

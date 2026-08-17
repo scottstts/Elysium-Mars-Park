@@ -7,6 +7,11 @@ import {
 } from '../render/cachedShadowClipmaps'
 import { DISTANT_TERRAIN_SHADOW_LAYER, DYNAMIC_SHADOW_LAYER } from '../render/layers'
 import { createStaticShadowScene } from '../render/staticShadowScene'
+import { isWindowsPlatform } from '../core/platform'
+import {
+  STARSHIP_DYNAMIC_SHADOW_LEVEL,
+  STARSHIP_STATIC_SHADOW_GROUP,
+} from '../starship/starshipShadow'
 import {
   DISTANT_TERRAIN_SHADOW_DEPTH_BIAS_WORLD,
   DISTANT_TERRAIN_SHADOW_HALF_WIDTH,
@@ -100,9 +105,12 @@ export class SkySystem implements GameSystem {
   private dome: Mesh | null = null
   private clipmaps: CachedShadowClipmapNode | null = null
   private fixtures: LightFixtureRig | null = null
+  private removeStarshipShadowListener: (() => void) | null = null
+  private pendingStarshipDynamicRelease = false
 
   init(ctx: GameContext): void {
     const { scene, renderer, quality } = ctx
+    const windows = isWindowsPlatform()
 
     const domeMaterial = new MeshBasicNodeMaterial()
     domeMaterial.colorNode = marsSkyRadiance(normalize(positionLocal), float(1))
@@ -173,25 +181,32 @@ export class SkySystem implements GameSystem {
       // it lives on a 97 m loop, so 90 m covers "everything moving that the
       // player can see move".
       //
-      // A THIRD RUNG AT 440 m EXISTS ONLY FOR THE STARSHIP. Once the vehicle
-      // flies it cannot be in the cached static bundle — that bundle is sealed
-      // during the loading frame and immutable after, so a moving mesh would
-      // leave its shadow welded to the pad forever. Moving it to this layer
-      // fixes that and creates a second problem: the pad is 93–340 m from the
-      // camera and the stack's LIGHT-space reach at 27° is ~298 m (measured,
-      // tools/starship-site-audit.mjs), all far outside 90 m. Without this rung
-      // the tower would go on printing its 287 m shadow across the regolith
-      // while the 147 m rocket standing beside it printed nothing.
-      //
-      // 440 m is the static L4's number, chosen there against the same measured
-      // 298 m worst case. The cost is one more continuously refreshed map: the
-      // stack's 353 k triangles while it is low (frustum culling drops it once
-      // it climbs out of the box), plus the robots and the tram, which were
-      // already paying for two. Texel is 0.43 m at tier 0 — soft, but a soft
-      // 147 m streak on regolith reads as penumbra, and the alternative is no
-      // streak at all.
+      // A THIRD RUNG AT 440 m EXISTS ONLY FOR THE STARSHIP IN FLIGHT. Parked,
+      // the stack lives in a switchable frozen-static bundle and this map stays
+      // dormant. Ignition activates the live rung while the vehicle is still
+      // held down, then retires the cached copy before liftoff; touchdown does
+      // the reverse handoff before this rung returns to its dormant allocation.
+      // The pad is 93–340 m from the camera and the stack's LIGHT-space reach
+      // at 27° is ~298 m (tools/starship-site-audit.mjs), so the ordinary 90 m
+      // moving-caster fallback cannot preserve the ascent shadow. 440 m matches
+      // static L4's proven coverage and remains live for the entire flight.
       dynamicCasterHalfWidths: [12, 90, 440],
       dynamicCasterMapSizes: [tierSizes[0], tierSizes[0], tierSizes[0]],
+      // The first two levels serve ordinary moving park actors continuously.
+      // The 440 m rung exists only for a flying Starship, so keep it at a tiny
+      // allocation until ignition and return it there only after touchdown's
+      // cached-shadow handback has completed.
+      dynamicCasterInitialActiveLevels: 2,
+      // Preserve Metal's established allocation so the first ignition never
+      // introduces a new large texture resize on a platform that is already
+      // stable. Windows alone shrinks the dormant far level to reclaim VRAM.
+      dynamicCasterDormantMapSize: windows ? 64 : tierSizes[0],
+      // Metal already runs this workload reliably and keeps its established
+      // eager bundle warmup. Windows/D3D12 records only locally-relevant
+      // bundles on demand and uses one-channel auxiliary shadow color targets
+      // to avoid hundreds of MiB of color storage that shadow sampling ignores.
+      prewarmAllStaticBundles: !windows,
+      compactShadowColorTarget: windows,
       // Mountains and sun are immutable. A shadow-only mesh sharing the exact
       // visible-terrain geometry renders on an isolated layer once during
       // loading, then every lit receiver reuses it. Exact caster/receiver
@@ -204,6 +219,30 @@ export class SkySystem implements GameSystem {
       distantTerrainShadowNormalBias: DISTANT_TERRAIN_SHADOW_NORMAL_BIAS,
       distantTerrainShadowDepthBiasWorld: DISTANT_TERRAIN_SHADOW_DEPTH_BIAS_WORLD,
     }).attach()
+
+    this.removeStarshipShadowListener = ctx.events.on(
+      'starship/dynamic-shadow',
+      ({ active }) => {
+        const clipmaps = this.clipmaps
+        if (!clipmaps) return
+        if (active) {
+          // Live first, cached second. During ignition the vehicle is still
+          // stationary, so their short overlap is identical and `min()` keeps
+          // it from becoming darker while the static levels retire the proxy.
+          clipmaps.setDynamicCasterLevelActive(STARSHIP_DYNAMIC_SHADOW_LEVEL, true)
+          clipmaps.setStaticCasterGroupEnabled(STARSHIP_STATIC_SHADOW_GROUP, false)
+          this.pendingStarshipDynamicRelease = false
+          return
+        }
+
+        // Touchdown is the reverse handoff. Reintroduce the parked proxy, then
+        // hold the live 440 m map until every static clipmap has rendered that
+        // content revision. This guarantees the ascent/landing shadow never
+        // has a missing frame merely to save memory.
+        clipmaps.setStaticCasterGroupEnabled(STARSHIP_STATIC_SHADOW_GROUP, true)
+        this.pendingStarshipDynamicRelease = true
+      },
+    )
 
     // Fixed sky → bake the environment exactly once. The bake dome reuses
     // the same radiance material so IBL and the visible sky cannot disagree.
@@ -224,6 +263,12 @@ export class SkySystem implements GameSystem {
   update(ctx: GameContext): void {
     // The dome rides the camera: the sky is at optical infinity.
     this.dome?.position.copy(ctx.camera.position)
+
+    if (this.pendingStarshipDynamicRelease && this.clipmaps?.isStaticCacheSettled()) {
+      this.clipmaps.setDynamicCasterLevelActive(STARSHIP_DYNAMIC_SHADOW_LEVEL, false)
+      this.pendingStarshipDynamicRelease = false
+      ctx.events.emit('starship/static-shadow-ready', {})
+    }
   }
 
   /** Called after every world system initialized, before the first render. */
@@ -233,9 +278,15 @@ export class SkySystem implements GameSystem {
     this.clipmaps.setStaticCasterScene(staticShadows)
   }
 
-  /** Force every clipmap level to re-render on the next frame (warmup). */
-  invalidateShadowLevels(): void {
-    this.clipmaps?.invalidate()
+  /** Refill every static level; Windows can spread the work across submissions. */
+  invalidateShadowLevels(incremental = false): void {
+    if (incremental) this.clipmaps?.invalidateIncremental()
+    else this.clipmaps?.invalidate()
+  }
+
+  /** Loading-only convergence check for staged Windows shadow warmup. */
+  staticShadowWarmupComplete(): boolean {
+    return this.clipmaps?.isStaticCacheSettled() ?? true
   }
 
   /** Read-only state for the opt-in arrival profiler and visual validation. */
@@ -245,6 +296,9 @@ export class SkySystem implements GameSystem {
 
   dispose(ctx: GameContext): void {
     if (this.dome) ctx.scene.remove(this.dome)
+    this.removeStarshipShadowListener?.()
+    this.removeStarshipShadowListener = null
+    this.pendingStarshipDynamicRelease = false
     this.clipmaps?.detach()
     this.fixtures?.dispose(ctx.scene)
     this.fixtures = null

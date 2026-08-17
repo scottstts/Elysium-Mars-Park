@@ -6,6 +6,7 @@ import type { GameEvents } from './core/gameEvents'
 import { auditPostcardBookmarks } from './core/postcards'
 import { Rng } from './core/prng'
 import { QualityState } from './core/quality'
+import { isWindowsPlatform } from './core/platform'
 import { DomeSystem } from './dome/domeSystem'
 import { interiorHazeStrength, shaftStrength } from './dome/interiorHaze'
 import { gradeParams } from './render/grade'
@@ -23,6 +24,7 @@ import { RobotsSystem } from './robots/robotsSystem'
 import { VegetationSystem } from './vegetation/vegetationSystem'
 import { RenderPipelineSystem } from './render/pipeline'
 import { createRenderer, recommendedPixelRatio, webgpuAvailable } from './render/renderer'
+import { installRendererFailureHandlers } from './render/rendererFailure'
 import { SkySystem } from './sky/skySystem'
 import type { GameContext } from './runtime/context'
 import { GameLoop } from './runtime/loop'
@@ -43,8 +45,46 @@ import { TestGallerySystem } from './world/testGallery'
 // The year the first crew broke ground at Elysium Base.
 const DEFAULT_SEED = 20520114
 
+let bootStage = 'entry'
+let activeEntry: ReturnType<typeof createEntryScreen> | null = null
+let activeLoop: GameLoop | null = null
+let bootFinished = false
+let fatalShown = false
+let windowsPlatform = false
+let bootRendererFailure: Error | null = null
+
+function describeFailure(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`
+  return String(error)
+}
+
+function showFatalError(title: string, error: unknown, detail = ''): void {
+  if (fatalShown) return
+  fatalShown = true
+  activeLoop?.stop()
+  const entry = activeEntry ?? createEntryScreen(document.body)
+  activeEntry = entry
+  const width = Math.max(1, window.innerWidth)
+  const height = Math.max(1, window.innerHeight)
+  const diagnostics = [
+    `Stage ${bootStage}`,
+    describeFailure(error),
+    detail,
+    `${width}×${height} CSS px · device DPR ${window.devicePixelRatio.toFixed(2)} · render DPR ${recommendedPixelRatio(width, height).toFixed(2)}`,
+    windowsPlatform ? 'Platform Windows' : 'Platform non-Windows',
+  ].filter(Boolean).join(' · ')
+  entry.showError(title, diagnostics)
+}
+
+function yieldBrowserTask(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0))
+}
+
 async function boot(): Promise<void> {
   const entry = createEntryScreen(document.body)
+  activeEntry = entry
+  windowsPlatform = isWindowsPlatform()
+  bootStage = 'webgpu-gate'
   const flags = parseFlags()
   const validationMode = flags.view !== null || flags.pass !== 'final'
 
@@ -61,15 +101,33 @@ async function boot(): Promise<void> {
   document.body.prepend(canvas)
 
   entry.setProgress('render-pipeline', 0.05)
+  bootStage = 'renderer-init'
   let renderer
   try {
     renderer = await createRenderer(canvas, flags.debug)
-  } catch {
-    entry.showError(
-      'WebGPU required',
-      'A WebGPU adapter was found but could not be initialized. Please update your browser or graphics drivers.',
-    )
+  } catch (error) {
+    showFatalError('WebGPU initialization failed', error)
     return
+  }
+
+  installRendererFailureHandlers(renderer, (failure) => {
+    const detail = `${failure.api} ${failure.type}: ${failure.message}`
+    // Any uncaptured GPU error during boot invalidates the warmup result. Once
+    // gameplay has started, keep validation diagnostics non-fatal but always
+    // surface device loss, OOM and internal backend failures.
+    if (!bootFinished) {
+      bootRendererFailure = new Error(detail)
+    }
+    if (!bootFinished || failure.fatal) {
+      showFatalError(
+        failure.kind === 'device-lost' ? 'Graphics device lost' : 'Graphics error',
+        failure.message,
+        detail,
+      )
+    }
+  })
+  const throwIfBootRendererFailed = (): void => {
+    if (bootRendererFailure) throw bootRendererFailure
   }
 
   const scene = new Scene()
@@ -88,17 +146,26 @@ async function boot(): Promise<void> {
     time: { elapsed: 0, sim: 0, frame: 0, paused: true },
   }
 
-  const handleResize = (): void => {
+  let resizeFrame: number | null = null
+  const commitResize = (): void => {
+    resizeFrame = null
+    if (fatalShown) return
     const width = window.innerWidth
     const height = window.innerHeight
     // A hidden/minimized window reports 0x0; a 0-sized swapchain poisons
     // every render pass with validation errors. Keep the last real size.
     if (width === 0 || height === 0) return
-    renderer.setPixelRatio(recommendedPixelRatio(width, height))
-    renderer.setSize(width, height)
+    const pixelRatio = recommendedPixelRatio(width, height) * ctx.quality.renderScale
+    // One atomic drawing-buffer change. Calling setPixelRatio() and setSize()
+    // separately reallocates this renderer's very large target graph twice.
+    renderer.setDrawingBufferSize(width, height, pixelRatio)
     camera.aspect = width / height
     camera.updateProjectionMatrix()
     ctx.events.emit('render/resized', { width, height, renderScale: ctx.quality.renderScale })
+  }
+  const handleResize = (): void => {
+    if (fatalShown || resizeFrame !== null) return
+    resizeFrame = window.requestAnimationFrame(commitResize)
   }
   window.addEventListener('resize', handleResize)
 
@@ -164,22 +231,40 @@ async function boot(): Promise<void> {
     throw new Error(`Missing postcard bookmarks: ${postcardAudit.missing.join(', ')}`)
   }
 
-  await registry.init(ctx, (label, index, total) =>
-    entry.setProgress(label, 0.1 + 0.8 * (index / Math.max(1, total))),
-  )
+  bootStage = 'systems-init'
+  await registry.init(ctx, (label, index, total) => {
+    bootStage = `init:${label}`
+    entry.setProgress(label, 0.1 + 0.8 * (index / Math.max(1, total)))
+  })
 
   // The frozen world records its shadow bundle once, behind the entry screen.
+  bootStage = 'static-shadow-seal'
   sky.sealStaticShadowCasters(scene)
 
   // Lay out the boot-time camera and live canvas textures once without
   // advancing simulation. The player begins inside a moving tram, so init()
   // alone has not yet copied that seated pose onto the camera.
+  bootStage = 'initial-layout'
   registry.update(ctx, 0, 0)
   registry.lateUpdate(ctx, 0, 0)
 
+  const finishWindowsBatch = async (): Promise<void> => {
+    if (!windowsPlatform) {
+      throwIfBootRendererFailed()
+      return
+    }
+    await pipeline.finishWarmup()
+    await yieldBrowserTask()
+    throwIfBootRendererFailed()
+  }
+
   entry.setProgress('prewarm', 0.92)
+  bootStage = 'pipeline-compile'
   await pipeline.compileAsync()
+  await finishWindowsBatch()
+  bootStage = 'scene-compile:arrival'
   await pipeline.compileSceneAsync()
+  await finishWindowsBatch()
 
   if (!validationMode) {
     // Compile the ACTUAL scene pass at the same wide poses previously used as
@@ -189,38 +274,77 @@ async function boot(): Promise<void> {
     entry.setProgress('prewarm', 0.96)
     const arrivalPosition = camera.position.clone()
     const arrivalQuaternion = camera.quaternion.clone()
+
     camera.position.set(100, 80, 135)
     camera.lookAt(0, 20, 0)
+    bootStage = 'scene-compile:wide-aerial'
     await pipeline.compileSceneAsync()
+    await finishWindowsBatch()
+
+    bootStage = 'optimus-lod-warmup'
     await optimus.compileAllLods(async () => {
       await pipeline.compileSceneAsync()
-      // Three r185's scene compiler still omits these grouped InstancedMesh
-      // variants. A real covered render exercises the exact node-build path
-      // that would otherwise run at the tunnel mouth.
+      await finishWindowsBatch()
       pipeline.render()
+      await finishWindowsBatch()
     })
+    bootStage = 'scene-render:wide-aerial'
     pipeline.render()
+    await finishWindowsBatch()
+
     camera.position.set(0, 4.2, 246)
     camera.lookAt(0, 2, 100)
+    bootStage = 'scene-compile:portal'
     await pipeline.compileSceneAsync()
+    await finishWindowsBatch()
+    bootStage = 'scene-render:portal'
     pipeline.render()
+    await finishWindowsBatch()
+
     camera.position.set(-40, 3, -30)
     camera.lookAt(-150, 4, -60)
+    bootStage = 'scene-compile:west'
     await pipeline.compileSceneAsync()
+    await finishWindowsBatch()
+    bootStage = 'scene-render:west'
     pipeline.render()
+    await finishWindowsBatch()
 
     // The broad poses must not leave camera-centred shadow maps committed far
-    // from the arrival tram. Restore the real seat pose, force every static
-    // level to that centre while still loading, and wait for GPU completion.
+    // from the arrival tram. Restore the real seat pose before BOARD.
     camera.position.copy(arrivalPosition)
     camera.quaternion.copy(arrivalQuaternion)
+    bootStage = 'scene-compile:arrival-final'
     await pipeline.compileSceneAsync()
-    sky.invalidateShadowLevels()
-    pipeline.render()
-    await pipeline.finishWarmup()
+    await finishWindowsBatch()
+
+    if (windowsPlatform) {
+      // D3D12 gets one cached level per fenced submission. Combined with the
+      // Windows-only lazy BundleGroup policy this records only the arrival
+      // region now, never every spatial bundle × every clipmap level at once.
+      sky.invalidateShadowLevels(true)
+      let passes = 0
+      while (!sky.staticShadowWarmupComplete()) {
+        if (passes++ >= 32) throw new Error('static-shadow-warmup-did-not-converge')
+        bootStage = `static-shadow-warmup:${passes}`
+        pipeline.render()
+        await finishWindowsBatch()
+      }
+    } else {
+      // Preserve the established Metal path exactly: all forced levels are
+      // refreshed together, followed by the single final GPU fence.
+      bootStage = 'static-shadow-warmup'
+      sky.invalidateShadowLevels()
+      pipeline.render()
+      await pipeline.finishWarmup()
+      throwIfBootRendererFailed()
+    }
   }
 
+  throwIfBootRendererFailed()
+  bootStage = 'game-loop'
   const loop = new GameLoop(ctx, registry)
+  activeLoop = loop
   let firstGameplayFramePending = false
   loop.renderFrame = () => {
     pipeline.render()
@@ -267,6 +391,7 @@ async function boot(): Promise<void> {
     })
   }
 
+  bootStage = 'board'
   if (!validationMode) await entry.showEnter()
   entry.hide()
   ctx.events.emit('park/entered', { arrival: !validationMode })
@@ -274,6 +399,10 @@ async function boot(): Promise<void> {
   // releases it only after this first unpaused gameplay frame is submitted.
   firstGameplayFramePending = !validationMode
   ctx.time.paused = false
+  bootFinished = true
+  bootStage = 'running'
 }
 
-void boot()
+void boot().catch((error) => {
+  showFatalError('Loading failed', error)
+})

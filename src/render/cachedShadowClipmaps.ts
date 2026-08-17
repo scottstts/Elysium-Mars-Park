@@ -1,12 +1,17 @@
 import {
+  DepthTexture,
+  GreaterEqualCompare,
+  LessEqualCompare,
   Light,
   Matrix4,
   Object3D,
+  RedFormat,
   Sphere,
+  UnsignedByteType,
   Vector3,
   Vector4,
 } from 'three'
-import type { DirectionalLight, DirectionalLightShadow } from 'three'
+import type { DirectionalLight, DirectionalLightShadow, RenderTarget } from 'three'
 import { NodeUpdateType, ShadowBaseNode, ShadowNode } from 'three/webgpu'
 import type { Node, NodeBuilder, NodeFrame } from 'three/webgpu'
 import {
@@ -42,6 +47,7 @@ const DIRTY_FORCED = 1 << 2
 const DIRTY_MOVED = 1 << 3
 const DIRTY_EXPIRED = 1 << 4
 const DIRTY_DIRECTION = 1 << 5
+const DIRTY_CONTENT = 1 << 6
 
 /** How far ahead (in seconds of travel) recentering leads a moving camera. */
 const LEAD_SECONDS = 1
@@ -66,6 +72,7 @@ interface ClipmapLight extends Object3D {
 }
 
 interface LevelState {
+  contentRevision: number
   halfWidth: number
   centerX: number
   centerY: number
@@ -97,13 +104,14 @@ interface ShadowFilterArguments {
 }
 
 interface InternalShadowNode extends ShadowNode {
-  shadowMap?: unknown
+  shadowMap?: RenderTarget
   updateShadow(frame: NodeFrame): void
 }
 
 interface DynamicCasterLevel {
   halfWidth: number
   mapSize: number
+  active: boolean
   light: ClipmapLight
   shadowNode: BoundedShadowNode
   center: Vector3
@@ -156,6 +164,14 @@ export interface ShadowClipmapOptions {
   dynamicCasterHalfWidths?: readonly number[]
   /** Per-level map sizes paired with `dynamicCasterHalfWidths`. */
   dynamicCasterMapSizes?: readonly number[]
+  /** Number of dynamic levels that begin active; later levels stay tiny/dormant. */
+  dynamicCasterInitialActiveLevels?: number
+  /** Dormant target edge length for inactive dynamic levels. */
+  dynamicCasterDormantMapSize?: number
+  /** Keep the legacy all-bundles-per-level loading warmup. */
+  prewarmAllStaticBundles?: boolean
+  /** Use a single-channel color attachment beside the required shadow depth. */
+  compactShadowColorTarget?: boolean
   /** @deprecated Use `dynamicCasterHalfWidths`. */
   dynamicCasterHalfWidth?: number
   /** @deprecated Use `dynamicCasterMapSizes`. */
@@ -221,6 +237,8 @@ export interface ShadowClipmapSnapshot {
       filterRadius: number
       committed: [number, number, number]
       renderCount: number
+      active: boolean
+      allocatedMapSize: number
     }>
   }
   levels: Array<{
@@ -245,8 +263,65 @@ export interface ShadowClipmapSnapshot {
 
 /** Always sample the comparison texture; select lit outside its XYZ projection. */
 class BoundedShadowNode extends ShadowNode {
-  constructor(light: ClipmapLight, shadow: DirectionalLightShadow) {
+  private readonly compactColorTarget: boolean
+
+  constructor(
+    light: ClipmapLight,
+    shadow: DirectionalLightShadow,
+    compactColorTarget = false,
+  ) {
     super(light as unknown as Light, shadow)
+    this.compactColorTarget = compactColorTarget
+  }
+
+  setupRenderTarget(
+    shadow: DirectionalLightShadow,
+    builder: NodeBuilder,
+  ): { shadowMap: RenderTarget; depthTexture: DepthTexture } {
+    const transmittedShadows = (builder.renderer.shadowMap as { transmitted?: boolean }).transmitted
+    if (!this.compactColorTarget || transmittedShadows === true) {
+      // `setupRenderTarget` exists on ShadowNode at runtime in Three r185, but
+      // it is intentionally omitted from the published ShadowNode type. Call
+      // the original prototype method through a narrow runtime-only type so
+      // the default (including the entire Mac path) remains exactly Three's
+      // stock implementation without making TypeScript depend on an internal
+      // declaration that is not present in the package types.
+      const setupRenderTarget = (ShadowNode.prototype as unknown as {
+        setupRenderTarget(
+          this: ShadowNode,
+          shadow: DirectionalLightShadow,
+          builder: NodeBuilder,
+        ): { shadowMap: RenderTarget; depthTexture: DepthTexture }
+      }).setupRenderTarget
+      return setupRenderTarget.call(this, shadow, builder)
+    }
+
+    // Three's generic shadow target carries an RGBA color attachment even
+    // when transmitted/color shadows are disabled and only the comparison
+    // depth texture is sampled. WebGPU RenderTarget currently requires at
+    // least one color attachment, so use the smallest renderable one on the
+    // Windows/D3D12 path instead of paying four channels per texel.
+    const depthTexture = new DepthTexture(shadow.mapSize.width, shadow.mapSize.height)
+    depthTexture.name = 'ShadowDepthTexture'
+    depthTexture.compareFunction = builder.renderer.reversedDepthBuffer
+      ? GreaterEqualCompare
+      : LessEqualCompare
+    const targetBuilder = builder as NodeBuilder & {
+      createRenderTarget(
+        width: number,
+        height: number,
+        options?: { format?: number; type?: number },
+      ): RenderTarget
+    }
+    const shadowMap = targetBuilder.createRenderTarget(
+      shadow.mapSize.width,
+      shadow.mapSize.height,
+      { format: RedFormat, type: UnsignedByteType },
+    )
+    shadowMap.texture.name = 'ShadowMapCompact'
+    shadowMap.texture.type = shadow.mapType
+    shadowMap.depthTexture = depthTexture
+    return { shadowMap, depthTexture }
   }
 
   setupShadowFilter(_builder: NodeBuilder, args: ShadowFilterArguments): Node<'float'> {
@@ -285,6 +360,10 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   readonly dynamicCasterLayer: number | null
   readonly dynamicCasterHalfWidths: readonly number[]
   readonly dynamicCasterMapSizes: readonly number[]
+  readonly dynamicCasterInitialActiveLevels: number
+  readonly dynamicCasterDormantMapSize: number
+  readonly prewarmAllStaticBundles: boolean
+  readonly compactShadowColorTarget: boolean
   /** Outermost level, retained for snapshot/API compatibility. */
   readonly dynamicCasterHalfWidth: number
   /** Outermost level, retained for snapshot/API compatibility. */
@@ -321,6 +400,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   private budgetAfter = 0
   private directionDelta = 0
   private staticCasterScene: StaticShadowScene | null = null
+  private staticContentRevision = 0
   private staticRefreshes = 0
   private lastStaticRefreshCpuMs = 0
   private maxStaticRefreshCpuMs = 0
@@ -368,6 +448,16 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     }
     this.dynamicCasterHalfWidths = dynamicHalfWidths
     this.dynamicCasterMapSizes = dynamicMapSizes
+    this.dynamicCasterInitialActiveLevels = Math.round(clamp(
+      options.dynamicCasterInitialActiveLevels ?? dynamicHalfWidths.length,
+      0,
+      dynamicHalfWidths.length,
+    ))
+    this.dynamicCasterDormantMapSize = Math.max(16, Math.round(
+      options.dynamicCasterDormantMapSize ?? 64,
+    ))
+    this.prewarmAllStaticBundles = options.prewarmAllStaticBundles ?? true
+    this.compactShadowColorTarget = options.compactShadowColorTarget ?? false
     this.dynamicCasterHalfWidth = dynamicHalfWidths[dynamicHalfWidths.length - 1]
     this.dynamicCasterMapSize = dynamicMapSizes[dynamicMapSizes.length - 1]
     this.distantTerrainCasterLayer = options.distantTerrainCasterLayer ?? null
@@ -410,6 +500,45 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   setStaticCasterScene(scene: StaticShadowScene): void {
     this.staticCasterScene = scene
     if (this.distantTerrainLevel) this.distantTerrainLevel.forceDirty = true
+  }
+
+  /**
+   * Toggle a switchable subset of the frozen caster scene and schedule each
+   * static clipmap to absorb the new contents at its normal refresh budget.
+   */
+  setStaticCasterGroupEnabled(groupId: string, enabled: boolean): boolean {
+    if (!this.staticCasterScene?.setCasterGroupEnabled(groupId, enabled)) return false
+    this.staticContentRevision++
+    return true
+  }
+
+  /** True once every static map has rendered the latest caster-content revision. */
+  isStaticCasterContentCurrent(): boolean {
+    return this.levelStates.length === this.levels
+      && this.levelStates.every((state) => state.contentRevision === this.staticContentRevision)
+  }
+
+  /** True once every static level contains a valid map at the current revision. */
+  isStaticCacheSettled(): boolean {
+    return this.levelStates.length === this.levels
+      && this.levelStates.every((state) => (
+        state.valid
+        && !state.forceDirty
+        && state.contentRevision === this.staticContentRevision
+      ))
+  }
+
+  /** Activate/deactivate a dynamic hierarchy level without recompiling shaders. */
+  setDynamicCasterLevelActive(index: number, active: boolean): void {
+    const level = this.dynamicCasterLevels[index]
+    if (!level || level.active === active) return
+    level.active = active
+    const size = active ? level.mapSize : this.dynamicCasterDormantMapSize
+    level.light.shadow.mapSize.set(size, size)
+    const shadowMap = (level.shadowNode as unknown as InternalShadowNode).shadowMap
+    shadowMap?.setSize(size, size)
+    level.center.set(Number.NaN, Number.NaN, Number.NaN)
+    this.dynamicLevelData[index]?.set(1e9, 1e9, 1, active ? 1 : 0)
   }
 
   /** Zero-allocation live counters for per-frame hitch attribution. */
@@ -499,7 +628,6 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       if (this.dynamicCasterLevels.length > 0) {
         const dynamicAccumulated = vec4(0).toVar()
         const dynamicRemaining = float(1).toVar()
-        const lastDynamicIndex = this.dynamicCasterLevels.length - 1
         for (let index = 0; index < this.dynamicCasterLevels.length; index++) {
           const level = vec4().toVar(`dynamicShadowClipmapLevel${index}`)
           level.assign(dynamicLevelDataArray.element(index))
@@ -507,15 +635,19 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
             abs(lightPosition.x.sub(level.x)),
             abs(lightPosition.y.sub(level.y)),
           )
-          // Inner levels fade completely into their coarser successor before
-          // reaching the projection edge. The outermost level remains the
-          // exact pre-hierarchy broad-map fallback, including outside its
-          // bounded projection where it returns fully lit.
-          const fade = index === lastDynamicIndex
-            ? float(1)
-            : float(1).sub(
-                smoothstep(level.z.mul(1 - this.blendRatio), level.z, distance),
-              )
+          // CPU state encodes the current outermost ACTIVE level with a
+          // negative radius. That lets the 90 m level become the broad
+          // fallback while Starship's 440 m level is dormant, then hand that
+          // role to 440 m at ignition without changing/recompiling the graph.
+          const radius = abs(level.z)
+          const isOutermostActive = level.z.lessThan(0)
+          const spatialFade = isOutermostActive.select(
+            float(1),
+            float(1).sub(
+              smoothstep(radius.mul(1 - this.blendRatio), radius, distance),
+            ),
+          )
+          const fade = spatialFade.mul(level.w)
           const weight = fade.mul(dynamicRemaining)
           const shadowSample = this.dynamicCasterLevels[index]
             .shadowNode as unknown as Node<'float'>
@@ -592,8 +724,11 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     this.lastCameraLight.copy(CAMERA_LIGHT)
     const lightSpeed = Math.hypot(this.velocityLight.x, this.velocityLight.y)
 
-    const warmingAllStaticBundles = this.firstUpdate
-    let budget = this.firstUpdate || directionChanged ? this.levels : this.updateBudget
+    const initialUpdate = this.firstUpdate
+    const warmingAllStaticBundles = initialUpdate && this.prewarmAllStaticBundles
+    let budget = initialUpdate
+      ? (this.prewarmAllStaticBundles ? this.levels : this.updateBudget)
+      : directionChanged ? this.levels : this.updateBudget
     this.budgetBefore = budget
     this.firstUpdate = false
     let finestTexel = 0
@@ -647,6 +782,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       if (moved) dirtyReasons |= DIRTY_MOVED
       if (expired) dirtyReasons |= DIRTY_EXPIRED
       if (directionChanged) dirtyReasons |= DIRTY_DIRECTION
+      if (state.contentRevision !== this.staticContentRevision) dirtyReasons |= DIRTY_CONTENT
       state.dirtyReasons = dirtyReasons
     }
 
@@ -755,6 +891,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         this.maxStaticRefreshCpuMs,
         this.lastStaticRefreshCpuMs,
       )
+      state.contentRevision = this.staticContentRevision
       this.staticRefreshes++
       shadow.needsUpdate = false
     }
@@ -778,8 +915,29 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     }
   }
 
+  /**
+   * Invalidate every static level but let the normal update budget refill
+   * them. Used by the Windows loading path to avoid one giant GPU submission.
+   */
+  invalidateIncremental(): void {
+    for (const state of this.levelStates) {
+      state.valid = false
+      state.forceDirty = false
+      state.dirtyReasons = DIRTY_INVALID
+    }
+  }
+
+
   debugSnapshot(): ShadowClipmapSnapshot {
-    const outerDynamicLevel = this.dynamicCasterLevels[this.dynamicCasterLevels.length - 1]
+    let outerDynamicIndex = -1
+    for (let index = this.dynamicCasterLevels.length - 1; index >= 0; index--) {
+      if (!this.dynamicCasterLevels[index].active) continue
+      outerDynamicIndex = index
+      break
+    }
+    const outerDynamicLevel = outerDynamicIndex >= 0
+      ? this.dynamicCasterLevels[outerDynamicIndex]
+      : undefined
     const distantTerrain = this.distantTerrainLevel
     return {
       textureCount: this.levels + this.dynamicCasterLevels.length + (distantTerrain ? 1 : 0),
@@ -830,9 +988,11 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
             levels: this.dynamicCasterLevels.map((level, index) => ({
               index,
               renderedHalfWidth: level.halfWidth,
-              sampledHalfWidth: index === this.dynamicCasterLevels.length - 1
-                ? level.halfWidth
-                : level.halfWidth * (1 - this.guardBand),
+              sampledHalfWidth: !level.active
+                ? 0
+                : index === outerDynamicIndex
+                  ? level.halfWidth
+                  : level.halfWidth * (1 - this.guardBand),
               mapSize: level.mapSize,
               texelWidth: level.texelWidth,
               depthBias: level.depthBias,
@@ -840,6 +1000,8 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
               filterRadius: level.light.shadow.radius,
               committed: [level.center.x, level.center.y, level.center.z],
               renderCount: level.renderCount,
+              active: level.active,
+              allocatedMapSize: level.light.shadow.mapSize.width,
             })),
           },
       levels: this.levelStates.map((state, index) => ({
@@ -937,9 +1099,14 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         shadow,
       }) as ClipmapLight
       this.lights.push(levelLight)
-      this.shadowNodes.push(new BoundedShadowNode(levelLight, shadow))
+      this.shadowNodes.push(new BoundedShadowNode(
+        levelLight,
+        shadow,
+        this.compactShadowColorTarget,
+      ))
       this.levelData.push(new Vector4(1e9, 1e9, 1e-6, 0))
       this.levelStates.push({
+        contentRevision: -1,
         halfWidth,
         centerX: Number.NaN,
         centerY: Number.NaN,
@@ -968,7 +1135,9 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       const shadow = this.light.shadow.clone()
       const halfWidth = this.dynamicCasterHalfWidths[index]
       const mapSize = this.dynamicCasterMapSizes[index]
-      shadow.mapSize.set(mapSize, mapSize)
+      const active = index < this.dynamicCasterInitialActiveLevels
+      const allocatedMapSize = active ? mapSize : this.dynamicCasterDormantMapSize
+      shadow.mapSize.set(allocatedMapSize, allocatedMapSize)
       shadow.camera.left = -halfWidth
       shadow.camera.right = halfWidth
       shadow.camera.top = halfWidth
@@ -994,22 +1163,30 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       this.dynamicCasterLevels.push({
         halfWidth,
         mapSize,
+        active,
         light,
-        shadowNode: new BoundedShadowNode(light, shadow),
+        shadowNode: new BoundedShadowNode(light, shadow, this.compactShadowColorTarget),
         center: new Vector3(Number.NaN, Number.NaN, Number.NaN),
         texelWidth: 0,
         depthBias: 0,
         normalBias: 0,
         renderCount: 0,
       })
-      this.dynamicLevelData.push(new Vector4(1e9, 1e9, 1e-6, 0))
+      this.dynamicLevelData.push(new Vector4(1e9, 1e9, 1e-6, active ? 1 : 0))
     }
   }
 
   private updateDynamicCasterShadow(frame: NodeFrame): void {
     const staticFinestTexel = Math.max(1e-6, this.levelStates[0].texelWidth)
-    const outermostIndex = this.dynamicCasterLevels.length - 1
-    const fallbackLevel = this.dynamicCasterLevels[outermostIndex]
+    let outermostActiveIndex = -1
+    for (let index = this.dynamicCasterLevels.length - 1; index >= 0; index--) {
+      if (!this.dynamicCasterLevels[index].active) continue
+      outermostActiveIndex = index
+      break
+    }
+    const fallbackLevel = outermostActiveIndex >= 0
+      ? this.dynamicCasterLevels[outermostActiveIndex]
+      : null
     const fallbackTexelWidth = fallbackLevel
       ? (fallbackLevel.halfWidth * 2) / fallbackLevel.mapSize
       : staticFinestTexel
@@ -1022,6 +1199,11 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     )
     for (let index = 0; index < this.dynamicCasterLevels.length; index++) {
       const level = this.dynamicCasterLevels[index]
+      if (!level.active) {
+        level.texelWidth = 0
+        this.dynamicLevelData[index].set(1e9, 1e9, 1, 0)
+        continue
+      }
       const { halfWidth, mapSize, light: levelLight } = level
       const shadowNode = level.shadowNode as unknown as InternalShadowNode
       const shadow = levelLight.shadow
@@ -1035,8 +1217,10 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       this.dynamicLevelData[index].set(
         level.center.x,
         level.center.y,
-        index === outermostIndex ? halfWidth : halfWidth * (1 - this.guardBand),
-        0,
+        index === outermostActiveIndex
+          ? -halfWidth
+          : halfWidth * (1 - this.guardBand),
+        1,
       )
       shadow.bias = this.shadowDepthBias(shadow)
       level.depthBias = shadow.bias
@@ -1106,7 +1290,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       depthBiasWorld: this.distantTerrainShadowDepthBiasWorld,
       normalBias: this.distantTerrainShadowNormalBias,
       light,
-      shadowNode: new BoundedShadowNode(light, shadow),
+      shadowNode: new BoundedShadowNode(light, shadow, this.compactShadowColorTarget),
       texelWidth: (halfWidth * 2) / mapSize,
       depthBias: -this.distantTerrainShadowDepthBiasWorld / depthRange,
       valid: false,

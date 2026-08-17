@@ -35,11 +35,11 @@ Quality-neutral runtime rules established by the sweep:
   omits these grouped `InstancedMesh` variants. It then restores the real
   selection before BOARD. Geometry, thresholds, materials, and runtime draw
   selection are unchanged.
-- Static sun casters are recorded into 32 m spatial render bundles. Every
-  bundle/clipmap-camera pair is recorded during the loading frame; later map
-  refreshes submit only bundles whose conservative world sphere intersects
-  the committed light-space square. Map size, filtering, update cadence,
-  caster set, and shadow coverage remain unchanged.
+- Static sun casters are recorded into 32 m spatial render bundles. Metal
+  eagerly records every bundle/clipmap-camera pair during loading. Windows
+  records only bundles intersecting the staged arrival clipmaps and lazily
+  records later spatial combinations under the normal one-level refresh budget.
+  Map size, filtering, caster set, and shadow coverage remain unchanged.
 - Development `?profile=arrival` records the full arrival without console
   traffic during the shot. It correlates tram/camera position, frame interval,
   render CPU, per-system CPU, draw/triangle counts, static/dynamic shadow
@@ -55,3 +55,39 @@ Quality-neutral runtime rules established by the sweep:
 
 Broad static-transform freezing and render-quality reductions were explicitly
 rejected: their ownership or visual equivalence is not provable park-wide.
+
+
+## Windows WebGPU resource policy (2026-08-17)
+
+The 4,000,000-pixel drawing-buffer budget is a hard cap, not a DPR floor. The
+old final `Math.max(1, dpr)` defeated that budget whenever the CSS viewport was
+itself larger than 4 MP (notably 4K Windows desktops at 100% scaling). Effective
+DPR may now fall below 1 only when required by the existing pixel budget. Normal
+Retina Mac sizing is unchanged. Resize commits logical width, height and DPR in
+one `setDrawingBufferSize()` call, coalesced to one requestAnimationFrame, so a
+large target graph is not reallocated once for DPR and again for size.
+
+Windows/D3D12 keeps exactly the same shadow depth maps, filters, world coverage
+and final samples, but uses an R8 auxiliary shadow colour attachment when Three's
+transmitted-colour-shadow path is disabled. Three r185 still requires a colour
+attachment on the generic shadow RenderTarget even though ordinary PCF samples
+only its comparison depth texture; the one-channel attachment removes the
+otherwise-unused RGBA storage without changing depth precision. Metal retains
+Three's stock shadow RenderTarget path.
+
+Windows loading is submission-bounded: pipeline/scene compilation, warmup poses,
+Optimus LOD warmup and final static-shadow refill are separated by GPU fences and
+a browser-task yield. The final arrival cache is rebuilt one static level per
+submission. Metal retains the established eager warmup. Boot and runtime also
+surface Three's device-lost/uncaptured WebGPU errors through the entry plate; a
+boot-stage tag and viewport/DPR diagnostics replace silent black/frozen failure.
+
+The Starship's 440 m moving-caster target is platform-independent correctness:
+it is inactive while the vehicle is parked. The parked vehicle lives in its own
+switchable frozen-static caster bundles. Windows shrinks the inactive target to
+64²; Metal keeps the original allocation to avoid a new ignition-time resize.
+Ignition (during the 2.6 s hold-down) activates the full 440 m live target
+before the cached copy is retired; after
+touchdown the live target remains until every static clipmap has recaptured the
+parked silhouette. The vehicle therefore keeps its shadow throughout ascent and
+landing while idle memory/work is removed.

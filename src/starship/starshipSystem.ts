@@ -2,13 +2,15 @@ import { Vector3 } from 'three'
 import type { PointLight, SpotLight } from 'three'
 import type { GameContext } from '../runtime/context'
 import type { GameSystem } from '../runtime/system'
-import { markDynamic } from '../render/layers'
+import { markDynamicShadowCasters, restoreDefaultShadowCasters } from '../render/layers'
+import { markSwitchableStaticShadowCasters } from '../render/staticShadowScene'
 import { lightFixtures } from '../world/lightFixtures'
 import { loadStarshipAsset } from './starshipModel'
 import { StarshipFlight } from './starshipFlight'
 import { createStarshipPlume } from './starshipPlume'
 import { createStarshipPadBlast } from './starshipPadBlast'
 import { STARSHIP_SITE } from './starshipSite'
+import { STARSHIP_STATIC_SHADOW_GROUP } from './starshipShadow'
 import type { StarshipAsset } from './starshipModel'
 import type { StarshipPlume } from './starshipPlume'
 import type { StarshipPadBlast } from './starshipPadBlast'
@@ -26,16 +28,16 @@ import type { StarshipPadBlast } from './starshipPadBlast'
  * it back on the exact square metre it left, on three engines, at 1.4 m/s.
  * `starshipFlight.ts` owns the profile; `starshipRig.ts` owns what moves.
  *
- * THE TOWER STILL CASTS THE CACHED SHADOW; THE VEHICLE CANNOT. The static
- * clipmap bundle is recorded once during the loading frame and is immutable
- * afterwards, so a mesh that later moves would leave its shadow welded to the
- * pad for the rest of the session. The eleven vehicle parts therefore go to
- * `DYNAMIC_SHADOW_LAYER`, which excludes them from the bundle — and the
- * dynamic caster maps only reach 90 m around the camera, while the pad is
- * 100–340 m away. So the stack has no sun shadow of its own any more. That is
- * a real loss (the vehicle's shadow on the slab was part of what said it was
- * standing there) and it is the honest trade: the alternative is a permanent
- * ghost of a rocket that left two minutes ago. See the doc for the lever.
+ * THE VEHICLE SHADOW HANDS OFF INSTEAD OF DISAPPEARING. While parked, the
+ * stack is a switchable member of the frozen static shadow world, so the pad
+ * receives the same high-quality cached silhouette as any other immovable
+ * structure. At ignition its live caster meshes move onto the dynamic shadow
+ * layer and SkySystem activates the dedicated 440 m level before retiring the
+ * cached copy. The two paths combine by minimum visibility, so their short
+ * overlap cannot double-darken. After touchdown the reverse handoff completes
+ * before that far live level is released. The vehicle therefore casts a sun
+ * shadow while parked, throughout ascent/flight, and after landing, without a
+ * welded ghost at the launch mount.
  *
  * NO COLLIDERS. The dome wall is the physical boundary (exteriorTerrain.ts) —
  * the player can look at this from the whole southern half of the park and can
@@ -102,6 +104,7 @@ export class StarshipSystem implements GameSystem {
    * cut. This decays over the column's own lifetime instead, so the two agree.
    */
   private blastStrength = 0
+  private removeStaticShadowReadyListener: (() => void) | null = null
 
   async init(ctx: GameContext): Promise<void> {
     const asset = await loadStarshipAsset()
@@ -111,10 +114,17 @@ export class StarshipSystem implements GameSystem {
       mesh.castShadow = true
       mesh.receiveShadow = true
     }
-    // Only the parts that leave the ground come off the cached bundle. The
-    // tower, the carriage, the mount and the slab keep the shadow work the
-    // fifth clipmap rung and the 360 m light margin were added for.
-    markDynamic(asset.rig.flight)
+    // Parked flight hardware starts in the immutable cache, but in its own
+    // switchable BundleGroups so ignition can retire ONLY the vehicle without
+    // rebuilding or hiding the adjacent tower/mount casters.
+    markSwitchableStaticShadowCasters(asset.rig.flight, STARSHIP_STATIC_SHADOW_GROUP)
+    this.removeStaticShadowReadyListener = ctx.events.on('starship/static-shadow-ready', () => {
+      // Sky emits this only after every static clipmap contains the landed
+      // silhouette. Returning the live casters to layer 0 now prevents the
+      // parked vehicle from needlessly entering the 12/90 m dynamic maps.
+      const currentAsset = this.asset
+      if (currentAsset) restoreDefaultShadowCasters(currentAsset.rig.flight)
+    })
 
     ctx.scene.add(asset.group)
 
@@ -158,14 +168,31 @@ export class StarshipSystem implements GameSystem {
     }
   }
 
-  fixedUpdate(_ctx: GameContext, dt: number): void {
+  fixedUpdate(ctx: GameContext, dt: number): void {
     const flight = this.flight
     const asset = this.asset
     if (!flight || !asset) return
 
     const wasBlasting = flight.state.padBlast > 0.002
+    const previousPhase = flight.state.phase
     flight.step(dt)
     const state = flight.state
+
+    if (state.phase !== previousPhase) {
+      if (state.phase === 'ignition') {
+        // Ignition is a 2.6 s hold-down period. Put the live vehicle into the
+        // dynamic caster layer FIRST, then ask SkySystem to activate the 440 m
+        // map and retire its cached twin. The stack is stationary throughout
+        // this handoff, so the two silhouettes coincide until liftoff.
+        markDynamicShadowCasters(asset.rig.flight)
+        ctx.events.emit('starship/dynamic-shadow', { active: true })
+      } else if (state.phase === 'parked') {
+        // The vehicle has reached the exact authored pad transform again. Sky
+        // keeps the live far map until every static level has recaptured this
+        // parked silhouette, then releases that map with no shadowless frame.
+        ctx.events.emit('starship/dynamic-shadow', { active: false })
+      }
+    }
 
     // Restart the particle clock on a fresh ignition rather than letting it run
     // forever: the cloud has to be born at the moment the engines light, and a
@@ -202,6 +229,8 @@ export class StarshipSystem implements GameSystem {
   }
 
   dispose(ctx: GameContext): void {
+    this.removeStaticShadowReadyListener?.()
+    this.removeStaticShadowReadyListener = null
     if (!this.asset) return
     // The rig owns its lights and never removes them (removing one rebuilds
     // every lit program in the park); driving it dark is the supported exit.

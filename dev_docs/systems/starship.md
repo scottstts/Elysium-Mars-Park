@@ -270,9 +270,9 @@ to fix, on the tallest object in the world. This only widens each shadow camera'
 depth slab, and `shadowDepthBias` divides by that slab, so the world-space
 receiver offset is unchanged and nothing else needed retuning.
 
-No colliders — the dome wall is the physical boundary. No `update()`: the frozen
-afternoon extends to the spaceport, so the system costs nothing per frame once
-loaded.
+No colliders — the dome wall is the physical boundary. The launch infrastructure
+stays frozen in the permanent afternoon; only the flight rig, plume/pad blast and
+its explicit shadow handoff update during the authored flight loop.
 
 ---
 
@@ -500,28 +500,36 @@ This is a real constraint, not a formality: at the first tried value (60 m) the
 fins arrived while the arms were 12.5° open and put 0.42 m³ of truss through
 the vehicle.
 
-### 8.5 What the shadow cost
+### 8.5 The shadow is a parked/live handoff, not a permanent far map
 
-**The vehicle can no longer be in the cached static bundle.** That bundle is
-sealed during the loading frame and immutable after, so a mesh that later moves
-leaves its shadow welded to the pad for the session. The eleven vehicle parts
-go to `DYNAMIC_SHADOW_LAYER`.
+The vehicle cannot stay only in an immutable cached bundle once it moves: that
+would leave its old silhouette welded to the pad. But treating it as dynamic
+from boot was also wrong — it kept the dedicated far map allocated and refreshed
+through the 30 s parked dwell even though the stack was motionless.
 
-That creates the second problem: the dynamic caster maps reached 90 m around
-the camera, and the pad is 93–340 m away with a light-space reach of ~298 m at
-27°. Without more, the tower would go on printing its 287 m shadow across the
-regolith while the 147 m rocket beside it printed nothing.
+The eleven vehicle casters now begin in a **switchable frozen-static group**.
+At ignition, while the hold-down still keeps the stack at its exact parked pose,
+the real meshes are placed on `DYNAMIC_SHADOW_LAYER` and the 440 m live rung is
+activated **before** the cached vehicle group is retired. Windows expands it
+from a 64² dormant allocation to the original tier map size; Metal deliberately
+keeps that original allocation while dormant so the stable Mac path adds no
+launch-time texture resize. Static and dynamic visibility combine with
+`min`, so the intentional overlap cannot make the shadow darker. The 2.6 s
+ignition hold gives all five cached levels ample time to remove the parked copy
+before liftoff.
 
-So `skySystem` gained a **third dynamic caster rung at 440 m** — the static
-L4's number, chosen there against the same measured 298 m worst case. Cost is
-one more continuously refreshed map: the stack's 353 k triangles while it is
-low (frustum culling drops it once it climbs out of the box), plus the robots
-and the tram, which were already paying for two. Texel is 0.43 m at tier 0.
-Soft — but a soft 147 m streak on regolith reads as penumbra, and the
-alternative is no streak.
+The 440 m reach is still necessary: the ordinary dynamic caster maps reach 90 m
+around the camera, while the pad is 93–340 m away and the stack's light-space
+reach is ~298 m at 27°. The far map stays fully active throughout ascent, away,
+entry, burn and touchdown. On return, the parked static group is re-enabled and
+the live 440 m map is kept until **every** static clipmap has rendered that new
+content revision; only then is the live target deactivated (and on Windows,
+shrunk back to 64²) and the real vehicle casters return to layer 0. There is no
+shadowless ascent/landing frame,
+no parked ghost, and no parked vehicle left in the near dynamic caster maps.
 
-**This rung is the whole revert if the frame budget says no**, exactly as
-`receiveShadow` on the valley mesh is for §6.
+This removes idle allocation/work without changing the authored 440 m coverage,
+map resolution while flying, filtering or the final shadow image.
 
 ### 8.6 The plume, and where it sits on the ladder
 

@@ -342,9 +342,14 @@ contours around ridges from elevated views. The frozen sun still renders this
 735 k-triangle twin only once during loading, and sharing the buffer adds no
 second geometry allocation. Its runtime path remains one hardware-filtered
 comparison rather than five-tap PCF. The complete sun-shadow graph is therefore
-five cached static clipmaps, three live moving-caster maps, and one immutable
-terrain map (nine textures). Union is still `min(visibility)`, so overlapping
-caster sets never double-darken.
+five cached static clipmaps, two always-live moving-caster maps, one conditional
+440 m Starship map, and one immutable terrain map. The Starship map exists in
+the node graph from boot but is inactive while parked. Windows holds only a 64²
+dormant allocation and expands it at ignition; Metal keeps the original
+tier-sized allocation dormant so its already-stable path gains no new launch
+resize. The map stays live through the whole ascent/flight/landing handoff.
+Union is still `min(visibility)`, so the
+short cached/live overlap during handoff never double-darkens.
 
 Static refresh submission is spatial without changing shadow content. The old
 single render bundle disabled proxy culling and therefore submitted every
@@ -352,10 +357,13 @@ park caster on every recenter; the arrival probe counted 408 static refreshes
 over the 9.5 s ride, with the fine maps reaching the dense portal district at
 the visible hitch. `staticShadowScene.ts` now records immutable 32 m bundles
 (large casters stand alone) and selects them by a conservative world-sphere vs
-committed light-space-square test. All bundles are deliberately enabled on the
-first loading update so every bundle/level pair is recorded before play. The
-test has false positives only: rejecting a bundle that could affect the map is
-not permitted, and no map/filter/texel/caster parameter changed.
+committed light-space-square test. Metal keeps the established eager loading
+warmup that records every bundle/level pair before play. Windows deliberately
+records only the arrival-relevant bundle set during staged loading and lets new
+spatial combinations record lazily under the existing one-level refresh budget;
+this avoids retaining the full bundle×clipmap command-recording matrix on D3D12.
+The spatial test has false positives only: rejecting a bundle that could affect
+the map is not permitted, and no map/filter/texel/caster parameter changed.
 
 **A level's usable reach is `halfWidth · (1 − guardBand) · (1 − blendRatio)`,
 not `halfWidth`** — 0.88 · 0.84 = 0.739 of it. `levelData.z` is the guard-banded

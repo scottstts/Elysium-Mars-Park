@@ -3907,3 +3907,31 @@ knowing generally:
   mesh contains the planter walls, curbs and steps; leaving it shadowless made
   grass appear anchored in light while the surrounding concrete containers read
   flat against the paving.
+
+
+## Windows WebGPU compatibility + Starship shadow handoff (2026-08-17)
+
+- The 4 MP drawing-buffer budget is now actually enforced: never reintroduce a
+  DPR ≥ 1 floor after the pixel-budget calculation. Large CSS viewports may use
+  DPR < 1; ordinary Retina Mac sizing is unaffected. Renderer resizes must
+  commit width/height/DPR once via `setDrawingBufferSize()`.
+- The Starship is static-shadowed while parked and live-shadowed from ignition
+  through landing. Its dedicated 440 m map is inactive while parked; Windows
+  shrinks that dormant allocation to 64², while Metal keeps the established
+  full allocation to avoid introducing a launch-time resize. It activates
+  during the 2.6 s hold-down before liftoff and is released only
+  after all five static clipmaps have recaptured the landed vehicle; the real
+  casters then return to layer 0 so the parked stack also leaves the near
+  dynamic maps. Do not trade memory for a shadowless ascent or a welded pad ghost.
+- Windows keeps the same visual shadow contract but uses R8 auxiliary colour
+  storage for ordinary depth-sampled shadow targets, staged/fenced boot GPU
+  work, and lazy spatial BundleGroup recording. Metal retains the established
+  stock shadow target + eager warmup path.
+- Boot/runtime WebGPU loss, OOM/internal errors and boot-time uncaptured errors
+  must surface through the entry plate with the current boot stage and DPR
+  diagnostics. The initial `boot.ts` game-module import is caught as well, with
+  a DOM-only last resort if even the entry chunk cannot load; do not regress to
+  a silent frozen loading plate/canvas.
+
+### Three r185 internal ShadowNode typing caveat (2026-08-17)
+- `ShadowNode.setupRenderTarget(...)` exists in the r185 runtime implementation but is not declared on the published `ShadowNode` TypeScript type. The compatibility shadow subclass must invoke the stock implementation through a narrowly typed `ShadowNode.prototype.setupRenderTarget.call(...)`; a direct `super.setupRenderTarget(...)` fails `tsc -b` with TS2339. This preserves the stock non-Windows/Mac path without augmenting Three's package types.

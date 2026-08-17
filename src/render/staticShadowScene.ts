@@ -9,8 +9,10 @@ export interface StaticShadowScene {
   bundleCount: number
   readonly visibleBundleCount: number
   readonly visibleCasterCount: number
-  /** Enable every bundle while loading so each level records every GPU bundle. */
+  /** Enable every currently-active bundle while loading. */
   showAllBundles(): void
+  /** Toggle a named switchable caster set without rebuilding proxy geometry. */
+  setCasterGroupEnabled(groupId: string, enabled: boolean): boolean
   /** Conservatively select bundles intersecting one light-space clipmap square. */
   selectBundles(
     centerX: number,
@@ -25,6 +27,8 @@ interface StaticShadowBundle {
   worldBounds: Sphere
   casterCount: number
   boundsBox: Box3
+  casterGroupId: string | null
+  enabled: boolean
 }
 
 /**
@@ -36,6 +40,19 @@ const LARGE_CASTER_RADIUS = SHADOW_BUNDLE_CELL * 0.75
 const BOUNDS_MIN = new Vector3()
 const BOUNDS_MAX = new Vector3()
 const LIGHT_BUNDLE_CENTER = new Vector3()
+const STATIC_SHADOW_CASTER_GROUP = '__staticShadowCasterGroup'
+
+/**
+ * Mark a caster subtree as a switchable member of the frozen shadow world.
+ * The proxy scene gives that subtree dedicated BundleGroups so it can be
+ * removed/reintroduced without rebuilding unrelated district bundles.
+ */
+export function markSwitchableStaticShadowCasters(object: Object3D, groupId: string): void {
+  object.traverse((node) => {
+    const caster = node as Object3D & { castShadow?: boolean }
+    if (caster.castShadow === true) caster.userData[STATIC_SHADOW_CASTER_GROUP] = groupId
+  })
+}
 
 /**
  * Freeze immutable sun-shadow casters into a shadow-only WebGPU render bundle.
@@ -69,11 +86,19 @@ export function createStaticShadowScene(source: Scene): StaticShadowScene {
     if ((mesh.layers.mask & (1 << DYNAMIC_SHADOW_LAYER)) !== 0) return
 
     const worldBounds = casterWorldBounds(mesh)
-    const key = worldBounds.radius >= LARGE_CASTER_RADIUS
+    const casterGroupId = typeof mesh.userData[STATIC_SHADOW_CASTER_GROUP] === 'string'
+      ? mesh.userData[STATIC_SHADOW_CASTER_GROUP] as string
+      : null
+    const spatialKey = worldBounds.radius >= LARGE_CASTER_RADIUS
       ? `large:${mesh.id}`
       : [worldBounds.center.x, worldBounds.center.y, worldBounds.center.z]
           .map((value) => Math.floor(value / SHADOW_BUNDLE_CELL))
           .join(':')
+    // Switchable casters may never share a render bundle with permanent
+    // casters: BundleGroup recordings are immutable until invalidated, so a
+    // visibility handoff (Starship parked -> flying) must be able to exclude
+    // the whole recorded command bundle without touching the tower beside it.
+    const key = casterGroupId ? `switch:${casterGroupId}:${spatialKey}` : spatialKey
     let record = bundlesByCell.get(key)
     if (!record) {
       const group = new BundleGroup()
@@ -83,6 +108,8 @@ export function createStaticShadowScene(source: Scene): StaticShadowScene {
         worldBounds: new Sphere(),
         casterCount: 0,
         boundsBox: new Box3(),
+        casterGroupId,
+        enabled: true,
       }
       bundlesByCell.set(key, record)
       scene.add(group)
@@ -122,9 +149,28 @@ export function createStaticShadowScene(source: Scene): StaticShadowScene {
       return visibleCasterCount
     },
     showAllBundles(): void {
-      for (const bundle of bundles) bundle.group.visible = true
-      visibleBundleCount = bundles.length
-      visibleCasterCount = casterCount
+      let nextBundleCount = 0
+      let nextCasterCount = 0
+      for (const bundle of bundles) {
+        bundle.group.visible = bundle.enabled
+        if (!bundle.enabled) continue
+        nextBundleCount++
+        nextCasterCount += bundle.casterCount
+      }
+      visibleBundleCount = nextBundleCount
+      visibleCasterCount = nextCasterCount
+    },
+    setCasterGroupEnabled(groupId, enabled): boolean {
+      let changed = false
+      for (const bundle of bundles) {
+        if (bundle.casterGroupId !== groupId || bundle.enabled === enabled) continue
+        bundle.enabled = enabled
+        // Disabling is immediate. Enabling waits for the next spatial
+        // selection so an out-of-range bundle is not submitted accidentally.
+        if (!enabled) bundle.group.visible = false
+        changed = true
+      }
+      return changed
     },
     selectBundles(centerX, centerY, halfWidth, worldToLight): void {
       let nextBundleCount = 0
@@ -132,8 +178,8 @@ export function createStaticShadowScene(source: Scene): StaticShadowScene {
       for (const bundle of bundles) {
         LIGHT_BUNDLE_CENTER.copy(bundle.worldBounds.center).applyMatrix4(worldToLight)
         const reach = halfWidth + bundle.worldBounds.radius
-        const visible =
-          Math.abs(LIGHT_BUNDLE_CENTER.x - centerX) <= reach
+        const visible = bundle.enabled
+          && Math.abs(LIGHT_BUNDLE_CENTER.x - centerX) <= reach
           && Math.abs(LIGHT_BUNDLE_CENTER.y - centerY) <= reach
         bundle.group.visible = visible
         if (!visible) continue

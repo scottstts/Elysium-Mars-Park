@@ -1710,6 +1710,7 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
    * pre-warm has even started.
    */
   let peak = -1
+  let hideTimer: number | null = null
 
   const advance = (index: number): void => {
     if (index <= peak) return
@@ -1739,7 +1740,20 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
       pct.textContent = String(Math.round(Math.min(1, Math.max(0, fraction)) * 100))
     },
     showError(title: string, body: string): void {
+      // Device loss can happen after BOARD, when hide() has already begun.
+      // Keep this same screen reusable as the runtime fatal surface instead of
+      // silently leaving the last frame frozen. Reattach it if its fade timer
+      // already removed the DOM/style.
+      if (hideTimer !== null) {
+        window.clearTimeout(hideTimer)
+        hideTimer = null
+      }
+      if (!style.isConnected) document.head.appendChild(style)
+      if (!root.isConnected) parent.appendChild(root)
+      root.classList.remove('hidden', 'done')
       root.classList.add('void')
+      button.disabled = true
+      button.classList.remove('ready')
       const head = root.querySelector('.note-head') as HTMLElement
       const text = root.querySelector('.note-body') as HTMLElement
       head.textContent = title
@@ -1770,7 +1784,9 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
     },
     hide(): void {
       root.classList.add('hidden')
-      window.setTimeout(() => {
+      if (hideTimer !== null) window.clearTimeout(hideTimer)
+      hideTimer = window.setTimeout(() => {
+        hideTimer = null
         root.remove()
         style.remove()
       }, 1200)

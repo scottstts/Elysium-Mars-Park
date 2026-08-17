@@ -76,6 +76,18 @@ export function markDynamicShadowCasters(object: Object3D): void {
 }
 
 /**
+ * Return moving shadow casters to the ordinary layer after a cached-static
+ * handback has completed. The main camera includes layer 0, so rendering is
+ * unchanged; only the moving-caster auxiliary maps stop seeing the object.
+ */
+export function restoreDefaultShadowCasters(object: Object3D): void {
+  object.traverse((node) => {
+    const caster = node as Object3D & { castShadow?: boolean }
+    if (caster.castShadow === true) caster.layers.set(0)
+  })
+}
+
+/**
  * Move an entire moving subtree onto the dynamic layer, casters or not —
  * keeps a vehicle/robot together so static auxiliary passes can't freeze
  * only part of it. The main camera renders this layer, so visibility is

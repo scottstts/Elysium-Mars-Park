@@ -5,6 +5,10 @@ export type GameEvents = {
   'park/entered': { arrival: boolean }
   /** Fired after the first unpaused gameplay frame has been submitted. */
   'render/started': { arrival: boolean }
+  /** Starship parked-cache ↔ live-flight shadow handoff. */
+  'starship/dynamic-shadow': { active: boolean }
+  /** Static clipmaps have safely recaptured the landed Starship. */
+  'starship/static-shadow-ready': Record<string, never>
   /** The Loop reached a station and opened its doors. */
   'tram/docked': { station: string }
 }

@@ -128,6 +128,8 @@ export class RenderPipelineSystem implements GameSystem {
   private pipeline: RenderPipeline | null = null
   private appliedScale = 1
   private basePixelRatio = recommendedPixelRatio()
+  private viewportWidth = Math.max(1, window.innerWidth)
+  private viewportHeight = Math.max(1, window.innerHeight)
   private context: GameContext | null = null
   private gtaoNode: GtaoVisibilityNode | null = null
   private transparentCompositeNode: TransparentCompositeNode | null = null
@@ -161,8 +163,13 @@ export class RenderPipelineSystem implements GameSystem {
     const { renderer, scene, camera, flags } = ctx
     this.context = ctx
     ctx.events.on('render/resized', ({ width, height }) => {
+      // main.ts has already committed the new logical size + DPR in one
+      // setDrawingBufferSize() call. Keep only the policy state here so the
+      // pipeline does not trigger a second full render-target reallocation.
+      this.viewportWidth = width
+      this.viewportHeight = height
       this.basePixelRatio = recommendedPixelRatio(width, height)
-      renderer.setPixelRatio(this.basePixelRatio * ctx.quality.renderScale)
+      this.appliedScale = ctx.quality.renderScale
       this.transparentCompositeNode?.syncSize(renderer)
     })
 
@@ -587,7 +594,11 @@ export class RenderPipelineSystem implements GameSystem {
     const target = ctx.quality.renderScale
     if (Math.abs(target - this.appliedScale) > 0.01) {
       this.appliedScale = target
-      ctx.renderer.setPixelRatio(this.basePixelRatio * target)
+      ctx.renderer.setDrawingBufferSize(
+        this.viewportWidth,
+        this.viewportHeight,
+        this.basePixelRatio * target,
+      )
       this.transparentCompositeNode?.syncSize(ctx.renderer)
     }
   }
