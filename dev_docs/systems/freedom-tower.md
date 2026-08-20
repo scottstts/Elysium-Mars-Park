@@ -109,6 +109,14 @@ system must be the polite one or captions clobber.
   `curtainGlassMaterial` is shared by the Commons drum and hydro tower, so the
   corrected pair is park-wide; `tools/freedom-audit.mjs` gates both Freedom
   glazing materials against this contract.
+- Curved lift glazing is smooth by construction, not merely finely faceted.
+  The cab wall, curved door leaves and stadium-shaped shaft screens all call
+  `smoothShade(..., SMOOTH.turned)` before their glass parts are merged. A
+  flat-shaded loft makes each construction strip a differently lit transparent
+  layer, which appears as vertical bands on the glass and on objects behind
+  it. Planar gallery-wall panes remain intentionally planar. The Freedom audit
+  groups repeated non-indexed corners and rejects a normal spread above 0.01
+  on the cab rear wall and the shaft screen's rear cap.
 
 ## Contracts and consumers
 

@@ -614,7 +614,12 @@ function buildCab(materials: CabMaterials): Group {
         [Math.cos(a) * r, Math.sin(a) * r, z1],
       ])
     }
-    return loft(rings, { closeV: false })
+    const pane = loft(rings, { closeV: false })
+    // A curved sheet needs curved radial normals. Leaving the loft flat-shaded
+    // turns each of its 40 construction facets into a vertical brightness
+    // filter, so even opaque objects behind the glass appear banded.
+    smoothShade(pane, SMOOTH.turned)
+    return pane
   }
   glass.push(glassArc(CAB_GLASS_R, 0.1, CAB_WALL_TOP + 0.02))
 
@@ -902,7 +907,9 @@ function buildDoorLeaf(
       [Math.cos(a) * radius, Math.sin(a) * radius, height - 0.06],
     ])
   }
-  glass.push(loft(rings, { closeV: false }))
+  const pane = loft(rings, { closeV: false })
+  smoothShade(pane, SMOOTH.turned)
+  glass.push(pane)
 
   const group = buildGroup({ alu: cleanMesh(join(alu)) }, materials, {
     name: 'freedom:door-leaf',

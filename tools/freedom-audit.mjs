@@ -126,6 +126,54 @@ console.log(`normals: ${badNormals === 0 ? 'all unit + finite' : `${badNormals} 
 
 // ---- dome clearance ----------------------------------------------------
 const frame = freedomFrame()
+
+/**
+ * Non-indexed archkit output repeats a geometric corner for every triangle.
+ * On a smooth sheet those repeats must carry the same averaged normal; a
+ * flat-shaded loft carries one normal per construction facet instead, which
+ * is the exact vertical-band failure this gate is meant to catch.
+ */
+const coincidentNormalSpread = (root, include = () => true) => {
+  const first = new Map()
+  let compared = 0
+  let maxSpread = 0
+  root?.traverse((node) => {
+    if (!node.isMesh) return
+    const position = node.geometry.getAttribute('position')
+    const normal = node.geometry.getAttribute('normal')
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i)
+      const y = position.getY(i)
+      const z = position.getZ(i)
+      if (!include(x, y, z)) continue
+      const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`
+      const n = [normal.getX(i), normal.getY(i), normal.getZ(i)]
+      const previous = first.get(key)
+      if (!previous) {
+        first.set(key, n)
+        continue
+      }
+      compared++
+      maxSpread = Math.max(
+        maxSpread,
+        Math.hypot(n[0] - previous[0], n[1] - previous[1], n[2] - previous[2]),
+      )
+    }
+  })
+  return { compared, maxSpread }
+}
+
+const shaftScreen = group.getObjectByName('freedom:screen-glass')
+const shaftBackNormals = coincidentNormalSpread(shaftScreen, (x, _y, z) => {
+  const s = (x - frame.cx) * frame.ux + (z - frame.cz) * frame.uz
+  return s < frame.coreS - 0.1
+})
+const shaftBackSmooth = shaftBackNormals.compared > 0 && shaftBackNormals.maxSpread < 0.01
+console.log(
+  `shaft rear glass normals: ${shaftBackSmooth ? 'continuous' : 'FACETED'} (max repeated-corner spread ${shaftBackNormals.maxSpread.toFixed(4)})`,
+)
+if (!shaftBackSmooth) process.exitCode = 1
+
 let maxReach = 0
 let reachAt = null
 group.traverse((node) => {
@@ -293,6 +341,13 @@ const system = new FreedomElevatorSystem({ world: null, api: null }, null, null)
 const fakeScene = new Group()
 system.init({ scene: fakeScene })
 const cabRoot = fakeScene.children[0]
+const cabGlass = cabRoot.getObjectByName('freedom:cab-glass')
+const cabGlassNormals = coincidentNormalSpread(cabGlass)
+const cabGlassSmooth = cabGlassNormals.compared > 0 && cabGlassNormals.maxSpread < 0.01
+console.log(
+  `cab rear glass normals: ${cabGlassSmooth ? 'continuous' : 'FACETED'} (max repeated-corner spread ${cabGlassNormals.maxSpread.toFixed(4)})`,
+)
+if (!cabGlassSmooth) process.exitCode = 1
 let cabTris = 0
 let cabMeshes = 0
 cabRoot.updateMatrixWorld(true)

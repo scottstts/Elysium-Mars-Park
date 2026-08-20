@@ -135,14 +135,29 @@ max apparent ridge elevation along the sun bearing 12.5° (sun sits at 27°).
   lag must be patchy — at uniform full contrast it tiles into cobblestones.
 - Albedo sits at Mars's real ~0.15–0.25 range. The first pass was near 0.45
   and the mountains rendered BRIGHTER than the sky they stand against.
-- **Band filtering is by pixel footprint, not distance**, using the geometric
-  mean of `|dFdx(positionWorld)|` and `|dFdy(positionWorld)|` (the side of a
-  square with the pixel's ground area). Summing them over-filters (grazing
-  floor went smooth); taking the min under-filters (the stretched axis
-  speckles). Fades are spread over a decade because `positionWorld`'s
-  derivative is a per-TRIANGLE constant — a tight fade steps between
-  neighbouring triangles and stipples the surface. Any band with a hard
-  threshold (slope streaks, strata harmonics) needs the weight too.
+- **Band filtering starts from the worst pixel-footprint axis**,
+  `max(|dFdx(positionWorld)|, |dFdy(positionWorld)|)`. The former geometric
+  mean measured pixel area but knowingly under-filtered a grazing flat whose
+  along-view footprint was metres while its cross-view footprint was
+  centimetres. Fades run from 0.15λ to 0.7λ because `positionWorld` derivatives
+  are per-triangle constants; a tight threshold stamps the terrain grid into
+  the image. The 41 m patch field is mean-filtered in albedo as well as bump—
+  it must never bypass its own weight.
+- A footprint gate alone does not stop two still-resolved patterns from
+  beating. On flat ground only, micro grain fades over 70–180 m, gravel over
+  110–280 m and 8.3 m fines over 240–620 m of view distance. Steep mountain
+  faces retain all three bands, subject to their footprint gate, so the range
+  does not regress to smooth origami. This flat-only competence fade removes
+  the terrain-detail half of the crawling pattern seen from the moving lift.
+  Filtered bands converge to a constant mean in albedo, roughness and bump so
+  the fade cannot create a broad brightness/material LOD ring. The 23 m block
+  fracture normal is also gated to cliff/scree like its albedo; it never
+  perturbs the flat apron.
+- The other half is the dome's analytic shadow field: each member-distance
+  line expands its energy-conserving box filter by half the line's screen-space
+  `fwidth` whenever that exceeds the physical solar penumbra. Subpixel rib and
+  ring shadows therefore converge to area coverage instead of moire on the
+  exterior apron during elevator ascent/descent.
 - Aerial perspective is unchanged and NOT duplicated here: the shared
   screen-space medium already hazes the ridges toward the sky's dust colour
   (~50% at 2.5 km), which is what makes the ranges layer.

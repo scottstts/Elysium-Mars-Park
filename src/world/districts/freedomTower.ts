@@ -1914,6 +1914,12 @@ function buildScreen(build: Build, floorZ: number, ground: boolean): void {
       [x, y, headZ - 0.008],
     ])
     const pane = loft(rings, { closeV: false })
+    // The stadium end caps are genuinely curved glazing, not a ring of flat
+    // panels. Flat loft normals made every tessellation strip a differently
+    // lit alpha layer, producing vertical bands over both the pane and the
+    // cab seen through it. Smooth-by-angle leaves the straight runs planar
+    // and preserves any real crease while interpolating the curved caps.
+    smoothShade(pane, SMOOTH.turned)
     build.screenGlass.push(pane)
   }
 

@@ -3967,3 +3967,25 @@ knowing generally:
   the existing full boot-promise error surface. The BOARD entry waiter is also
   released when that error surface replaces its button, allowing the stored GPU
   failure to reject boot instead of leaving the observed promise pending.
+
+## Freedom lift glass + exterior-apron temporal stability (2026-08-20)
+
+- A transparent curved loft left at archkit's default flat shading is a stack
+  of vertical light filters. The tint is low-alpha, but each facet's different
+  direct/specular response still modulates opaque objects behind it. Smooth
+  the cab wall, curved door panes and stadium screen caps; keep actual planar
+  gallery facets flat. `freedom-audit` now compares normals at repeated
+  non-indexed corners so this cannot silently return.
+- Exterior-terrain moire survived the old max-footprint fix for two separate
+  reasons. The 41 m patch field still entered flat albedo unweighted, and
+  resolved metre-scale terrain bands could beat against resolved dome-shadow
+  lines. Mean-filter patch colour; add broad view-distance competence fades
+  to flat micro/gravel/fines only; preserve mountain-slope detail. Blend every
+  retiring band to its statistical mean rather than zero or the fade creates a
+  brightness/roughness LOD ring. Block fracture must share the cliff/scree mask
+  in bump as well as albedo—its old ungated 23 m normal polluted the flat apron.
+- Analytic shadow penumbra is not screen antialiasing. For a periodic line
+  distance in surface metres, use the larger of the physical penumbra and
+  `0.5 * fwidth(distance)` inside the same energy-conserving box-overlap
+  integral. Subpixel members then converge to area coverage during motion
+  instead of blinking or crawling.

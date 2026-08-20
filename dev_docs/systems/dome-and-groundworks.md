@@ -37,7 +37,13 @@
    smoothstep "line" overestimated wildly at large penumbra and produced
    uniform mush. Correct form is the 1-D box-overlap integral
    `clamp((min(d+soft,hw) − max(d−soft,−hw)) / 2soft, 0, 1)`.
-4. **The physics verdict**: with the real 0.35° sun, fine-net shadows wash
+4. The kernel half-width is `max(physicalPenumbra, 0.5·fwidth(d))`. Solar
+   penumbra alone is physically correct in world space but does not band-limit
+   a projected member narrower than a screen pixel; this omission made the
+   exterior apron crawl under vertical Freedom-lift motion. `d` is already a
+   shell-surface distance in metres, so its derivative is the matching pixel
+   filter and the same overlap integral remains energy-conserving.
+5. **The physics verdict**: with the real 0.35° sun, fine-net shadows wash
    out beyond ~30 m from the lattice. The net is CRISP near the rim, reads
    as ~19%-deep soft bands from primary ribs mid-floor, and the crown
    converge casts one substantial blob NE. This is correct and accepted —

@@ -4,6 +4,7 @@ import {
   acos,
   atan,
   clamp,
+  fwidth,
   dot,
   float,
   max,
@@ -169,7 +170,7 @@ const latticeField = (
   const theta = acos(clamp(local.y, -1, 1))
   const phi = atan(local.z, local.x)
   const metersPerPhi = float(DOME_SPHERE_RADIUS).mul(max(theta.sin(), 1e-3))
-  const soft = max(softMeters, 0.02)
+  const physicalSoft = max(softMeters, 0.02)
   const t = clamp(theta.div(DOME_THETA_BASE), 0, 1)
 
   /**
@@ -191,6 +192,15 @@ const latticeField = (
 
   const line = (distance: Node<'float'>, halfWidth: Node<'float'> | number): Node<'float'> => {
     const hw = typeof halfWidth === 'number' ? float(halfWidth) : halfWidth
+    // `softMeters` owns the physical solar penumbra, but it cannot band-limit
+    // a projected line that is narrower than a screen pixel. This matters
+    // most on the exterior apron seen from the moving Freedom lift: the two
+    // periodic member families otherwise beat against the terrain detail and
+    // crawl as moire. `distance` is already in shell-surface metres, so half
+    // its screen-space fwidth is the matching box-filter half-width. Keep the
+    // larger kernel; close receivers retain the real penumbra while distant
+    // lines converge to their area coverage instead of blinking on/off.
+    const soft = max(physicalSoft, fwidth(distance).mul(0.5))
     const overlap = min(distance.add(soft), hw).sub(max(distance.sub(soft), hw.negate()))
     return clamp(overlap.div(soft.mul(2)), 0, 1)
   }

@@ -556,9 +556,23 @@ function createValleyMaterial(): MeshStandardNodeMaterial {
   // leaves 28% at Nyquist, gone entirely by 0.7λ.
   const bandWeight = (wavelength: number): Node<'float'> =>
     oneMinus(smoothstep(wavelength * 0.15, wavelength * 0.7, footprint))
-  const weightMicro = bandWeight(1.55)
-  const weightGravel = bandWeight(3.1)
-  const weightFine = bandWeight(8.3)
+
+  const slope = oneMinus(normalWorld.y.clamp(0, 1))
+  const flatMask = oneMinus(smoothstep(0.06, 0.22, slope))
+  const screeMask = smoothstep(0.1, 0.3, slope).mul(oneMinus(smoothstep(0.38, 0.72, slope)))
+  const cliffMask = smoothstep(0.34, 0.66, slope)
+
+  // Pixel competence is necessary but not sufficient when two resolved
+  // gratings overlap. On the flat apron, metre-scale gravel/grain can still
+  // beat against the dome's analytic rib shadow during a vertical camera
+  // move. Retire only those flat-ground bands over a broad view-distance
+  // envelope; face-on mountain slopes keep their authored detail.
+  const viewDistance = positionView.length()
+  const flatDistanceWeight = (near: number, far: number): Node<'float'> =>
+    mix(float(1), oneMinus(smoothstep(near, far, viewDistance)), flatMask)
+  const weightMicro = bandWeight(1.55).mul(flatDistanceWeight(70, 180))
+  const weightGravel = bandWeight(3.1).mul(flatDistanceWeight(110, 280))
+  const weightFine = bandWeight(8.3).mul(flatDistanceWeight(240, 620))
   const weightBlocks = bandWeight(34)
   const weightPatch = bandWeight(41)
 
@@ -572,11 +586,15 @@ function createValleyMaterial(): MeshStandardNodeMaterial {
   // valley reads as sculpted clay however many Perlin octaves are stacked.
   const gravel = mx_worley_noise_float(worldXZ.mul(1 / 3.1), 1)
   const blocks = mx_worley_noise_float(positionWorld.mul(1 / 23), 1)
-
-  const slope = oneMinus(normalWorld.y.clamp(0, 1))
-  const flatMask = oneMinus(smoothstep(0.06, 0.22, slope))
-  const screeMask = smoothstep(0.1, 0.3, slope).mul(oneMinus(smoothstep(0.38, 0.72, slope)))
-  const cliffMask = smoothstep(0.34, 0.66, slope)
+  // A filtered band converges to its mean rather than disappearing. Patch
+  // colour previously bypassed `weightPatch` entirely on flats, leaving the
+  // 41 m field to crawl at the far end of the apron even after bump retired.
+  const filteredPatch = mix(float(0.5), patch, weightPatch)
+  const filteredFine = mix(float(0.5), fine, weightFine)
+  const filteredMicro = mix(float(0.5), micro, weightMicro)
+  const filteredGravel = mix(float(0.5), gravel, weightGravel)
+  const filteredBlocks = mix(float(0.5), blocks, weightBlocks)
+  const rockExposure = cliffMask.add(screeMask).clamp(0, 1)
 
   // Horizontal strata: phase is world Y so the bands stay level across a
   // whole massif; the phase drifts slowly with position so neighbouring
@@ -618,24 +636,27 @@ function createValleyMaterial(): MeshStandardNodeMaterial {
 
   let color = mix(regolith, dustBright, macro.mul(0.6).add(meso.mul(0.3)).clamp(0, 1))
   // Oxide staining pools on the flats and in the lee of the dunes.
-  color = mix(color, oxide, patch.pow(1.6).mul(0.42).mul(flatMask))
+  color = mix(color, oxide, filteredPatch.pow(1.6).mul(0.42).mul(flatMask))
   // Bedrock with strata on the steep faces.
   color = mix(color, mix(rockDark, rockPale, strata), cliffMask.mul(0.94))
   // Scree: broken rock and fines mixed, mottled at patch scale.
-  color = mix(color, mix(rockDark, regolith, patch.mul(0.7).add(0.15)), screeMask.mul(0.68))
+  color = mix(color, mix(rockDark, regolith, filteredPatch.mul(0.7).add(0.15)), screeMask.mul(0.68))
   // Dark avalanche streaks.
   color = color.mul(mix(float(1), float(0.55), streakMask))
   // Gravel lag on anything not vertical; blocky fracture on bedrock. The lag
   // is PATCHY — a uniform cellular band at full contrast tiles the valley in
   // cobblestones, which is worse than no detail at all.
-  const lagField = weightGravel.mul(oneMinus(cliffMask)).mul(smoothstep(0.3, 0.72, patch).mul(0.75).add(0.25))
-  color = color.mul(mix(float(1), gravel.pow(1.5).mul(0.34).add(0.86), lagField))
-  color = color.mul(
-    mix(float(1), blocks.mul(0.34).add(0.85), weightBlocks.mul(cliffMask.add(screeMask).clamp(0, 1))),
+  const lagField = oneMinus(cliffMask).mul(
+    smoothstep(0.3, 0.72, filteredPatch).mul(0.75).add(0.25),
   )
-  // Grain, only while its footprint is bigger than a pixel.
+  color = color.mul(mix(float(1), filteredGravel.pow(1.5).mul(0.34).add(0.86), lagField))
   color = color.mul(
-    oneMinus(fine.mul(0.19).mul(weightFine)).sub(micro.mul(0.12).mul(weightMicro)),
+    mix(float(1), filteredBlocks.mul(0.34).add(0.85), rockExposure),
+  )
+  // Grain variation retires below competence while its average absorption
+  // remains, preventing a bright LOD band across the apron.
+  color = color.mul(
+    oneMinus(filteredFine.mul(0.19)).sub(filteredMicro.mul(0.12)),
   )
   material.colorNode = color
 
@@ -643,15 +664,18 @@ function createValleyMaterial(): MeshStandardNodeMaterial {
   // way — a normal detail that outlives its albedo would read as plastic.
   const bumpField = meso
     .mul(0.7)
-    .add(patch.mul(0.6).mul(weightPatch))
-    .add(blocks.mul(0.22).mul(weightBlocks))
-    .add(fine.mul(0.52).mul(weightFine))
-    .add(gravel.mul(0.18).mul(lagField))
-    .add(micro.mul(0.22).mul(weightMicro))
+    .add(filteredPatch.mul(0.6))
+    // Block fracture is bedrock identity. It used to perturb flat terrain
+    // even though its albedo was correctly confined to cliff/scree, creating
+    // an unexplained 23 m normal pattern across the exterior apron.
+    .add(filteredBlocks.mul(0.22).mul(rockExposure))
+    .add(filteredFine.mul(0.52))
+    .add(filteredGravel.mul(0.18).mul(lagField))
+    .add(filteredMicro.mul(0.22))
   material.normalNode = proceduralBump(bumpField, float(1.5).add(cliffMask.mul(1.2)))
 
   material.roughnessNode = mix(float(0.955), float(0.845), cliffMask)
-    .sub(fine.mul(0.05).mul(weightFine))
+    .sub(filteredFine.mul(0.05))
     .sub(streakMask.mul(0.04))
   material.metalness = 0
   return material
