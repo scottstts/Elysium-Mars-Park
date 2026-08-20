@@ -24,7 +24,7 @@ import { RobotsSystem } from './robots/robotsSystem'
 import { VegetationSystem } from './vegetation/vegetationSystem'
 import { RenderPipelineSystem } from './render/pipeline'
 import { createRenderer, recommendedPixelRatio, webgpuAvailable } from './render/renderer'
-import { installRendererFailureHandlers } from './render/rendererFailure'
+import type { RendererFailure } from './render/rendererFailure'
 import { SkySystem } from './sky/skySystem'
 import type { GameContext } from './runtime/context'
 import { GameLoop } from './runtime/loop'
@@ -102,15 +102,7 @@ async function boot(): Promise<void> {
 
   entry.setProgress('render-pipeline', 0.05)
   bootStage = 'renderer-init'
-  let renderer
-  try {
-    renderer = await createRenderer(canvas, flags.debug)
-  } catch (error) {
-    showFatalError('WebGPU initialization failed', error)
-    return
-  }
-
-  installRendererFailureHandlers(renderer, (failure) => {
+  const handleRendererFailure = (failure: RendererFailure): void => {
     const detail = `${failure.api} ${failure.type}: ${failure.message}`
     // Any uncaptured GPU error during boot invalidates the warmup result. Once
     // gameplay has started, keep validation diagnostics non-fatal but always
@@ -125,9 +117,17 @@ async function boot(): Promise<void> {
         detail,
       )
     }
-  })
+  }
   const throwIfBootRendererFailed = (): void => {
     if (bootRendererFailure) throw bootRendererFailure
+  }
+  let renderer
+  try {
+    renderer = await createRenderer(canvas, flags.debug, handleRendererFailure)
+    throwIfBootRendererFailed()
+  } catch (error) {
+    showFatalError('WebGPU initialization failed', error)
+    return
   }
 
   const scene = new Scene()
@@ -324,8 +324,9 @@ async function boot(): Promise<void> {
       // region now, never every spatial bundle × every clipmap level at once.
       sky.invalidateShadowLevels(true)
       let passes = 0
+      const passLimit = sky.staticShadowWarmupPassLimit()
       while (!sky.staticShadowWarmupComplete()) {
-        if (passes++ >= 32) throw new Error('static-shadow-warmup-did-not-converge')
+        if (passes++ >= passLimit) throw new Error('static-shadow-warmup-did-not-converge')
         bootStage = `static-shadow-warmup:${passes}`
         pipeline.render()
         await finishWindowsBatch()
@@ -392,7 +393,10 @@ async function boot(): Promise<void> {
   }
 
   bootStage = 'board'
-  if (!validationMode) await entry.showEnter()
+  if (!validationMode) {
+    await entry.showEnter()
+    throwIfBootRendererFailed()
+  }
   entry.hide()
   ctx.events.emit('park/entered', { arrival: !validationMode })
   // Audio is gesture-armed (silently) by park/entered. The render callback

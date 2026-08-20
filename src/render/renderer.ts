@@ -1,5 +1,9 @@
 import { NoToneMapping } from 'three'
 import { WebGPURenderer } from 'three/webgpu'
+import {
+  installRendererFailureHandlers,
+  type RendererFailure,
+} from './rendererFailure'
 
 /** True only when a real WebGPU adapter is obtainable — we never run WebGL. */
 export async function webgpuAvailable(): Promise<boolean> {
@@ -14,6 +18,7 @@ export async function webgpuAvailable(): Promise<boolean> {
 export async function createRenderer(
   canvas: HTMLCanvasElement,
   trackTimestamp = false,
+  onFailure?: (failure: RendererFailure) => void,
 ): Promise<WebGPURenderer> {
   const renderer = new WebGPURenderer({
     canvas,
@@ -23,6 +28,10 @@ export async function createRenderer(
     powerPreference: 'high-performance',
     trackTimestamp,
   })
+  // The backend can report a lost device while init() is still in flight.
+  // Install the application hooks before awaiting it so that narrow window is
+  // covered as well as normal boot/runtime rendering.
+  if (onFailure) installRendererFailureHandlers(renderer, onFailure)
   await renderer.init()
 
   // WebGPURenderer silently falls back to WebGL2 when WebGPU is missing.

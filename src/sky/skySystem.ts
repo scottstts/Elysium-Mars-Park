@@ -88,6 +88,8 @@ const CLIPMAP_LEVELS = 5
  */
 const STATIC_FINE_SHADOW_MAP_SCALE = 2
 const STATIC_FINE_SHADOW_FILTER_RADIUS = 3.2
+/** New BundleGroup/clipmap-camera recordings allowed in one Windows frame. */
+const WINDOWS_STATIC_BUNDLE_WARMUP_BUDGET = 8
 
 /**
  * Receiver offsets in metres at the finest level. The old -0.0003 depth bias
@@ -206,6 +208,7 @@ export class SkySystem implements GameSystem {
       // bundles on demand and uses one-channel auxiliary shadow color targets
       // to avoid hundreds of MiB of color storage that shadow sampling ignores.
       prewarmAllStaticBundles: !windows,
+      staticBundleWarmupBudget: WINDOWS_STATIC_BUNDLE_WARMUP_BUDGET,
       compactShadowColorTarget: windows,
       // Mountains and sun are immutable. A shadow-only mesh sharing the exact
       // visible-terrain geometry renders on an isolated layer once during
@@ -287,6 +290,11 @@ export class SkySystem implements GameSystem {
   /** Loading-only convergence check for staged Windows shadow warmup. */
   staticShadowWarmupComplete(): boolean {
     return this.clipmaps?.isStaticCacheSettled() ?? true
+  }
+
+  /** Conservative guard for the staged loading loop's per-bundle budget. */
+  staticShadowWarmupPassLimit(): number {
+    return this.clipmaps?.staticWarmupPassLimit() ?? 1
   }
 
   /** Read-only state for the opt-in arrival profiler and visual validation. */

@@ -170,6 +170,8 @@ export interface ShadowClipmapOptions {
   dynamicCasterDormantMapSize?: number
   /** Keep the legacy all-bundles-per-level loading warmup. */
   prewarmAllStaticBundles?: boolean
+  /** Maximum new spatial bundle/clipmap recordings submitted in one app frame. */
+  staticBundleWarmupBudget?: number
   /** Use a single-channel color attachment beside the required shadow depth. */
   compactShadowColorTarget?: boolean
   /** @deprecated Use `dynamicCasterHalfWidths`. */
@@ -264,6 +266,7 @@ export interface ShadowClipmapSnapshot {
 /** Always sample the comparison texture; select lit outside its XYZ projection. */
 class BoundedShadowNode extends ShadowNode {
   private readonly compactColorTarget: boolean
+  private preserveShadowContents = false
 
   constructor(
     light: ClipmapLight,
@@ -272,6 +275,44 @@ class BoundedShadowNode extends ShadowNode {
   ) {
     super(light as unknown as Light, shadow)
     this.compactColorTarget = compactColorTarget
+  }
+
+  /**
+   * Record the currently visible BundleGroups for this level without clearing
+   * an already-published map. Newly relevant groups are outside the committed
+   * clipmap square, so drawing them with the committed camera is clipped while
+   * Three still records their camera/render-context-specific bundles.
+   */
+  recordBundleBatch(frame: NodeFrame, preserveShadowContents: boolean): void {
+    const updateShadow = (ShadowNode.prototype as unknown as {
+      updateShadow(this: ShadowNode, frame: NodeFrame): void
+    }).updateShadow
+    this.preserveShadowContents = preserveShadowContents
+    try {
+      updateShadow.call(this, frame)
+    } finally {
+      this.preserveShadowContents = false
+    }
+  }
+
+  /** Runtime override; Three r185 omits this method from the published type. */
+  renderShadow(frame: NodeFrame): void {
+    const renderShadow = (ShadowNode.prototype as unknown as {
+      renderShadow(this: ShadowNode, frame: NodeFrame): void
+    }).renderShadow
+    if (!this.preserveShadowContents) {
+      renderShadow.call(this, frame)
+      return
+    }
+    const renderer = frame.renderer
+    if (!renderer) throw new Error('Shadow bundle recording requires an active renderer')
+    const previousAutoClear = renderer.autoClear
+    renderer.autoClear = false
+    try {
+      renderShadow.call(this, frame)
+    } finally {
+      renderer.autoClear = previousAutoClear
+    }
   }
 
   setupRenderTarget(
@@ -363,6 +404,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
   readonly dynamicCasterInitialActiveLevels: number
   readonly dynamicCasterDormantMapSize: number
   readonly prewarmAllStaticBundles: boolean
+  readonly staticBundleWarmupBudget: number
   readonly compactShadowColorTarget: boolean
   /** Outermost level, retained for snapshot/API compatibility. */
   readonly dynamicCasterHalfWidth: number
@@ -457,6 +499,10 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       options.dynamicCasterDormantMapSize ?? 64,
     ))
     this.prewarmAllStaticBundles = options.prewarmAllStaticBundles ?? true
+    this.staticBundleWarmupBudget = Math.max(
+      1,
+      Math.round(options.staticBundleWarmupBudget ?? 8),
+    )
     this.compactShadowColorTarget = options.compactShadowColorTarget ?? false
     this.dynamicCasterHalfWidth = dynamicHalfWidths[dynamicHalfWidths.length - 1]
     this.dynamicCasterMapSize = dynamicMapSizes[dynamicMapSizes.length - 1]
@@ -526,6 +572,15 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
         && !state.forceDirty
         && state.contentRevision === this.staticContentRevision
       ))
+  }
+
+  /** Conservative loading-loop bound for the lazy Windows recording policy. */
+  staticWarmupPassLimit(): number {
+    const bundleCount = this.staticCasterScene?.bundleCount ?? 0
+    const recordingPasses = Math.ceil(
+      (bundleCount * this.levels) / this.staticBundleWarmupBudget,
+    )
+    return Math.max(this.levels + 1, recordingPasses + this.levels + 1)
   }
 
   /** Activate/deactivate a dynamic hierarchy level without recompiling shaders. */
@@ -729,6 +784,7 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     let budget = initialUpdate
       ? (this.prewarmAllStaticBundles ? this.levels : this.updateBudget)
       : directionChanged ? this.levels : this.updateBudget
+    let bundleRecordsRemaining = this.staticBundleWarmupBudget
     this.budgetBefore = budget
     this.firstUpdate = false
     let finestTexel = 0
@@ -797,6 +853,14 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
       if (state.dirtyReasons === 0) continue
       const dynamic = index < this.dynamicLevels
       if (dynamic || state.forceDirty) {
+        const bundlePreparation = this.prepareStaticBundleLevel(
+          index,
+          frame,
+          bundleRecordsRemaining,
+          directionChanged,
+        )
+        bundleRecordsRemaining -= bundlePreparation.recorded
+        if (!bundlePreparation.ready) continue
         this.renderLevel(index, frame, warmingAllStaticBundles)
         continue
       }
@@ -814,6 +878,14 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     for (const entry of pending) {
       if (budget <= 0) break
       budget--
+      const bundlePreparation = this.prepareStaticBundleLevel(
+        entry.index,
+        frame,
+        bundleRecordsRemaining,
+        directionChanged,
+      )
+      bundleRecordsRemaining -= bundlePreparation.recorded
+      if (!bundlePreparation.ready) continue
       this.renderLevel(entry.index, frame, warmingAllStaticBundles)
     }
 
@@ -833,6 +905,59 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
     this.updateDynamicCasterShadow(dynamicFrame)
     this.budgetAfter = budget
     return undefined
+  }
+
+  /**
+   * Windows/D3D12 lazily records a bounded number of new bundle/level pairs.
+   * A valid committed map remains sampled while the newly relevant bundles are
+   * rendered with auto-clear disabled; conservative spatial selection means
+   * ordinary newly relevant groups lie outside that committed camera. Once all
+   * required pairs exist, the next refresh clears and atomically publishes the
+   * complete map. Metal's eager path never enters this method.
+   */
+  private prepareStaticBundleLevel(
+    index: number,
+    frame: NodeFrame,
+    recordingBudget: number,
+    directionChanged: boolean,
+  ): { ready: boolean; recorded: number } {
+    const staticScene = this.staticCasterScene
+    const state = this.levelStates[index]
+    if (
+      !staticScene
+      || this.prewarmAllStaticBundles
+      // A previously published map cannot be preserved across a real sun
+      // direction change. Mars has a fixed sun; retain the coherent all-at-once
+      // fallback if that contract ever changes.
+      || (directionChanged && state.valid)
+    ) {
+      return { ready: true, recorded: 0 }
+    }
+
+    const batch = staticScene.selectBundleWarmupBatch(
+      index,
+      state.desiredX,
+      state.desiredY,
+      state.halfWidth,
+      this.worldToLight,
+      recordingBudget,
+    )
+    if (batch.selected === 0) {
+      return { ready: batch.remaining === 0, recorded: 0 }
+    }
+
+    const shadowNode = this.shadowNodes[index]
+    const internalShadowNode = shadowNode as unknown as InternalShadowNode
+    if (!internalShadowNode.shadowMap) return { ready: true, recorded: 0 }
+    const staticFrame = Object.assign(Object.create(frame), {
+      scene: staticScene.scene,
+    }) as NodeFrame
+    shadowNode.recordBundleBatch(staticFrame, state.valid)
+    staticScene.markVisibleBundlesRecorded(index)
+    // Even when this batch exhausted the missing set, defer the complete map
+    // refresh until the next frame so recording and the large clear/draw do not
+    // land in the same Windows submission.
+    return { ready: false, recorded: batch.selected }
   }
 
   /** Commit a level's desired center and render its shadow map. */
@@ -883,6 +1008,9 @@ export class CachedShadowClipmapNode extends ShadowBaseNode {
           scene: this.staticCasterScene.scene,
         }) as NodeFrame
         shadowNode.updateShadow(staticFrame)
+        if (!this.prewarmAllStaticBundles) {
+          this.staticCasterScene.markVisibleBundlesRecorded(index)
+        }
       } else {
         shadowNode.updateShadow(frame)
       }

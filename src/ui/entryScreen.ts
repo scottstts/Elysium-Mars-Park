@@ -1711,6 +1711,7 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
    */
   let peak = -1
   let hideTimer: number | null = null
+  let enterResolve: (() => void) | null = null
 
   const advance = (index: number): void => {
     if (index <= peak) return
@@ -1752,6 +1753,11 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
       if (!root.isConnected) parent.appendChild(root)
       root.classList.remove('hidden', 'done')
       root.classList.add('void')
+      // A device/GPU failure may replace BOARD while boot is awaiting the
+      // stamp. Release that waiter so main.ts can observe the stored renderer
+      // failure and terminate its boot promise instead of leaving it pending.
+      enterResolve?.()
+      enterResolve = null
       button.disabled = true
       button.classList.remove('ready')
       const head = root.querySelector('.note-head') as HTMLElement
@@ -1779,7 +1785,11 @@ export function createEntryScreen(parent: HTMLElement): EntryScreen {
       button.classList.add('ready')
       button.focus({ preventScroll: true })
       return new Promise((resolve) => {
-        button.addEventListener('click', () => resolve(), { once: true })
+        enterResolve = () => resolve()
+        button.addEventListener('click', () => {
+          enterResolve = null
+          resolve()
+        }, { once: true })
       })
     },
     hide(): void {

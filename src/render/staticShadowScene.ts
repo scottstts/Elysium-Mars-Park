@@ -20,6 +20,21 @@ export interface StaticShadowScene {
     halfWidth: number,
     worldToLight: Matrix4,
   ): void
+  /**
+   * Select at most `limit` relevant bundle/clipmap pairs that have never been
+   * recorded for this level. The caller records this batch without replacing
+   * the currently published shadow map, then marks it complete below.
+   */
+  selectBundleWarmupBatch(
+    levelIndex: number,
+    centerX: number,
+    centerY: number,
+    halfWidth: number,
+    worldToLight: Matrix4,
+    limit: number,
+  ): { selected: number; remaining: number }
+  /** Mark the currently visible bundle groups as recorded for one clipmap camera. */
+  markVisibleBundlesRecorded(levelIndex: number): void
 }
 
 interface StaticShadowBundle {
@@ -29,6 +44,8 @@ interface StaticShadowBundle {
   boundsBox: Box3
   casterGroupId: string | null
   enabled: boolean
+  /** Allocated only by the Windows lazy-recording path. */
+  recordedLevels?: Set<number>
 }
 
 /**
@@ -189,7 +206,58 @@ export function createStaticShadowScene(source: Scene): StaticShadowScene {
       visibleBundleCount = nextBundleCount
       visibleCasterCount = nextCasterCount
     },
+    selectBundleWarmupBatch(
+      levelIndex,
+      centerX,
+      centerY,
+      halfWidth,
+      worldToLight,
+      limit,
+    ): { selected: number; remaining: number } {
+      const missing: StaticShadowBundle[] = []
+      for (const bundle of bundles) {
+        if (
+          bundle.enabled
+          && !bundle.recordedLevels?.has(levelIndex)
+          && bundleIntersects(bundle, centerX, centerY, halfWidth, worldToLight)
+        ) {
+          missing.push(bundle)
+        }
+        bundle.group.visible = false
+      }
+
+      const selected = Math.min(Math.max(0, Math.floor(limit)), missing.length)
+      let selectedCasters = 0
+      for (let index = 0; index < selected; index++) {
+        const bundle = missing[index]
+        bundle.group.visible = true
+        selectedCasters += bundle.casterCount
+      }
+      visibleBundleCount = selected
+      visibleCasterCount = selectedCasters
+      return { selected, remaining: missing.length - selected }
+    },
+    markVisibleBundlesRecorded(levelIndex): void {
+      for (const bundle of bundles) {
+        if (!bundle.enabled || !bundle.group.visible) continue
+        bundle.recordedLevels ??= new Set<number>()
+        bundle.recordedLevels.add(levelIndex)
+      }
+    },
   }
+}
+
+function bundleIntersects(
+  bundle: StaticShadowBundle,
+  centerX: number,
+  centerY: number,
+  halfWidth: number,
+  worldToLight: Matrix4,
+): boolean {
+  LIGHT_BUNDLE_CENTER.copy(bundle.worldBounds.center).applyMatrix4(worldToLight)
+  const reach = halfWidth + bundle.worldBounds.radius
+  return Math.abs(LIGHT_BUNDLE_CENTER.x - centerX) <= reach
+    && Math.abs(LIGHT_BUNDLE_CENTER.y - centerY) <= reach
 }
 
 /** World-space conservative sphere, including instance transforms. */

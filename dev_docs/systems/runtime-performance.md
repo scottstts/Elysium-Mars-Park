@@ -38,8 +38,12 @@ Quality-neutral runtime rules established by the sweep:
 - Static sun casters are recorded into 32 m spatial render bundles. Metal
   eagerly records every bundle/clipmap-camera pair during loading. Windows
   records only bundles intersecting the staged arrival clipmaps and lazily
-  records later spatial combinations under the normal one-level refresh budget.
-  Map size, filtering, caster set, and shadow coverage remain unchanged.
+  records later spatial combinations under both the normal one-level refresh
+  budget and a hard ceiling of eight new bundle/clipmap pairs per app frame.
+  Newly required pairs are recorded without clearing a valid committed map;
+  the complete level refresh is deferred until every required pair is ready,
+  then cleared and published atomically. Map size, filtering, caster set, and
+  shadow coverage remain unchanged.
 - Development `?profile=arrival` records the full arrival without console
   traffic during the shot. It correlates tram/camera position, frame interval,
   render CPU, per-system CPU, draw/triangle counts, static/dynamic shadow

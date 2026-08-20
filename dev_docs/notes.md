@@ -3951,3 +3951,19 @@ knowing generally:
 
 ### Dome glass carries zero line pattern (2026-08-17)
 - Removing only the secondary pane grid was not sufficient: narrow glass-plane seals beneath the real ribs/rings could still become visible at grazing angles because the glass and structural geometry are on different surfaces. The glass shell must draw no lattice/seam field at all. All visible subdivision is real `domeGeometry` structure; `latticeField` remains only for structural shadow/shaft coverage.
+
+## Windows bundle-recording ceiling + init failure coverage (2026-08-20)
+
+- Windows lazy static-shadow warming is bounded by bundle/clipmap pairs, not
+  merely by levels: at most eight new pairs record in one app frame. A valid
+  committed map is preserved while new spatial groups record against that
+  level's existing camera/target context, and the full clear/render/publish is
+  deferred to a later frame. Invalid loading maps may be cleared freely because
+  their parked shader bounds cannot select them. Metal stays on the unchanged
+  eager all-bundles path.
+- Renderer loss/error callbacks are installed immediately after constructing
+  `WebGPURenderer`, before `renderer.init()` is awaited. This closes the narrow
+  initialization-time event gap while preserving Three's default callbacks and
+  the existing full boot-promise error surface. The BOARD entry waiter is also
+  released when that error surface replaces its button, allowing the stored GPU
+  failure to reject boot instead of leaving the observed promise pending.
